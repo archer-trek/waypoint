@@ -20,6 +20,18 @@ _Avoid_: Session, 会话, Room, Chat, Thread, conversation
 Owner 为一条 Topic 写下的可选上下文，给这条 Topic 所绑定的 Agent 看，不是私密备忘。留空表示没有额外上下文。
 _Avoid_: topic, note, 备注, prompt, subtitle
 
+**已读位置**:
+Owner 在一条 Topic 里读到的那条消息。一条 Topic 一份。不是滚动位置，也不是列表上的未读提示。Owner 的各台设备看到同一份。
+_Avoid_: 未读角标, 滚动位置, receipt, fully read
+
+**未读**:
+一条 Topic 的列表状态：已读位置之后还有要渲染的新消息。不是条数，也不是服务器的通知计数。
+_Avoid_: 未读数, notification, 红点
+
+**草稿**:
+一条 Topic 里还没发出的输入，包括文字和已选未发的附件。只留在写下它的那台设备上。换一台设备不会出现。
+_Avoid_: 队列, 缓存, 未发送消息
+
 **正在回应**:
 Agent 在一条 Topic 里用 👀 标出的处理中状态。这个标记还在，状态就在。
 _Avoid_: typing, 思考中, 生成中, streaming
