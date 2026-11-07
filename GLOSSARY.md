@@ -19,3 +19,11 @@ _Avoid_: Session, 会话, Room, Chat, Thread, conversation
 **Description**:
 Owner 为一条 Topic 写下的可选上下文，给这条 Topic 所绑定的 Agent 看，不是私密备忘。留空表示没有额外上下文。
 _Avoid_: topic, note, 备注, prompt, subtitle
+
+**正在回应**:
+Agent 在一条 Topic 里用 👀 标出的处理中状态。这个标记还在，状态就在。
+_Avoid_: typing, 思考中, 生成中, streaming
+
+**Session**:
+Hermes 当前用于一条 Topic 的那段交流记录，中文称为会话。换一段不会换 Topic，也不会换掉该 Agent 的人设、记忆、工具或工作目录。
+_Avoid_: 转录, transcript, history, chat
