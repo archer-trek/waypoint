@@ -9,5 +9,5 @@
 ## Consequences
 
 - 上层不自己拿 token 去请求 Homeserver。
-- access token 和 `since` 由这层持有。落在哪里不在本决定里。
-- 断网重试策略仍未指定。这层只保证能停、能用已有的 `since` 再拉。
+- access token 和同步游标由这层持有，落在 WebView 的 IndexedDB。见 ADR-0010。
+- 断线用已有的同步游标再拉。重试队列的规则不在本决定里。
