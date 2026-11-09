@@ -28,6 +28,10 @@ _Avoid_: Session, 会话, Room, Chat, Thread, conversation
 Owner 为一条 Topic 写下的可选上下文，给这条 Topic 所绑定的 Agent 看，不是私密备忘。留空表示没有额外上下文。
 _Avoid_: topic, note, 备注, prompt, subtitle
 
+**不可用**:
+一条 Topic 的异常状态：房间多于两人、被加密、Agent 被 ban、邀请失败、标记版本异常或绑定不合法。可以改名、改 Description、置顶和删除，不能发消息和换绑。
+_Avoid_: 异常, 错误房间, 禁用, locked
+
 **已读位置**:
 Owner 在一条 Topic 里读到的那条消息。一条 Topic 一份。不是滚动位置，也不是列表上的未读提示。Owner 的各台设备看到同一份。
 _Avoid_: 未读角标, 滚动位置, receipt, fully read
