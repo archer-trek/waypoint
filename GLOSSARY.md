@@ -9,11 +9,11 @@
 _Avoid_: Member, participant, admin, customer
 
 **Agent**:
-与 Owner 一对一交互的单个 AI 助理个体。一个人设、一套记忆、一套工具与一个工作目录都属于这一个 Agent；在 Matrix 上它是一个独立用户，背后是一个 Hermes Profile 或一套独立部署。Owner 登记之后它才进入 Waypoint；名下没有 Topic 时也还在。
-_Avoid_: Bot, contact, friend, peer, instance
+与 Owner 一对一交互的单个 AI 助理个体。一个人设、一套记忆、一套工具与一个工作目录都属于这一个 Agent；在 Matrix 上它是一个独立用户，背后是一个 Hermes Profile 或一套独立部署。面向 Owner 的界面文案称 Bot。Owner 登记之后它才进入 Waypoint；名下没有 Topic 时也还在。
+_Avoid_: contact, friend, peer, instance
 
 **名册**:
-Owner 登记过的 Agent。空的时候不能新建 Topic。不是通讯录。
+Owner 登记过的 Agent（面向 Owner 的界面文案称 Bot 名册）。空的时候不能新建 Topic。不是通讯录。
 _Avoid_: 通讯录, contact list, roster
 
 **已连接**:
