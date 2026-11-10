@@ -1,6 +1,6 @@
-# Topic 是主导航，Agent 是诞生时的绑定
+# Topic 是主导航，Agent 在新建 Topic 时绑定
 
-Waypoint 的日常入口是 Topic 列表，不是 Agent 通讯录。多个 Agent 仍在领域模型里：人设、记忆、工具和工作目录只能靠不同的 Hermes Profile（不同 Matrix 用户）隔开，同一个用户下多开房间做不到。Agent 在 Topic 诞生时绑定，之后不能换；只配置了一个 Agent 时不出现选择。打到同一个 Agent 的 Topic 共享该 Agent 的身份与记忆，只隔开各自的交流记录。
+Waypoint 的日常入口是 Topic 列表，不是 Agent 通讯录。多个 Agent 仍在领域模型里：人设、记忆、工具和工作目录只能靠不同的 Hermes Profile（不同 Matrix 用户）隔开，同一个用户下多开房间做不到。Agent 在新建 Topic 时绑定，之后不能换；只配置了一个 Agent 时不出现选择。打到同一个 Agent 的 Topic 共享该 Agent 的身份与记忆，只隔开各自的交流记录。
 
 ## Considered Options
 

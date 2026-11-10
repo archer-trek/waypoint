@@ -1,6 +1,6 @@
 # Matrix 层是薄 Client-Server 客户端
 
-V1 不引入 `matrix-rust-sdk`、`matrix-js-sdk` 或 Dart `matrix`。通信层只覆盖非加密 Personal Agent 要用的 Client-Server 端点，对上层交出原始事件。它不认识 Topic，不渲染时间线，不实现 E2EE。
+V1 不引入 `matrix-rust-sdk`、`matrix-js-sdk` 或 Dart `matrix`。通信层只覆盖非加密 Personal Agent 要用的 Client-Server 端点。上层拿到的是原始事件。它不认识 Topic，不渲染时间线，不实现 E2EE。
 
 ## Considered Options
 

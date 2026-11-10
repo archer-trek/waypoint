@@ -1,6 +1,6 @@
 # Waypoint
 
-面向单人使用的一对一 Personal Agent 专属客户端（以 Matrix 为底层传输协议接入一个或多个 Hermes 实例或 Profile，屏蔽多用户社交、群聊与空间管理心智）。
+面向单人使用的一对一 Personal Agent 专属客户端。Owner 通过 Matrix 与一个或多个 Agent 一对一交流，不提供多人社交、群聊或空间管理。
 
 ## Language
 
@@ -13,15 +13,15 @@ _Avoid_: Member, participant, admin, customer
 _Avoid_: contact, friend, peer, instance
 
 **名册**:
-Owner 登记过的 Agent（面向 Owner 的界面文案称 Bot 名册）。空的时候不能新建 Topic。不是通讯录。
+Owner 登记过的 Agent（面向 Owner 的界面文案称 Bot 名册）。空的时候不能新建 Topic。不是通讯录，也不是设备列表。
 _Avoid_: 通讯录, contact list, roster
 
 **已连接**:
-这台设备已经进入过 Topic 列表。还停在同步或登记，不是已连接。
+这台设备已经进入 Topic 列表，并且还没退出。还停在同步或登记，不是已连接。
 _Avoid_: 在线, online, 已登录
 
 **Topic**:
-Owner 与唯一一个 Agent 之间的一次有界交流。Owner 在它诞生时写下名字；绑定的 Agent 也在诞生时确定，之后不变。同一 Agent 下的多个 Topic 只隔开各自的交流记录，不隔开该 Agent 的人设、记忆、工具或工作目录。
+Owner 与唯一一个 Agent 之间的一次有界交流。Owner 在新建它时写下名字；绑定的 Agent 也在新建时确定，之后不变。同一 Agent 下的多个 Topic 只隔开各自的交流记录，不隔开该 Agent 的人设、记忆、工具或工作目录。
 _Avoid_: Session, 会话, Room, Chat, Thread, conversation
 
 **Description**:
@@ -29,7 +29,7 @@ Owner 为一条 Topic 写下的可选上下文，给这条 Topic 所绑定的 Ag
 _Avoid_: topic, note, 备注, prompt, subtitle
 
 **不可用**:
-一条 Topic 的异常状态：房间多于两人、被加密、Agent 被 ban、邀请失败、标记版本异常或绑定不合法。可以改名、改 Description、置顶和删除，不能发消息和换绑。
+一条 Topic 还在列表里，但不能发消息，也不能换绑定的 Agent。可以改名、改 Description、置顶和删除。
 _Avoid_: 异常, 错误房间, 禁用, locked
 
 **已读位置**:
@@ -49,23 +49,23 @@ _Avoid_: 队列, 缓存, 未发送消息
 _Avoid_: since, next_batch, 检查点, checkpoint
 
 **本地时间线**:
-这台设备上一条 Topic 已存下的房间事件，包括未确认的交出，以及还没丢掉的失败。只在这台设备上。不是会话。
+这台设备上一条 Topic 已经存下的内容，包括未确认的消息，以及还没丢掉的失败。只在这台设备上。不是会话。
 _Avoid_: 历史, 缓存, transcript, 消息记录
 
 **未确认**:
-这台设备上一条已经交出、Homeserver 还没确认的消息。不是草稿。上传、退避和暂停都不另算一种。
+这台设备上一条已经写在本地、Homeserver 还没确认的消息。不是草稿。
 _Avoid_: 发送中, 上传中, 重试中, pending
 
 **失败**:
-这台设备上一条被永久拒绝、还没丢掉的交出。不是 Hermes 标在消息上的 ❌，也不是未读。
+这台设备上一条已经被 Homeserver 永久拒绝、还没丢掉的消息。不是 Hermes 标在消息上的 ❌，也不是未读。新建 Topic、改名、改 Description、置顶、名册或删除没成功，不是失败。
 _Avoid_: 错误, error, 发送失败
 
 **重试队列**:
-这台设备上已经交出、还没被确认的工作。不是草稿。
+这台设备上的未确认消息，替 Owner 发出的 reaction，以及更靠前的已读位置。不是草稿。新建 Topic、改名、改 Description、置顶和名册不在里面。
 _Avoid_: 乐观队列, outbox, 未发送消息, 缓存
 
 **正在回应**:
-Agent 在一条 Topic 里用 👀 标出的处理中状态。这个标记还在，状态就在。
+Agent 在一条 Topic 里用 👀 标出的处理中状态。👀 还在，状态就在。
 _Avoid_: typing, 思考中, 生成中, streaming
 
 **Session**:

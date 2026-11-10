@@ -6,7 +6,7 @@ Waypoint 渲染一条 Topic 里的文字时只读 `body`。若是 `m.replace`，
 
 - 渲染 `formatted_body`。否决：消息不能在带 Tauri 命令的 WebView 里当 HTML 执行。公式是消毒之后才插回去的 `data-mx-maths`，编辑回退还会把 `* ` 直接拼在 HTML 前面。
 - 把 `formatted_body` 当 body 缺失时的回退。否决：Hermes 总会写 body。回退会留下第二条渲染路径。
-- 按时间把同一个 Agent 的连续文字粘成一条气泡。否决：协议没有续片关系。粘连会把两条真正的回复，或进度行和回答，合成一条。
+- 按时间把同一个 Agent 的连续文字粘成一条气泡。否决：协议没有续片关系。粘连会把两条普通消息合成一条，包括 Hermes 的进度文字和随后的回答。
 
 ## Consequences
 

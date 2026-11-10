@@ -1,6 +1,6 @@
 # Matrix 客户端放在共用的 TypeScript 里
 
-薄 Client-Server 客户端是共用 React 界面的一部分，不是 Rust 命令。只有它跟 Homeserver 说话。它向上交出原始事件，不认识 Topic，不把 `m.replace` 收成气泡。Rust 只保留剪贴板、拖文件、软键盘 inset 这类系统能力。
+薄 Client-Server 客户端是共用 React 界面的一部分，不是 Rust 命令。只有它跟 Homeserver 说话。上层拿到的是原始事件。它不认识 Topic，不把 `m.replace` 收成气泡。Rust 只保留剪贴板、拖文件、软键盘 inset 这类系统能力。
 
 ## Considered Options
 
