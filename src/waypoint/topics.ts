@@ -20,6 +20,9 @@ export type TopicSummary = {
   agentUserId?: string;
   botDisplayName?: string;
   lastActivityTs?: number;
+  unread: boolean;
+  firstUnreadEventId?: string;
+  readPositionUnknown: boolean;
 };
 
 export type CreateTopicResult =
@@ -370,6 +373,7 @@ export function deriveTopics(
         ])
       : undefined;
     const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
+    const unreadState = deriveTopicUnreadState(room, agentUserId);
 
     topics.push({
       roomId,
@@ -378,6 +382,9 @@ export function deriveTopics(
       agentUserId,
       botDisplayName,
       lastActivityTs,
+      unread: unreadState.unread,
+      firstUnreadEventId: unreadState.firstUnreadEventId,
+      readPositionUnknown: unreadState.readPositionUnknown,
     });
   }
 
@@ -767,6 +774,7 @@ export type TimelineItem =
   | {
       kind: "message";
       key: string;
+      eventId?: string;
       side: "left" | "right";
       body: string;
       confirmed: boolean;
@@ -778,11 +786,13 @@ function stripStreamingCursor(body: string): string {
 
 function collectLatestEdits(
   events: RawMatrixEvent[],
+  redactedIds: Set<string>,
 ): Map<string, { body: string; ts: number | undefined }> {
   const targets = new Map<string, { sender: string; msgtype: unknown }>();
   for (const event of events) {
     if (
       typeof event.state_key === "string" ||
+      isRedactedEvent(event, redactedIds) ||
       !isActivityMessageEvent(event) ||
       typeof event.event_id !== "string" ||
       event.event_id === "" ||
@@ -801,6 +811,7 @@ function collectLatestEdits(
   for (const event of events) {
     if (
       typeof event.state_key === "string" ||
+      isRedactedEvent(event, redactedIds) ||
       event.type !== "m.room.message" ||
       typeof event.sender !== "string" ||
       !isRecord(event.content)
@@ -858,9 +869,14 @@ export function deriveRoomTimelineItems(
   let lastDayKey: string | undefined;
 
   if (room) {
-    const latestEdits = collectLatestEdits(room.timelineEvents);
+    const redactedIds = collectRedactedEventIds(room.timelineEvents);
+    const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
     room.timelineEvents.forEach((event, index) => {
-      if (typeof event.state_key === "string" || !isActivityMessageEvent(event)) {
+      if (
+        typeof event.state_key === "string" ||
+        isRedactedEvent(event, redactedIds) ||
+        !isActivityMessageEvent(event)
+      ) {
         return;
       }
       const sender = typeof event.sender === "string" ? event.sender : undefined;
@@ -906,6 +922,7 @@ export function deriveRoomTimelineItems(
       items.push({
         kind: "message",
         key: eventId,
+        eventId: typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined,
         side,
         body,
         confirmed: true,
@@ -954,4 +971,215 @@ function formatDaySeparator(ts: number, nowMs: number): string {
     month: "numeric",
     day: "numeric",
   }).format(new Date(ts));
+}
+
+export function collectRedactedEventIds(events: RawMatrixEvent[]): Set<string> {
+  const redactedIds = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "m.room.redaction") {
+      continue;
+    }
+    const target =
+      typeof event.redacts === "string" && event.redacts !== ""
+        ? event.redacts
+        : isRecord(event.content) &&
+            typeof event.content.redacts === "string" &&
+            event.content.redacts !== ""
+          ? event.content.redacts
+          : undefined;
+    if (target) {
+      redactedIds.add(target);
+    }
+  }
+  return redactedIds;
+}
+
+export function isRedactedEvent(event: RawMatrixEvent, redactedIds: Set<string>): boolean {
+  if (typeof event.event_id === "string" && redactedIds.has(event.event_id)) {
+    return true;
+  }
+  if (isRecord(event.unsigned) && isRecord(event.unsigned.redacted_because)) {
+    return true;
+  }
+  return false;
+}
+
+function isRenderableTextBubbleEvent(
+  event: RawMatrixEvent,
+  redactedIds: Set<string>,
+  latestEdits: Map<string, { body: string; ts: number | undefined }>,
+  agentUserId: string | undefined,
+): boolean {
+  if (
+    typeof event.state_key === "string" ||
+    isRedactedEvent(event, redactedIds) ||
+    !isActivityMessageEvent(event)
+  ) {
+    return false;
+  }
+  if (
+    !isRecord(event.content) ||
+    event.content.msgtype !== "m.text" ||
+    typeof event.content.body !== "string"
+  ) {
+    return false;
+  }
+  const rawEventId =
+    typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+  const edit = rawEventId ? latestEdits.get(rawEventId) : undefined;
+  const rawBody = edit ? edit.body : event.content.body;
+  const isAgentSide = Boolean(agentUserId) && event.sender === agentUserId;
+  const body = edit || isAgentSide ? stripStreamingCursor(rawBody) : rawBody;
+  return body.trim() !== "";
+}
+
+function deriveTopicUnreadState(
+  room: StoredRoomEvents,
+  agentUserId: string | undefined,
+): { unread: boolean; firstUnreadEventId?: string; readPositionUnknown: boolean } {
+  const readPos = room.readPositionEventId;
+  let startIndex = -1;
+  if (readPos !== undefined) {
+    startIndex = room.timelineEvents.findIndex((event) => event.event_id === readPos);
+    if (startIndex === -1) {
+      return { unread: false, readPositionUnknown: true };
+    }
+  }
+  if (!agentUserId) {
+    return { unread: false, readPositionUnknown: false };
+  }
+  const redactedIds = collectRedactedEventIds(room.timelineEvents);
+  const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
+  for (let i = startIndex + 1; i < room.timelineEvents.length; i += 1) {
+    const event = room.timelineEvents[i];
+    if (event.sender !== agentUserId) {
+      continue;
+    }
+    if (!isRenderableTextBubbleEvent(event, redactedIds, latestEdits, agentUserId)) {
+      continue;
+    }
+    const eventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+    return {
+      unread: true,
+      firstUnreadEventId: eventId,
+      readPositionUnknown: false,
+    };
+  }
+  return { unread: false, readPositionUnknown: false };
+}
+
+export type BubbleVisibility = "above" | "visible" | "below";
+
+export function computeTargetReadPosition(
+  room: StoredRoomEvents | undefined,
+  ownerUserId: string,
+  agentUserId: string | undefined,
+  visibilityByEventId: Map<string, BubbleVisibility>,
+): string | undefined {
+  if (!room || room.timelineEvents.length === 0) {
+    return undefined;
+  }
+  const events = room.timelineEvents;
+  let startIndex = -1;
+  if (room.readPositionEventId !== undefined) {
+    startIndex = events.findIndex((event) => event.event_id === room.readPositionEventId);
+    if (startIndex === -1) {
+      return undefined;
+    }
+  }
+
+  const redactedIds = collectRedactedEventIds(events);
+  const latestEdits = collectLatestEdits(events, redactedIds);
+  let limitIndex = events.length - 1;
+
+  if (room.timelineGap?.limited) {
+    if (room.timelineGap.gapBeforeEventId) {
+      const gapIdx = events.findIndex(
+        (event) => event.event_id === room.timelineGap?.gapBeforeEventId,
+      );
+      if (gapIdx > startIndex && !(startIndex === -1 && gapIdx === 0)) {
+        limitIndex = Math.min(limitIndex, gapIdx - 1);
+      }
+    }
+  }
+
+  for (let i = startIndex + 1; i <= limitIndex; i += 1) {
+    const event = events[i];
+    if (!isRenderableParticipantBubble(event, ownerUserId, agentUserId, redactedIds, latestEdits)) {
+      continue;
+    }
+    const eventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+    if (!eventId) {
+      continue;
+    }
+    const visibility = visibilityByEventId.get(eventId);
+    if (visibility === "below" || visibility === undefined) {
+      limitIndex = Math.min(limitIndex, i - 1);
+      break;
+    }
+  }
+
+  for (let i = limitIndex; i > startIndex; i -= 1) {
+    const event = events[i];
+    const eventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+    if (!eventId || isRedactedEvent(event, redactedIds)) {
+      continue;
+    }
+    if (isRenderableParticipantBubble(event, ownerUserId, agentUserId, redactedIds, latestEdits)) {
+      const visibility = visibilityByEventId.get(eventId);
+      if (visibility === "visible" || visibility === "above") {
+        return eventId;
+      }
+    }
+    const replaceTargetId = replaceTargetEventId(event, ownerUserId, agentUserId);
+    if (replaceTargetId) {
+      const targetVisibility = visibilityByEventId.get(replaceTargetId);
+      if (targetVisibility === "visible") {
+        return eventId;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function isRenderableParticipantBubble(
+  event: RawMatrixEvent,
+  ownerUserId: string,
+  agentUserId: string | undefined,
+  redactedIds: Set<string>,
+  latestEdits: Map<string, { body: string; ts: number | undefined }>,
+): boolean {
+  if (!isRenderableTextBubbleEvent(event, redactedIds, latestEdits, agentUserId)) {
+    return false;
+  }
+  const sender = typeof event.sender === "string" ? event.sender : undefined;
+  return sender === ownerUserId || (Boolean(agentUserId) && sender === agentUserId);
+}
+
+function replaceTargetEventId(
+  event: RawMatrixEvent,
+  ownerUserId: string,
+  agentUserId: string | undefined,
+): string | undefined {
+  if (typeof event.state_key === "string" || event.type !== "m.room.message") {
+    return undefined;
+  }
+  const sender = typeof event.sender === "string" ? event.sender : undefined;
+  if (sender !== ownerUserId && !(agentUserId && sender === agentUserId)) {
+    return undefined;
+  }
+  if (!isRecord(event.content)) {
+    return undefined;
+  }
+  const relatesTo = event.content["m.relates_to"];
+  if (!isRecord(relatesTo) || relatesTo.rel_type !== "m.replace") {
+    return undefined;
+  }
+  return typeof relatesTo.event_id === "string" && relatesTo.event_id !== ""
+    ? relatesTo.event_id
+    : undefined;
 }

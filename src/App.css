@@ -83,6 +83,26 @@ main {
   gap: 0.5rem;
 }
 
+.waypoint-unread-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: #2b6cb0;
+  flex-shrink: 0;
+}
+
+.waypoint-topic-name {
+  font-weight: 400;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waypoint-topic-name.unread {
+  font-weight: 700;
+}
+
 .waypoint-topic-row-bot {
   display: block;
   font-size: 0.875rem;
@@ -216,6 +236,7 @@ main {
 }
 
 .waypoint-timeline {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;

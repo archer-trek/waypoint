@@ -9584,6 +9584,7 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
   let logins = 0;
   let syncCalls = 0;
   let sendCalls = 0;
+  let readMarkerCalls = 0;
   const syncUrls: string[] = [];
 
   homeserver.handler = async (input) => {
@@ -9659,6 +9660,14 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
         body: { errcode: "M_UNKNOWN", error: "temporary server error" },
       };
     }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerCalls += 1;
+      return {
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "temporary server error" },
+      };
+    }
     if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
       return { type: "response", status: 200, body: {} };
     }
@@ -9688,6 +9697,7 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
   // 打开设置并确认退出这台设备
   await user.click(screen.getByRole("button", { name: "设置" }));
   await user.click(screen.getByRole("button", { name: "退出这台设备" }));
+  const requestsBeforeExit = homeserver.requests.length;
   await user.click(screen.getByRole("button", { name: "确认退出" }));
 
   // 回到保留地址和用户标识的密码步，密码为空，不再处于已连接
@@ -9697,7 +9707,7 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
 
-  // 发送了 logout，且未删除设备、未退房、未删消息、未写已读位置或 account_data
+  // 发送了 logout，且退出本身未删除设备、未退房、未删消息、未写已读位置或 account_data
   const logouts = homeserver.requests.filter((r) => r.url.endsWith("/_matrix/client/v3/logout"));
   expect(logouts).toHaveLength(1);
   expect(logouts[0]).toMatchObject({
@@ -9705,8 +9715,9 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
     url: "https://matrix.example.com/_matrix/client/v3/logout",
     headers: { Authorization: "Bearer tok-1" },
   });
+  const requestsSinceExit = homeserver.requests.slice(requestsBeforeExit);
   expect(
-    homeserver.requests.some(
+    requestsSinceExit.some(
       (r) =>
         r.url.includes("/devices") ||
         r.url.includes("/leave") ||
@@ -9717,14 +9728,16 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
     ),
   ).toBe(false);
 
-  // 停掉前台同步与重试定时器
+  // 停掉前台同步与重试定时器（含消息发送与已读标记重试）
   const syncsBeforeAdvance = syncCalls;
   const sendsBeforeAdvance = sendCalls;
+  const readMarkersBeforeAdvance = readMarkerCalls;
   await act(async () => {
     first.clock.advance(60_000);
   });
   expect(syncCalls).toBe(syncsBeforeAdvance);
   expect(sendCalls).toBe(sendsBeforeAdvance);
+  expect(readMarkerCalls).toBe(readMarkersBeforeAdvance);
 
   // 重启应用：直接停在保留地址和用户标识的空密码步，不发起同步
   first.unmount();
@@ -9740,7 +9753,9 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  await user.click(await screen.findByRole("button", { name: "退出清理测试" }));
+  await screen.findByRole("button", { name: "退出清理测试" });
+  expect(readMarkerCalls).toBe(readMarkersBeforeAdvance);
+  await user.click(screen.getByRole("button", { name: "退出清理测试" }));
   expect(syncUrls[syncCountBeforeRelogin]).toBe("https://matrix.example.com/_matrix/client/v3/sync");
   const timeline = screen.getByRole("log", { name: "对话时间线" });
   expect(timeline).toHaveTextContent("服务端已有回复");
@@ -9967,4 +9982,984 @@ test("窄视口在设置里退出这台设备对齐历史栈，且还在路上�
   expect(await screen.findByLabelText("密码")).toHaveValue("");
   expect(screen.queryByText("迟到房间")).not.toBeInTheDocument();
   restarted.unmount();
+});
+
+test("列表按已读位置标出左侧实心圆点与加粗标题，忽略通知计数、marked unread、Hermes回执、Owner消息、reaction、编辑与撤回", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!unread-no-marker:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "未读无标记" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "第一条未读" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$u2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "第二条未读" },
+                      },
+                    ],
+                  },
+                },
+                "!read-but-noisy:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "已读含噪音" } },
+                    ],
+                  },
+                  unread_notifications: { notification_count: 9, highlight_count: 3 },
+                  account_data: {
+                    events: [
+                      { type: "m.fully_read", content: { event_id: "$r1" } },
+                      { type: "m.marked_unread", content: { unread: true } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$r1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "已读消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$r-owner",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2100,
+                        content: { msgtype: "m.text", body: "Owner 自己刚发出的" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$r-react",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$r1", key: "👀" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$r-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2300,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 改后",
+                          "m.new_content": { msgtype: "m.text", body: "改后" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$r1" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$r-retracted",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2400,
+                        content: { msgtype: "m.text", body: "将被撤回的消息" },
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$r-redaction",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        redacts: "$r-retracted",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+                "!hermes-receipt-only:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "Hermes回执不顶替Owner" } },
+                    ],
+                  },
+                  ephemeral: {
+                    events: [
+                      {
+                        type: "m.receipt",
+                        content: {
+                          "$h2": {
+                            "m.read.private": { "@bot:example.com": { ts: 5000 } },
+                            "m.read": { "@alice:example.com": { ts: 5000 } },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$h1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "早消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$h2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "新消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const unreadRow = await screen.findByRole("button", { name: "未读无标记" });
+  expect(unreadRow).toHaveAttribute("data-unread", "true");
+  expect(unreadRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
+  const unreadNameEl = unreadRow.querySelector(".waypoint-topic-name");
+  expect(unreadNameEl).toHaveClass("unread");
+  expect(unreadRow).not.toHaveTextContent("2");
+
+  const noisyReadRow = screen.getByRole("button", { name: "已读含噪音" });
+  expect(noisyReadRow).not.toHaveAttribute("data-unread", "true");
+  expect(noisyReadRow.querySelector(".waypoint-unread-dot")).toBeNull();
+  expect(noisyReadRow.querySelector(".waypoint-topic-name")).not.toHaveClass("unread");
+
+  const hermesReceiptRow = screen.getByRole("button", { name: "Hermes回执不顶替Owner" });
+  expect(hermesReceiptRow).toHaveAttribute("data-unread", "true");
+  expect(hermesReceiptRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
+
+  // 停在列表不打开 Topic、即使后台又同步几轮，也不会前移已读位置或发 read_markers
+  await act(async () => { clock.advance(3000); });
+  expect(homeserver.requests.some((r) => r.url.includes("/read_markers"))).toBe(false);
+  expect(unreadRow).toHaveAttribute("data-unread", "true");
+});
+
+test("已读位置按时间线顺序只往前走，两标记不一致取靠后者且不写回更早位置，位置不在本地时不标未读也不假装读完", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!order-conflict:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "时间线顺序话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$e-later-in-tl" } }],
+                  },
+                  ephemeral: {
+                    events: [
+                      {
+                        type: "m.receipt",
+                        content: {
+                          "$e-earlier-in-tl": {
+                            "m.read.private": { "@alice:example.com": { ts: 9500 } },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$e-earlier-in-tl",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 9000,
+                        content: { msgtype: "m.text", body: "时间线靠前但ts更大" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$e-later-in-tl",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1000,
+                        content: { msgtype: "m.text", body: "时间线靠后但ts更小" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$e-newest",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "最新未读" },
+                      },
+                    ],
+                  },
+                },
+                "!missing-anchor:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "锚点不在本地话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$not-in-local" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-local-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 5000,
+                        content: { msgtype: "m.text", body: "本地已有消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        // 另一台设备把 m.read.private 前移到了 $e-newest，即使 m.fully_read 还是旧的
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!order-conflict:example.com": {
+                  ephemeral: {
+                    events: [
+                      {
+                        type: "m.receipt",
+                        content: {
+                          "$e-newest": {
+                            "m.read.private": { "@alice:example.com": { ts: 9900 } },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        // 迟到/陈旧标记试图退回 $e-earlier-in-tl：绝不能倒退
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!order-conflict:example.com": {
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$e-earlier-in-tl" } }],
+                  },
+                  ephemeral: {
+                    events: [
+                      {
+                        type: "m.receipt",
+                        content: {
+                          "$e-earlier-in-tl": {
+                            "m.read.private": { "@alice:example.com": { ts: 9999 } },
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const conflictRow = await screen.findByRole("button", { name: "时间线顺序话题" });
+  expect(conflictRow).toHaveAttribute("data-unread", "true");
+  expect(conflictRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "700" });
+
+  // 位置不在本地时：不显示未读
+  const missingRow = screen.getByRole("button", { name: "锚点不在本地话题" });
+  expect(missingRow).not.toHaveAttribute("data-unread", "true");
+  expect(missingRow.querySelector(".waypoint-unread-dot")).toBeNull();
+  expect(missingRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
+
+  // 打开锚点不在本地的 Topic：不能假装读完（不发 read_markers）
+  await user.click(missingRow);
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("本地已有消息");
+  expect(homeserver.requests.some((r) => r.url.includes("/read_markers"))).toBe(false);
+
+  // 第 2 轮：另一台设备把 m.read.private 前移到 $e-newest -> 列表立刻变成已读，圆点消失，字重恢复
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(2));
+  await waitFor(() => {
+    expect(conflictRow).not.toHaveAttribute("data-unread", "true");
+  });
+  expect(conflictRow.querySelector(".waypoint-unread-dot")).toBeNull();
+  expect(conflictRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
+
+  // 第 3 轮：陈旧标记试图回退到 $e-earlier-in-tl -> 仍保持已读且不写回服务器
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(3));
+  expect(conflictRow).not.toHaveAttribute("data-unread", "true");
+  expect(homeserver.requests.some((r) => r.url.includes("/read_markers"))).toBe(false);
+});
+
+function withMockedTimelineLayout<T>(
+  rowHeight: number,
+  viewportHeight: number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+  const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+  const offsetHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+  const offsetTopDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop");
+
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get() {
+      if (this.classList?.contains("waypoint-timeline")) {
+        return viewportHeight;
+      }
+      return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get() {
+      if (this.classList?.contains("waypoint-timeline")) {
+        return this.querySelectorAll("[data-event-id]").length * rowHeight;
+      }
+      return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get() {
+      if (this.dataset?.eventId) {
+        return rowHeight;
+      }
+      return offsetHeightDesc?.get ? offsetHeightDesc.get.call(this) : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+    configurable: true,
+    get() {
+      if (this.dataset?.eventId && this.parentElement) {
+        const rows = Array.from(this.parentElement.querySelectorAll("[data-event-id]"));
+        const idx = rows.indexOf(this);
+        if (idx >= 0) {
+          return idx * rowHeight;
+        }
+      }
+      return offsetTopDesc?.get ? offsetTopDesc.get.call(this) : 0;
+    },
+  });
+
+  return fn().finally(() => {
+    if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+    if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    if (offsetHeightDesc) Object.defineProperty(HTMLElement.prototype, "offsetHeight", offsetHeightDesc);
+    if (offsetTopDesc) Object.defineProperty(HTMLElement.prototype, "offsetTop", offsetTopDesc);
+  });
+}
+
+test("打开未读Topic停在第一条未读且仅把屏上可见消息标为已读，人已在内时不拉走视口，滚到最新才到最后一条，已读Topic打开停在最新", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t-unread:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "部分可见未读" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  timeline: {
+                    events: [1, 2, 3, 4, 5].map((n) => ({
+                      type: "m.room.message",
+                      event_id: `$m${n}`,
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1000 + n * 1000,
+                      content: { msgtype: "m.text", body: `消息-${n}` },
+                    })),
+                  },
+                },
+                "!t-read:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 500, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "全部已读话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$r4" } }],
+                  },
+                  timeline: {
+                    events: [1, 2, 3, 4].map((n) => ({
+                      type: "m.room.message",
+                      event_id: `$r${n}`,
+                      sender: "@bot:example.com",
+                      origin_server_ts: 500 + n * 100,
+                      content: { msgtype: "m.text", body: `已读-${n}` },
+                    })),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t-unread:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m6",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 7000,
+                        content: { msgtype: "m.text", body: "消息-6" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const unreadRow = await screen.findByRole("button", { name: "部分可见未读" });
+    expect(unreadRow).toHaveAttribute("data-unread", "true");
+
+    // 1. 打开有未读的 Topic：停在第一条未读 $m2（scrollTop=100），不跳到底（300）
+    await user.click(unreadRow);
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    expect(timeline.scrollTop).toBe(100);
+
+    // 视口 100..300 只显示了 $m2 和 $m3 -> 已读位置前移到 $m3，$m4/$m5 仍在下方未读
+    await waitFor(() => {
+      expect(readMarkerPosts).toEqual([
+        {
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!t-unread%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$m3", "m.read.private": "$m3" },
+        },
+      ]);
+    });
+    expect(unreadRow).toHaveAttribute("data-unread", "true");
+
+    // 2. 人已经在 Topic 里，新消息 $m6 同步到达：不把视口拉走（scrollTop 仍为 100）
+    await act(async () => { clock.advance(1000); });
+    await waitFor(() => expect(timeline).toHaveTextContent("消息-6"));
+    expect(timeline.scrollTop).toBe(100);
+    expect(readMarkerPosts).toHaveLength(1);
+    expect(unreadRow).toHaveAttribute("data-unread", "true");
+
+    // 3. 自己滚到最新（scrollTop=400，视口 400..600），上方 $m4 滚过去算读过，位置前移到 $m6
+    await act(async () => {
+      timeline.scrollTop = 400;
+      timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await waitFor(() => {
+      expect(readMarkerPosts).toHaveLength(2);
+    });
+    expect(readMarkerPosts[1]).toEqual({
+      url: "https://matrix.example.com/_matrix/client/v3/rooms/!t-unread%3Aexample.com/read_markers",
+      body: { "m.fully_read": "$m6", "m.read.private": "$m6" },
+    });
+    expect(unreadRow).not.toHaveAttribute("data-unread", "true");
+    expect(unreadRow.querySelector(".waypoint-unread-dot")).toBeNull();
+
+    // 4. 打开没有未读的 Topic：停在最新（scrollTop = 4*100 - 200 = 200）
+    await user.click(screen.getByRole("button", { name: "全部已读话题" }));
+    const readTimeline = screen.getByRole("log", { name: "对话时间线" });
+    expect(readTimeline.scrollTop).toBe(200);
+  });
+});
+
+test("已读标记写失败不回退已采纳位置、队列每条Topic只留最靠前一条、重启后重放且列表行不出现转圈或红叹号", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let allowReadMarkers = false;
+  const sentReadMarkers: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!retry-rm:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "重试已读位置话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$rm1" } }],
+                  },
+                  timeline: {
+                    events: [1, 2, 3, 4, 5].map((n) => ({
+                      type: "m.room.message",
+                      event_id: `$rm${n}`,
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1000 + n * 1000,
+                      content: { msgtype: "m.text", body: `消息-${n}` },
+                    })),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      // 即使后续增量 /sync 还没收到新标记或带回旧标记，也不能把本地已采纳的更前位置打回去
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncRound}`,
+          rooms: {
+            join: {
+              "!retry-rm:example.com": {
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$rm1" } }],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      sentReadMarkers.push({ url: input.url, body: input.body });
+      if (!allowReadMarkers) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const first = renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "重试已读位置话题" });
+    expect(row).toHaveAttribute("data-unread", "true");
+
+    // 打开停在 $rm2，屏上看到 $rm2、$rm3 -> 尝试写 $rm3 但失败
+    await user.click(row);
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => expect(sentReadMarkers).toHaveLength(1));
+    expect(sentReadMarkers[0].body).toEqual({ "m.fully_read": "$rm3", "m.read.private": "$rm3" });
+
+    // 列表行绝不出现转圈或红叹号
+    expect(row.querySelector("[role=\"status\"]")).toBeNull();
+    expect(row).not.toHaveTextContent("!");
+
+    // 趁队列还在退避时滚到底部看到 $rm5 -> 队列里只保留更靠前的 $rm5，且不回退已采纳位置
+    await act(async () => {
+      timeline.scrollTop = 300;
+      timeline.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await waitFor(() => expect(sentReadMarkers.length).toBeGreaterThanOrEqual(2));
+    expect(sentReadMarkers[sentReadMarkers.length - 1].body).toEqual({
+      "m.fully_read": "$rm5",
+      "m.read.private": "$rm5",
+    });
+    expect(row).not.toHaveAttribute("data-unread", "true");
+    expect(row.querySelector("[role=\"status\"]")).toBeNull();
+    expect(row).not.toHaveTextContent("!");
+
+    // 即使服务器在下一轮同步带回旧的 $rm1，也不回退到本地未读
+    await act(async () => { first.clock.advance(1000); });
+    expect(row).not.toHaveAttribute("data-unread", "true");
+
+    // 模拟进程重启，网络恢复：只重放队列里留下的最靠前一条 $rm5
+    first.unmount();
+    sentReadMarkers.length = 0;
+    allowReadMarkers = true;
+    renderApp(homeserver);
+
+    const restoredRow = await screen.findByRole("button", { name: "重试已读位置话题" });
+    expect(restoredRow).not.toHaveAttribute("data-unread", "true");
+    await waitFor(() => expect(sentReadMarkers).toHaveLength(1));
+    expect(sentReadMarkers[0].body).toEqual({ "m.fully_read": "$rm5", "m.read.private": "$rm5" });
+
+    // 不发公开回执，不按线程另记，不自造 account data
+    expect(homeserver.requests.some((r) => r.url.includes("/receipt/m.read"))).toBe(false);
+    expect(JSON.stringify(homeserver.requests)).not.toContain("thread_id");
+    expect(homeserver.requests.some((r) => r.url.includes("/account_data/") && !r.url.includes("im.waypoint.agents"))).toBe(false);
+  });
+});
+
+test("就地编辑不挡住后续前移且更新后气泡在屏上时包含编辑；缺口不连续时不越过缺口前移；撤回后不再算未读", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const sentReadMarkers: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!edit-topic:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "编辑与撤回话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$ed-1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ed-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "原消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ed-replace-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 改后",
+                          "m.new_content": { msgtype: "m.text", body: "改后" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$ed-1" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ed-will-redact",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4000,
+                        content: { msgtype: "m.text", body: "即将撤回" },
+                      },
+                    ],
+                  },
+                },
+                "!gap-topic:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "中间有缺口话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$g1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$g1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "缺口前消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!edit-topic:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$ed-redaction",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 5000,
+                        redacts: "$ed-will-redact",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+                "!gap-topic:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-gap",
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$g10",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 9000,
+                        content: { msgtype: "m.text", body: "缺口后消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      sentReadMarkers.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const editRow = await screen.findByRole("button", { name: "编辑与撤回话题" });
+  const gapRow = screen.getByRole("button", { name: "中间有缺口话题" });
+  expect(editRow).toHaveAttribute("data-unread", "true");
+  expect(gapRow).not.toHaveAttribute("data-unread", "true");
+
+  // 第 2 轮同步：撤回 $ed-will-redact -> 编辑与撤回话题不再未读；缺口话题收到 limited:true 后变成未读
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(2));
+  await waitFor(() => {
+    expect(editRow).not.toHaveAttribute("data-unread", "true");
+    expect(gapRow).toHaveAttribute("data-unread", "true");
+  });
+
+  // 打开编辑与撤回话题：$ed-1 在屏幕上 -> 位置前移并包含 $ed-replace-1
+  await user.click(editRow);
+  await waitFor(() => {
+    expect(sentReadMarkers).toContainEqual({
+      url: "https://matrix.example.com/_matrix/client/v3/rooms/!edit-topic%3Aexample.com/read_markers",
+      body: { "m.fully_read": "$ed-replace-1", "m.read.private": "$ed-replace-1" },
+    });
+  });
+
+  // 打开中间有缺口话题：因 $g1 到 $g10 中间不连续，不能越过缺口把已读位置跳到 $g10
+  await user.click(gapRow);
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("缺口后消息");
+  expect(sentReadMarkers.some((m) => m.url.includes("gap-topic"))).toBe(false);
+  expect(gapRow).toHaveAttribute("data-unread", "true");
+});
+
+test("已读指针指向的消息被撤回并从时间线移除后，回退到前一条存活消息，后续 Agent 消息仍标为未读且可继续前移已读位置", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const sentReadMarkers: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!redacted-readpos:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "已读锚点撤回" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      { type: "m.room.message", event_id: "$r1", sender: "@bot:example.com", origin_server_ts: 1100, content: { msgtype: "m.text", body: "第一条" } },
+                      { type: "m.room.message", event_id: "$r2", sender: "@bot:example.com", origin_server_ts: 1200, content: { msgtype: "m.text", body: "第二条将被撤回" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$r2" } }],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!redacted-readpos:example.com": {
+                  timeline: {
+                    events: [
+                      { type: "m.room.redaction", event_id: "$red-r2", redacts: "$r2", sender: "@bot:example.com", origin_server_ts: 1300, content: {} },
+                      { type: "m.room.message", event_id: "$r3", sender: "@bot:example.com", origin_server_ts: 1400, content: { msgtype: "m.text", body: "撤回后的新回复" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      sentReadMarkers.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const row = await screen.findByRole("button", { name: "已读锚点撤回" });
+  expect(row).not.toHaveAttribute("data-unread", "true");
+
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(2));
+  await waitFor(() => {
+    expect(row).toHaveAttribute("data-unread", "true");
+  });
+
+  await user.click(row);
+  await waitFor(() => {
+    expect(sentReadMarkers).toContainEqual({
+      url: "https://matrix.example.com/_matrix/client/v3/rooms/!redacted-readpos%3Aexample.com/read_markers",
+      body: { "m.fully_read": "$r3", "m.read.private": "$r3" },
+    });
+  });
+  expect(row).not.toHaveAttribute("data-unread", "true");
 });

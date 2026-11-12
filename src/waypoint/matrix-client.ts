@@ -6,6 +6,7 @@ import {
   saveSession,
   type DraftAttachment,
   type DraftRecord,
+  type PendingReadMarker,
   type PendingRoomEvent,
   type RawMatrixEvent,
   type SessionRecord,
@@ -29,6 +30,7 @@ export class MatrixClient {
   private storedAccountData: Record<string, unknown> = {};
   private storedRooms: Record<string, StoredRoomEvents> = {};
   private storedPendingEvents: PendingRoomEvent[] = [];
+  private storedPendingReadMarkers: PendingReadMarker[] = [];
   private storedDrafts: Record<string, DraftRecord> = {};
   private txnCounter = 0;
   private persistTail: Promise<void> = Promise.resolve();
@@ -92,6 +94,14 @@ export class MatrixClient {
     return filtered.map(clonePendingEvent);
   }
 
+  pendingReadMarkers(roomId?: string): PendingReadMarker[] {
+    const filtered =
+      roomId === undefined
+        ? this.storedPendingReadMarkers
+        : this.storedPendingReadMarkers.filter((item) => item.roomId === roomId);
+    return filtered.map((item) => ({ roomId: item.roomId, eventId: item.eventId }));
+  }
+
   async restore(): Promise<"sync" | "password" | "address"> {
     const stored = await loadSession();
     if (!stored?.baseUrl) {
@@ -104,6 +114,9 @@ export class MatrixClient {
     this.storedRooms = isPlainObject(stored.rooms) ? cloneStoredRooms(stored.rooms) : {};
     this.storedPendingEvents = Array.isArray(stored.pendingEvents)
       ? clonePendingEvents(stored.pendingEvents)
+      : [];
+    this.storedPendingReadMarkers = Array.isArray(stored.pendingReadMarkers)
+      ? clonePendingReadMarkers(stored.pendingReadMarkers)
       : [];
     this.storedDrafts = isPlainObject(stored.drafts) ? cloneDrafts(stored.drafts) : {};
     if (stored.accessToken && stored.deviceId) {
@@ -155,6 +168,7 @@ export class MatrixClient {
       this.storedAccountData = {};
       this.storedRooms = {};
       this.storedPendingEvents = [];
+      this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
       return saveSession({
         baseUrl: this.baseUrl,
@@ -202,8 +216,13 @@ export class MatrixClient {
         return Promise.resolve();
       }
       this.storedAccountData = mergeAccountData(this.storedAccountData, body);
-      this.storedRooms = mergeSyncRooms(this.storedRooms, body);
+      this.storedRooms = mergeSyncRooms(this.storedRooms, body, this.userId);
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
+      this.storedPendingReadMarkers = reconcilePendingReadMarkersWithSync(
+        this.storedPendingReadMarkers,
+        this.storedRooms,
+        body,
+      );
       this.storedDrafts = reconcileDraftsWithSync(this.storedDrafts, body);
       const cursor = nextBatch(body);
       if (cursor) {
@@ -401,6 +420,135 @@ export class MatrixClient {
     });
   }
 
+  async advanceReadPosition(roomId: string, eventId: string): Promise<boolean> {
+    if (!this.accessToken || !this.userId || !eventId) {
+      return false;
+    }
+    let changed = false;
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken || !this.userId) {
+        return;
+      }
+      const room = this.storedRooms[roomId];
+      if (!room) {
+        return;
+      }
+      const targetIdx = timelineIndexOf(room.timelineEvents, eventId);
+      if (targetIdx === -1) {
+        return;
+      }
+      if (room.readPositionEventId !== undefined) {
+        if (room.readPositionEventId === eventId) {
+          return;
+        }
+        const currentIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
+        if (currentIdx === -1 || targetIdx <= currentIdx) {
+          return;
+        }
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      nextRooms[roomId] = {
+        ...nextRooms[roomId],
+        readPositionEventId: eventId,
+      };
+      const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
+        (item) => item.roomId !== roomId,
+      );
+      nextPendingReadMarkers.push({ roomId, eventId });
+      await saveSession(
+        this.sessionRecord({ rooms: nextRooms, pendingReadMarkers: nextPendingReadMarkers }),
+      );
+      this.storedRooms = nextRooms;
+      this.storedPendingReadMarkers = nextPendingReadMarkers;
+      changed = true;
+    });
+    return changed;
+  }
+
+  sendReadMarkers(roomId: string, eventId: string): Promise<TransportResult> {
+    if (!this.accessToken) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "POST",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/read_markers`,
+      ),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: {
+        "m.fully_read": eventId,
+        "m.read.private": eventId,
+      },
+    });
+  }
+
+  async confirmSentReadMarker(roomId: string, eventId: string): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const currentPending = this.storedPendingReadMarkers.find(
+        (item) => item.roomId === roomId,
+      );
+      const nextPendingReadMarkers =
+        currentPending && currentPending.eventId === eventId
+          ? this.storedPendingReadMarkers.filter((item) => item.roomId !== roomId)
+          : this.storedPendingReadMarkers;
+
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const room = nextRooms[roomId];
+      let roomsChanged = false;
+      if (room) {
+        const eventIdx = timelineIndexOf(room.timelineEvents, eventId);
+        const fullyIdx = timelineIndexOf(room.timelineEvents, room.fullyReadEventId);
+        const privateIdx = timelineIndexOf(room.timelineEvents, room.privateReadEventId);
+        const nextFully =
+          room.fullyReadEventId === undefined || (eventIdx !== -1 && (fullyIdx === -1 || eventIdx > fullyIdx))
+            ? eventId
+            : room.fullyReadEventId;
+        const nextPrivate =
+          room.privateReadEventId === undefined || (eventIdx !== -1 && (privateIdx === -1 || eventIdx > privateIdx))
+            ? eventId
+            : room.privateReadEventId;
+        const readIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
+        const nextRead =
+          room.readPositionEventId === undefined || (eventIdx !== -1 && readIdx !== -1 && eventIdx > readIdx)
+            ? eventId
+            : room.readPositionEventId;
+        if (
+          nextFully !== room.fullyReadEventId ||
+          nextPrivate !== room.privateReadEventId ||
+          nextRead !== room.readPositionEventId
+        ) {
+          nextRooms[roomId] = {
+            ...room,
+            readPositionEventId: nextRead,
+            fullyReadEventId: nextFully,
+            privateReadEventId: nextPrivate,
+          };
+          roomsChanged = true;
+        }
+      }
+      if (nextPendingReadMarkers === this.storedPendingReadMarkers && !roomsChanged) {
+        return;
+      }
+      await saveSession(
+        this.sessionRecord({
+          ...(roomsChanged ? { rooms: nextRooms } : {}),
+          pendingReadMarkers: nextPendingReadMarkers,
+        }),
+      );
+      if (roomsChanged) {
+        this.storedRooms = nextRooms;
+      }
+      this.storedPendingReadMarkers = nextPendingReadMarkers;
+    });
+  }
+
   async confirmSentRoomEvent(roomId: string, txnId: string, eventId: string): Promise<void> {
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
@@ -445,6 +593,7 @@ export class MatrixClient {
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: {
+          ...existing,
           stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
           ...(existing.timelineGap ? { timelineGap: { ...existing.timelineGap } } : {}),
@@ -490,6 +639,7 @@ export class MatrixClient {
       this.storedAccountData = {};
       this.storedRooms = {};
       this.storedPendingEvents = [];
+      this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
       return dropPreListSession();
     });
@@ -505,6 +655,7 @@ export class MatrixClient {
 
   private sessionRecord(overrides?: {
     pending?: PendingRoomEvent[];
+    pendingReadMarkers?: PendingReadMarker[];
     rooms?: Record<string, StoredRoomEvents>;
     drafts?: Record<string, DraftRecord>;
   }): SessionRecord {
@@ -527,6 +678,10 @@ export class MatrixClient {
     const pending = overrides?.pending ?? this.storedPendingEvents;
     if (pending.length > 0) {
       session.pendingEvents = pending;
+    }
+    const pendingReadMarkers = overrides?.pendingReadMarkers ?? this.storedPendingReadMarkers;
+    if (pendingReadMarkers.length > 0) {
+      session.pendingReadMarkers = pendingReadMarkers;
     }
     const drafts = overrides?.drafts ?? this.storedDrafts;
     if (Object.keys(drafts).length > 0) {
@@ -600,12 +755,26 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
         ...(typeof value.timelineGap.prevBatch === "string" && value.timelineGap.prevBatch !== ""
           ? { prevBatch: value.timelineGap.prevBatch }
           : {}),
+        ...(typeof value.timelineGap.gapBeforeEventId === "string" &&
+        value.timelineGap.gapBeforeEventId !== ""
+          ? { gapBeforeEventId: value.timelineGap.gapBeforeEventId }
+          : {}),
+        ...(value.timelineGap.pendingGapAtEnd === true ? { pendingGapAtEnd: true as const } : {}),
       };
     }
     cloned[roomId] = {
       stateEvents,
       timelineEvents,
       ...(timelineGap ? { timelineGap } : {}),
+      ...(typeof value.readPositionEventId === "string" && value.readPositionEventId !== ""
+        ? { readPositionEventId: value.readPositionEventId }
+        : {}),
+      ...(typeof value.fullyReadEventId === "string" && value.fullyReadEventId !== ""
+        ? { fullyReadEventId: value.fullyReadEventId }
+        : {}),
+      ...(typeof value.privateReadEventId === "string" && value.privateReadEventId !== ""
+        ? { privateReadEventId: value.privateReadEventId }
+        : {}),
     };
   }
   return cloned;
@@ -614,6 +783,7 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
 function mergeSyncRooms(
   current: Record<string, StoredRoomEvents>,
   body: unknown,
+  ownerUserId: string,
 ): Record<string, StoredRoomEvents> {
   const next: Record<string, StoredRoomEvents> = cloneStoredRooms(current);
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
@@ -645,11 +815,109 @@ function mergeSyncRooms(
         roomSync.timeline.prev_batch !== ""
           ? roomSync.timeline.prev_batch
           : undefined;
-      const timelineGap: StoredTimelineGap | undefined = isLimited
-        ? { limited: true, ...(prevBatch ? { prevBatch } : {}) }
-        : existing.timelineGap;
+      const { timeline: mergedTimeline, redactedIds } = mergeTimelineEventsWithRedactions(
+        existing.timelineEvents,
+        rawTimeline,
+      );
+      const existingIds = new Set(
+        existing.timelineEvents.map(eventIdOf).filter((id): id is string => id !== undefined),
+      );
+      const mergedIds = new Set(
+        mergedTimeline.map(eventIdOf).filter((id): id is string => id !== undefined),
+      );
+      const firstNewInBatch = mergedTimeline
+        .map(eventIdOf)
+        .find((id): id is string => id !== undefined && !existingIds.has(id));
+      let timelineGap: StoredTimelineGap | undefined = existing.timelineGap;
+      if (isLimited) {
+        const survivingIncomingAnchor = rawTimeline
+          .map(eventIdOf)
+          .find((id): id is string => id !== undefined && mergedIds.has(id));
+        const anchor = firstNewInBatch ?? survivingIncomingAnchor;
+        timelineGap = {
+          limited: true,
+          ...(prevBatch ? { prevBatch } : {}),
+          ...(anchor ? { gapBeforeEventId: anchor } : { pendingGapAtEnd: true as const }),
+        };
+      } else if (existing.timelineGap?.pendingGapAtEnd && firstNewInBatch) {
+        timelineGap = {
+          limited: true,
+          ...(existing.timelineGap.prevBatch ? { prevBatch: existing.timelineGap.prevBatch } : {}),
+          gapBeforeEventId: firstNewInBatch,
+        };
+      } else if (
+        existing.timelineGap?.limited &&
+        existing.timelineGap.gapBeforeEventId &&
+        !mergedIds.has(existing.timelineGap.gapBeforeEventId)
+      ) {
+        const oldGapIdx = timelineIndexOf(
+          existing.timelineEvents,
+          existing.timelineGap.gapBeforeEventId,
+        );
+        const nextExistingAnchor =
+          oldGapIdx !== -1
+            ? existing.timelineEvents
+                .slice(oldGapIdx + 1)
+                .map(eventIdOf)
+                .find((id): id is string => id !== undefined && mergedIds.has(id))
+            : undefined;
+        const replacementAnchor = nextExistingAnchor ?? firstNewInBatch;
+        timelineGap = {
+          limited: true,
+          ...(existing.timelineGap.prevBatch ? { prevBatch: existing.timelineGap.prevBatch } : {}),
+          ...(replacementAnchor
+            ? { gapBeforeEventId: replacementAnchor }
+            : { pendingGapAtEnd: true as const }),
+        };
+      }
+
       const timelineStateEvents = rawTimeline.filter(
         (event) => typeof event.state_key === "string",
+      );
+
+      let effectivePrevReadPos = existing.readPositionEventId;
+      if (effectivePrevReadPos !== undefined && !mergedIds.has(effectivePrevReadPos)) {
+        const oldReadIdx = timelineIndexOf(existing.timelineEvents, effectivePrevReadPos);
+        if (oldReadIdx !== -1) {
+          let fallback: string | undefined;
+          for (let i = oldReadIdx - 1; i >= 0; i -= 1) {
+            const candidate = eventIdOf(existing.timelineEvents[i]);
+            if (candidate !== undefined && mergedIds.has(candidate)) {
+              fallback = candidate;
+              break;
+            }
+          }
+          effectivePrevReadPos = fallback;
+        }
+      }
+
+      const syncFullyReadId = extractFullyReadEventId(roomSync);
+      const syncPrivateReadIds = extractPrivateReadEventIds(roomSync, ownerUserId);
+      const nextFullyReadEventId = syncFullyReadId ?? existing.fullyReadEventId;
+      const bestIncomingPrivateReadId = resolveFurthestInTimeline(
+        mergedTimeline,
+        syncPrivateReadIds,
+      ) ?? syncPrivateReadIds[syncPrivateReadIds.length - 1];
+      const nextPrivateReadEventId =
+        resolveFurthestInTimeline(
+          mergedTimeline,
+          [existing.privateReadEventId, bestIncomingPrivateReadId].filter(
+            (id): id is string => id !== undefined,
+          ),
+        ) ??
+        bestIncomingPrivateReadId ??
+        existing.privateReadEventId;
+
+      const effectiveSyncFullyReadId =
+        syncFullyReadId && !redactedIds.has(syncFullyReadId) ? syncFullyReadId : undefined;
+      const effectiveSyncPrivateReadIds = syncPrivateReadIds.filter((id) => !redactedIds.has(id));
+
+      const nextReadPositionEventId = resolveNextReadPosition(
+        mergedTimeline,
+        timelineGap,
+        effectivePrevReadPos,
+        effectiveSyncFullyReadId,
+        effectiveSyncPrivateReadIds,
       );
 
       next[roomId] = {
@@ -657,8 +925,11 @@ function mergeSyncRooms(
           ...rawState,
           ...timelineStateEvents,
         ]),
-        timelineEvents: mergeTimelineEvents(existing.timelineEvents, rawTimeline),
+        timelineEvents: mergedTimeline,
         ...(timelineGap ? { timelineGap } : {}),
+        ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
+        ...(nextFullyReadEventId ? { fullyReadEventId: nextFullyReadEventId } : {}),
+        ...(nextPrivateReadEventId ? { privateReadEventId: nextPrivateReadEventId } : {}),
       };
     }
   }
@@ -671,6 +942,120 @@ function mergeSyncRooms(
   }
 
   return next;
+}
+
+function extractFullyReadEventId(roomSync: Record<string, unknown>): string | undefined {
+  if (!isPlainObject(roomSync.account_data) || !Array.isArray(roomSync.account_data.events)) {
+    return undefined;
+  }
+  let found: string | undefined;
+  for (const event of roomSync.account_data.events) {
+    if (
+      isPlainObject(event) &&
+      event.type === "m.fully_read" &&
+      isPlainObject(event.content) &&
+      typeof event.content.event_id === "string" &&
+      event.content.event_id !== ""
+    ) {
+      found = event.content.event_id;
+    }
+  }
+  return found;
+}
+
+function extractPrivateReadEventIds(
+  roomSync: Record<string, unknown>,
+  ownerUserId: string,
+): string[] {
+  if (!ownerUserId || !isPlainObject(roomSync.ephemeral) || !Array.isArray(roomSync.ephemeral.events)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const event of roomSync.ephemeral.events) {
+    if (!isPlainObject(event) || event.type !== "m.receipt" || !isPlainObject(event.content)) {
+      continue;
+    }
+    for (const [eventId, receiptTypes] of Object.entries(event.content)) {
+      if (!eventId || !isPlainObject(receiptTypes)) {
+        continue;
+      }
+      const privateReceipts = receiptTypes["m.read.private"];
+      if (isPlainObject(privateReceipts) && ownerUserId in privateReceipts) {
+        ids.push(eventId);
+      }
+    }
+  }
+  return ids;
+}
+
+function timelineIndexOf(timeline: RawMatrixEvent[], eventId: string | undefined): number {
+  if (!eventId) {
+    return -1;
+  }
+  return timeline.findIndex((event) => eventIdOf(event) === eventId);
+}
+
+function resolveFurthestInTimeline(
+  timeline: RawMatrixEvent[],
+  eventIds: string[],
+): string | undefined {
+  let bestId: string | undefined;
+  let bestIdx = -1;
+  for (const id of eventIds) {
+    const idx = timelineIndexOf(timeline, id);
+    if (idx > bestIdx) {
+      bestIdx = idx;
+      bestId = id;
+    }
+  }
+  return bestId;
+}
+
+function resolveNextReadPosition(
+  timeline: RawMatrixEvent[],
+  timelineGap: StoredTimelineGap | undefined,
+  prevReadPos: string | undefined,
+  syncFullyReadId: string | undefined,
+  syncPrivateReadIds: string[],
+): string | undefined {
+  const candidates: string[] = [];
+  if (prevReadPos) {
+    candidates.push(prevReadPos);
+  }
+  if (syncFullyReadId) {
+    candidates.push(syncFullyReadId);
+  }
+  for (const id of syncPrivateReadIds) {
+    candidates.push(id);
+  }
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const bestKnown = resolveFurthestInTimeline(timeline, candidates);
+  if (bestKnown !== undefined) {
+    const bestKnownIdx = timelineIndexOf(timeline, bestKnown);
+    const gapIdx = timelineGap?.gapBeforeEventId
+      ? timelineIndexOf(timeline, timelineGap.gapBeforeEventId)
+      : -1;
+    const hasGapAfterBestKnown =
+      Boolean(timelineGap?.limited) &&
+      ((gapIdx > bestKnownIdx) || Boolean(timelineGap?.pendingGapAtEnd));
+    if (hasGapAfterBestKnown) {
+      const unknownIncoming = [syncFullyReadId, ...syncPrivateReadIds].find(
+        (id): id is string =>
+          id !== undefined &&
+          id !== prevReadPos &&
+          timelineIndexOf(timeline, id) === -1,
+      );
+      if (unknownIncoming !== undefined) {
+        return unknownIncoming;
+      }
+    }
+    return bestKnown;
+  }
+  const incomingFallback =
+    syncPrivateReadIds[syncPrivateReadIds.length - 1] ?? syncFullyReadId;
+  return incomingFallback ?? prevReadPos;
 }
 
 function mergeStateEvents(
@@ -732,12 +1117,12 @@ function replaceTargetIdOf(event: RawMatrixEvent): string | undefined {
   return undefined;
 }
 
-function mergeTimelineEvents(
+function mergeTimelineEventsWithRedactions(
   existing: RawMatrixEvent[],
   incoming: RawMatrixEvent[],
-): RawMatrixEvent[] {
+): { timeline: RawMatrixEvent[]; redactedIds: Set<string> } {
   if (incoming.length === 0) {
-    return existing.map(cloneObject);
+    return { timeline: existing.map(cloneObject), redactedIds: new Set<string>() };
   }
   const redactedIds = new Set<string>();
   for (const event of [...existing, ...incoming]) {
@@ -796,7 +1181,7 @@ function mergeTimelineEvents(
     }
   }
 
-  return result;
+  return { timeline: result, redactedIds };
 }
 
 function mergeAccountData(
@@ -1049,4 +1434,60 @@ function reconcileDraftsWithSync(
     }
   }
   return changed ? next : drafts;
+}
+
+function clonePendingReadMarkers(raw: unknown[]): PendingReadMarker[] {
+  const byRoom = new Map<string, PendingReadMarker>();
+  for (const item of raw) {
+    if (
+      isPlainObject(item) &&
+      typeof item.roomId === "string" &&
+      item.roomId !== "" &&
+      typeof item.eventId === "string" &&
+      item.eventId !== ""
+    ) {
+      byRoom.set(item.roomId, { roomId: item.roomId, eventId: item.eventId });
+    }
+  }
+  return Array.from(byRoom.values());
+}
+
+function reconcilePendingReadMarkersWithSync(
+  pending: PendingReadMarker[],
+  rooms: Record<string, StoredRoomEvents>,
+  body: unknown,
+): PendingReadMarker[] {
+  if (pending.length === 0) {
+    return pending;
+  }
+  const leftRooms = new Set<string>();
+  if (isPlainObject(body) && isPlainObject(body.rooms) && isPlainObject(body.rooms.leave)) {
+    for (const roomId of Object.keys(body.rooms.leave)) {
+      leftRooms.add(roomId);
+    }
+  }
+  return pending.filter((item) => {
+    if (leftRooms.has(item.roomId)) {
+      return false;
+    }
+    const room = rooms[item.roomId];
+    if (!room || !room.readPositionEventId) {
+      return true;
+    }
+    if (room.readPositionEventId === item.eventId) {
+      const syncedBoth =
+        room.fullyReadEventId === item.eventId &&
+        room.privateReadEventId === item.eventId;
+      return !syncedBoth;
+    }
+    const pendingIdx = timelineIndexOf(room.timelineEvents, item.eventId);
+    const adoptedIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
+    if (pendingIdx !== -1 && adoptedIdx !== -1 && adoptedIdx > pendingIdx) {
+      return false;
+    }
+    if (pendingIdx !== -1 && adoptedIdx === -1) {
+      return false;
+    }
+    return true;
+  });
 }

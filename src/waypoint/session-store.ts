@@ -3,12 +3,22 @@ export type RawMatrixEvent = Record<string, unknown>;
 export type StoredTimelineGap = {
   limited: true;
   prevBatch?: string;
+  gapBeforeEventId?: string;
+  pendingGapAtEnd?: true;
 };
 
 export type StoredRoomEvents = {
   stateEvents: RawMatrixEvent[];
   timelineEvents: RawMatrixEvent[];
   timelineGap?: StoredTimelineGap;
+  readPositionEventId?: string;
+  fullyReadEventId?: string;
+  privateReadEventId?: string;
+};
+
+export type PendingReadMarker = {
+  roomId: string;
+  eventId: string;
 };
 
 export type PendingRoomEvent = {
@@ -40,6 +50,7 @@ export type SessionRecord = {
   accountData?: Record<string, unknown>;
   rooms?: Record<string, StoredRoomEvents>;
   pendingEvents?: PendingRoomEvent[];
+  pendingReadMarkers?: PendingReadMarker[];
   drafts?: Record<string, DraftRecord>;
 };
 
@@ -82,6 +93,9 @@ export async function dropCredential(): Promise<void> {
   }
   if (current.pendingEvents && current.pendingEvents.length > 0) {
     next.pendingEvents = current.pendingEvents;
+  }
+  if (current.pendingReadMarkers && current.pendingReadMarkers.length > 0) {
+    next.pendingReadMarkers = current.pendingReadMarkers;
   }
   if (current.drafts && Object.keys(current.drafts).length > 0) {
     next.drafts = current.drafts;

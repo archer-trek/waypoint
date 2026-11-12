@@ -19,7 +19,9 @@ import {
   buildAddAgentContent,
   buildRemoveAgentContent,
   buildRenameAgentContent,
+  computeTargetReadPosition,
   createTopicRoom,
+  type BubbleVisibility,
   deriveRoomTimelineItems,
   deriveTopics,
   parseRegisteredAgents,
@@ -106,14 +108,17 @@ export function TopicsWorkspace({
   const [persistingSend, setPersistingSend] = useState(false);
   const persistingSendRef = useRef(false);
   const visibleComposerRoomRef = useRef<string | null>(null);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const lastLandedRoomRef = useRef<string | null>(null);
+  const lastRequestedReadRef = useRef<Record<string, string>>({});
   const mountedRef = useRef(true);
   const pausedRef = useRef(false);
   const syncTimerRef = useRef<number | undefined>(undefined);
   const syncBackoffRef = useRef(0);
   const syncInFlightRef = useRef(false);
   const syncWakePendingRef = useRef(false);
-  const timelineRef = useRef<HTMLDivElement | null>(null);
   const isAtBottomRef = useRef(true);
+  const prevTimelineKeyRef = useRef<string>("");
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -143,17 +148,7 @@ export function TopicsWorkspace({
     )
     .join("\0");
 
-  useLayoutEffect(() => {
-    isAtBottomRef.current = true;
-  }, [activeTopic?.roomId]);
 
-  useLayoutEffect(() => {
-    const el = timelineRef.current;
-    if (!el || !isAtBottomRef.current) {
-      return;
-    }
-    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-  }, [activeTopic?.roomId, editing, timelineContentKey]);
 
   useEffect(() => {
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
@@ -721,6 +716,11 @@ export function TopicsWorkspace({
   }, [client]);
 
   useEffect(() => {
+    for (const roomId of Object.keys(lastRequestedReadRef.current)) {
+      if (!(roomId in rooms)) {
+        delete lastRequestedReadRef.current[roomId];
+      }
+    }
     setDraftsByRoom((prev) => {
       const staleIds = Object.keys(prev).filter((roomId) => !(roomId in rooms));
       if (staleIds.length === 0) {
@@ -751,7 +751,10 @@ export function TopicsWorkspace({
     });
     if (!pausedRef.current) {
       scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
-      if (client.pendingRoomEvents().length > 0 && !retryQueue.isActive()) {
+      if (
+        (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
+        !retryQueue.isActive()
+      ) {
         void retryQueue.flush();
       }
     }
@@ -789,13 +792,163 @@ export function TopicsWorkspace({
   function handleTimelineScroll() {
     collapseDescription();
     const el = timelineRef.current;
-    if (!el) {
-      return;
+    if (el) {
+      isAtBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX;
     }
-    isAtBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX;
+    if (visibleComposerRoomId) {
+      evaluateVisibleReadPosition(visibleComposerRoomId);
+    }
   }
 
+  function measureRowVisibility(container: HTMLElement): Map<string, BubbleVisibility> {
+    const map = new Map<string, BubbleVisibility>();
+    const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
+    if (rowEls.length === 0) {
+      return map;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const useRects =
+      containerRect.height > 0 &&
+      rowEls.some((el) => el.getBoundingClientRect().height > 0);
+    if (useRects) {
+      for (const el of rowEls) {
+        const eventId = el.dataset.eventId;
+        if (!eventId) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.bottom <= containerRect.top) {
+          map.set(eventId, "above");
+        } else if (rect.top >= containerRect.bottom) {
+          map.set(eventId, "below");
+        } else {
+          map.set(eventId, "visible");
+        }
+      }
+      return map;
+    }
+    const useOffsets =
+      container.clientHeight > 0 &&
+      rowEls.some((el) => el.offsetHeight > 0 || el.offsetTop > 0);
+    if (useOffsets) {
+      const top = container.scrollTop;
+      const bottom = top + container.clientHeight;
+      for (const el of rowEls) {
+        const eventId = el.dataset.eventId;
+        if (!eventId) continue;
+        const elTop = el.offsetTop;
+        const elBottom = elTop + el.offsetHeight;
+        if (elBottom <= top) {
+          map.set(eventId, "above");
+        } else if (elTop >= bottom) {
+          map.set(eventId, "below");
+        } else {
+          map.set(eventId, "visible");
+        }
+      }
+      return map;
+    }
+    for (const el of rowEls) {
+      const eventId = el.dataset.eventId;
+      if (eventId) {
+        map.set(eventId, "visible");
+      }
+    }
+    return map;
+  }
+
+  function evaluateVisibleReadPosition(roomId: string) {
+    if (!client.hasToken || exiting) {
+      return;
+    }
+    const container = timelineRef.current;
+    const room = client.rooms()[roomId];
+    const topic = topics.find((item) => item.roomId === roomId);
+    if (!container || !room || !topic) {
+      return;
+    }
+    const visibilityByEventId = measureRowVisibility(container);
+    const targetEventId = computeTargetReadPosition(
+      room,
+      client.ownerId,
+      topic.agentUserId,
+      visibilityByEventId,
+    );
+    if (!targetEventId) {
+      return;
+    }
+    const prevRequested = lastRequestedReadRef.current[roomId];
+    if (prevRequested) {
+      const prevIdx = room.timelineEvents.findIndex((ev) => ev.event_id === prevRequested);
+      const targetIdx = room.timelineEvents.findIndex((ev) => ev.event_id === targetEventId);
+      if (prevIdx !== -1 && targetIdx !== -1 && prevIdx >= targetIdx) {
+        return;
+      }
+    }
+    lastRequestedReadRef.current[roomId] = targetEventId;
+    void client
+      .advanceReadPosition(roomId, targetEventId)
+      .then((changed) => {
+        if (!changed || !mountedRef.current) {
+          return;
+        }
+        setRevision((value) => value + 1);
+        if (!pausedRef.current) {
+          retryQueue.wakeReadMarkers();
+        }
+      })
+      .catch(() => {
+        if (lastRequestedReadRef.current[roomId] === targetEventId) {
+          delete lastRequestedReadRef.current[roomId];
+        }
+      });
+  }
+
+  useLayoutEffect(() => {
+    if (!visibleComposerRoomId || !activeTopic || activeTopic.roomId !== visibleComposerRoomId) {
+      lastLandedRoomRef.current = null;
+      isAtBottomRef.current = true;
+      prevTimelineKeyRef.current = "";
+      return;
+    }
+    const container = timelineRef.current;
+    if (!container) {
+      return;
+    }
+    if (lastLandedRoomRef.current !== visibleComposerRoomId) {
+      lastLandedRoomRef.current = visibleComposerRoomId;
+      if (activeTopic.firstUnreadEventId) {
+        const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
+        const targetEl = rowEls.find(
+          (el) => el.dataset.eventId === activeTopic.firstUnreadEventId,
+        );
+        if (targetEl) {
+          const containerRect = container.getBoundingClientRect();
+          const targetRect = targetEl.getBoundingClientRect();
+          const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+          if (containerRect.height > 0 && targetRect.height > 0) {
+            const desiredTop = container.scrollTop + (targetRect.top - containerRect.top);
+            container.scrollTop =
+              maxScroll > 0 ? Math.max(0, Math.min(desiredTop, maxScroll)) : Math.max(0, desiredTop);
+          } else if (container.clientHeight > 0) {
+            container.scrollTop = Math.max(0, Math.min(targetEl.offsetTop, maxScroll));
+          }
+        }
+        isAtBottomRef.current =
+          container.scrollHeight - container.scrollTop - container.clientHeight <=
+          AT_BOTTOM_THRESHOLD_PX;
+      } else {
+        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        isAtBottomRef.current = true;
+      }
+      prevTimelineKeyRef.current = timelineContentKey;
+    } else if (prevTimelineKeyRef.current !== timelineContentKey) {
+      prevTimelineKeyRef.current = timelineContentKey;
+      if (isAtBottomRef.current) {
+        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      }
+    }
+    evaluateVisibleReadPosition(visibleComposerRoomId);
+  });
   function bumpDraftSeq(roomId: string): number {
     const next = (draftMutationSeqRef.current[roomId] ?? 0) + 1;
     draftMutationSeqRef.current[roomId] = next;
@@ -1052,10 +1205,23 @@ export function TopicsWorkspace({
                         ? "waypoint-topic-row active"
                         : "waypoint-topic-row"
                     }
+                    data-unread={topic.unread ? "true" : undefined}
                     onClick={() => openTopic(topic.roomId)}
                   >
                     <span className="waypoint-topic-row-title">
-                      <span>{topic.name}</span>
+                      {topic.unread ? (
+                        <span className="waypoint-unread-dot" aria-hidden="true" />
+                      ) : null}
+                      <span
+                        className={
+                          topic.unread
+                            ? "waypoint-topic-name unread"
+                            : "waypoint-topic-name"
+                        }
+                        style={{ fontWeight: topic.unread ? 700 : 400 }}
+                      >
+                        {topic.name}
+                      </span>
                     </span>
                     {registeredAgents.length > 1 && topic.botDisplayName ? (
                       <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
@@ -1536,6 +1702,7 @@ export function TopicsWorkspace({
                           key={item.key}
                           className={`waypoint-message-row ${item.side}`}
                           data-side={item.side}
+                          data-event-id={item.eventId}
                         >
                           {!item.confirmed ? (
                             <span

@@ -129,7 +129,7 @@ export function WaypointApp({
         setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
         if (
           hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId) &&
-          matrix.pendingRoomEvents().length > 0
+          (matrix.pendingRoomEvents().length > 0 || matrix.pendingReadMarkers().length > 0)
         ) {
           void retryQueue().flush();
         }
