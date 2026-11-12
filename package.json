@@ -11,9 +11,14 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@streamdown/cjk": "^1.0.4",
+    "@streamdown/code": "^2.0.0",
+    "@streamdown/math": "^1.0.3",
     "@tauri-apps/api": "^2.12.4",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "remark-gfm": "^4.0.1",
+    "streamdown": "^2.7.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.4",

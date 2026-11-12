@@ -16842,3 +16842,495 @@ test("消息上的 ✅ 和 ❌ 留在原消息上可见，不藏起、不升级�
   expect(within(errMsgRow).getByText("❌")).toBeInTheDocument();
   expect(rxRow).not.toHaveTextContent("正在回应");
 });
+
+test("代码块横向滚动、不换行、可复制，且 mermaid 围栏只当代码块不作图 (#63)", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+
+  const homeserver = new FakeHomeserver();
+  const tsCode = "const veryLongVariableName = \"alpha-beta-gamma-delta-epsilon-zeta-eta-theta\";\nconsole.log(veryLongVariableName);";
+  const mermaidCode = "graph TD;\nA-->B;";
+  const agentBody = [
+    "代码示例如下：",
+    "```typescript",
+    tsCode,
+    "```",
+    "",
+    "```mermaid",
+    mermaidCode,
+    "```",
+  ].join("\n");
+
+  const ts = new Date(2026, 10, 12, 10, 0, 0).getTime();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "代码渲染话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$code-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts,
+                      content: { msgtype: "m.text", body: agentBody },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "代码渲染话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const bubble = timeline.querySelector("[data-side=\"left\"] .waypoint-bubble") as HTMLElement;
+  expect(bubble).not.toBeNull();
+
+  // 代码块应渲染成 code-block，而不是原始 ```typescript 文本
+  expect(bubble.textContent).not.toContain("```typescript");
+  expect(bubble.textContent).not.toContain("```mermaid");
+
+  const codeBodies = bubble.querySelectorAll("[data-streamdown=\"code-block-body\"]");
+  expect(codeBodies).toHaveLength(2);
+  const firstBody = codeBodies[0] as HTMLElement;
+  const firstPre = firstBody.querySelector("pre") as HTMLElement;
+  expect(firstPre).not.toBeNull();
+  expect(getComputedStyle(firstBody).overflowX).toBe("auto");
+  expect(getComputedStyle(firstPre).whiteSpace).toBe("pre");
+
+  // mermaid 围栏作为普通代码块渲染，不作图
+  const mermaidBlock = bubble.querySelector("[data-streamdown=\"code-block\"][data-language=\"mermaid\"]");
+  expect(mermaidBlock).not.toBeNull();
+  expect(mermaidBlock?.textContent).toContain("graph TD;");
+  expect(mermaidBlock?.textContent).toContain("A-->B;");
+  expect(bubble.querySelector("[data-streamdown=\"mermaid\"]")).toBeNull();
+  expect(bubble.querySelector("[data-streamdown=\"mermaid-block\"]")).toBeNull();
+
+  // 复制代码按钮工作正常
+  const copyButtons = within(bubble).getAllByRole("button", { name: "复制代码" });
+  expect(copyButtons).toHaveLength(2);
+  await user.click(copyButtons[0]!);
+  expect(writeText).toHaveBeenCalledWith(`${tsCode}\n`);
+  expect(within(bubble).getByText("已复制")).toBeInTheDocument();
+});
+
+test("GFM 表格在气泡内渲染并支持横向滚动 (#63)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const tableBody = [
+    "| 字段 | 类型 | 说明 | 示例值 |",
+    "| --- | --- | --- | --- |",
+    "| room_id | string | Topic 标识 | !abc123:example.com |",
+    "| status | string | 当前状态 | confirmed |",
+  ].join("\n");
+  const ts = new Date(2026, 10, 12, 10, 5, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "表格渲染话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$table-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts,
+                      content: { msgtype: "m.text", body: tableBody },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "表格渲染话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const bubble = timeline.querySelector("[data-side=\"left\"] .waypoint-bubble") as HTMLElement;
+  const table = within(bubble).getByRole("table");
+  expect(table).toBeInTheDocument();
+  expect(within(table).getAllByRole("columnheader").map((el) => el.textContent)).toEqual([
+    "字段",
+    "类型",
+    "说明",
+    "示例值",
+  ]);
+  expect(within(table).getByText("!abc123:example.com")).toBeInTheDocument();
+
+  const wrapper = bubble.querySelector("[data-streamdown=\"table-wrapper\"]") as HTMLElement;
+  expect(wrapper).not.toBeNull();
+  const scrollContainer = wrapper.lastElementChild as HTMLElement;
+  expect(scrollContainer).not.toBeNull();
+  expect(getComputedStyle(scrollContainer).overflowX).toBe("auto");
+});
+
+test("成对单/双美元按公式排版，不成对美元保持原文，渲染失败显示源码且不折叠 (#63)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const ts = new Date(2026, 10, 12, 10, 10, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "公式渲染话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$math-paired",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts,
+                      content: {
+                        msgtype: "m.text",
+                        body: "行内公式 $E = mc^2$ 与块级公式：\n\n$$\n\\int_0^1 x^2 \\, dx\n$$",
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$math-unpaired",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts + 1000,
+                      content: {
+                        msgtype: "m.text",
+                        body: "价格是 $5，或者 $5 or $10，还有未闭合 $$a + b",
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$math-broken",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts + 2000,
+                      content: {
+                        msgtype: "m.text",
+                        body: "坏公式：$$\\frac{1}{$$ 与 $\\noSuchLatexCmd$",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "公式渲染话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")) as HTMLElement[];
+  expect(bubbles).toHaveLength(3);
+
+  // 1. 成对的单美元与双美元渲染为 KaTeX 公式
+  const pairedBubble = bubbles[0]!;
+  expect(pairedBubble.querySelectorAll(".katex")).toHaveLength(2);
+  expect(pairedBubble.querySelector(".katex-display")).not.toBeNull();
+
+  // 2. 不成对的美元保持原文
+  const unpairedBubble = bubbles[1]!;
+  expect(unpairedBubble.querySelector(".katex")).toBeNull();
+  expect(unpairedBubble.textContent).toBe("价格是 $5，或者 $5 or $10，还有未闭合 $$a + b");
+
+  // 3. 公式渲染失败时直接显示源码、不自动折叠
+  const brokenBubble = bubbles[2]!;
+  expect(brokenBubble.querySelector("details")).toBeNull();
+  expect(brokenBubble.textContent).toContain("\\frac{1}{");
+  expect(brokenBubble.textContent).toContain("\\noSuchLatexCmd");
+  const errorEl = brokenBubble.querySelector(".katex-error") as HTMLElement | null;
+  expect(errorEl).not.toBeNull();
+  expect(errorEl?.textContent).toContain("\\frac{1}{");
+});
+
+test("Owner 发出的文字走同一套渲染，不注入 HTML 也不内联 http(s) 图片 (#63)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const ts = new Date(2026, 10, 12, 10, 15, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "Owner同款渲染话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { event_id: "$owner-rich-1" },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "Owner同款渲染话题" }));
+
+  const ownerMessage = [
+    "**加粗**文本与公式 $a^2 + b^2 = c^2$",
+    "",
+    "```python",
+    "print(42)",
+    "```",
+    "",
+    "| K | V |",
+    "| --- | --- |",
+    "| x | 1 |",
+    "",
+    "![外链图](https://evil.example/track.png)",
+    "",
+    "<script>window.__ownerXss=true</script> <img src=x onerror=window.__ownerXss=true> <div onclick=window.__ownerXss=true>hi</div>",
+  ].join("\n");
+
+  const composer = screen.getByRole("textbox", { name: "输入消息" });
+  await user.click(composer);
+  await user.paste(ownerMessage);
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(timeline.querySelector("[data-side=\"right\"]")).not.toBeNull();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  const rightRow = timeline.querySelector("[data-side=\"right\"]") as HTMLElement;
+  const bubble = rightRow.querySelector(".waypoint-bubble") as HTMLElement;
+  expect(bubble).not.toBeNull();
+
+  // Owner 气泡同样渲染 CJK 加粗、公式、代码、表格
+  expect(bubble.querySelector("[data-streamdown=\"strong\"]")?.textContent).toBe("加粗");
+  expect(bubble.querySelector(".katex")).not.toBeNull();
+  expect(bubble.querySelector("[data-streamdown=\"code-block\"][data-language=\"python\"]")).not.toBeNull();
+  expect(within(bubble).getByRole("button", { name: "复制代码" })).toBeInTheDocument();
+  expect(within(bubble).getByRole("table")).toBeInTheDocument();
+
+  // 不注入 HTML、不执行脚本、不内联 http(s) 图片
+  expect(bubble.querySelector("script")).toBeNull();
+  expect(bubble.querySelector("img")).toBeNull();
+  expect(bubble.querySelector("[onclick]")).toBeNull();
+  expect((window as { __ownerXss?: boolean }).__ownerXss).toBeUndefined();
+  expect(bubble.textContent).toContain("<script>window.__ownerXss=true</script>");
+  expect(bubble.textContent).toContain("外链图");
+});
+
+test("渲染在旧设备上异常时提示并回退原文，不拒绝打开 Topic 或设 WebView 版本门槛 (#63)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const ts = new Date(2026, 10, 12, 10, 20, 0).getTime();
+  const codeBody = "```rust\nfn main() { println!(\"hi\"); }\n```";
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "旧WebView兜底话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ok-msg",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts,
+                      content: { msgtype: "m.text", body: "普通消息仍可正常显示" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$crash-msg",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts + 1000,
+                      content: { msgtype: "m.text", body: codeBody },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const origAt = Array.prototype.at;
+  const origUaDescriptor = Object.getOwnPropertyDescriptor(Navigator.prototype, "userAgent");
+  const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+  try {
+    Object.defineProperty(navigator, "userAgent", {
+      configurable: true,
+      get: () =>
+        "Mozilla/5.0 (Linux; Android 8.1.0; Pixel) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/66.0.3359.158 Mobile Safari/537.36",
+    });
+
+    // 模拟旧 WebView 缺少/抛出 Array.prototype.at 导致 Streamdown 代码块分支抛错
+    Array.prototype.at = function (index: number) {
+      if (Array.isArray(this) && typeof this[0] === "string" && this[0].includes("language-rust")) {
+        throw new TypeError("Array.prototype.at is not supported on old WebView");
+      }
+      return origAt.call(this, index);
+    };
+
+    const clock = new ManualClock();
+    clock.now = ts;
+    render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{ deviceDisplayName: "Waypoint Android" }}
+        clock={clock}
+      />,
+    );
+    await login(user);
+
+    // 不设 WebView 版本硬门槛，仍能进入列表并打开 Topic
+    const topicButton = await screen.findByRole("button", { name: "旧WebView兜底话题" });
+    await user.click(topicButton);
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")) as HTMLElement[];
+    expect(bubbles).toHaveLength(2);
+
+    // 第一条普通消息不受影响
+    expect(bubbles[0]?.textContent).toBe("普通消息仍可正常显示");
+
+    // 第二条渲染失败：给出柔和提示并回退到原文，Topic 仍保持打开且输入框可用
+    const fallbackBubble = bubbles[1]!;
+    expect(within(fallbackBubble).getByRole("note")).toHaveTextContent("渲染异常，已显示原文");
+    expect(fallbackBubble.textContent).toContain("fn main()");
+    expect(fallbackBubble.textContent).toContain("```rust");
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toBeEnabled();
+  } finally {
+    Array.prototype.at = origAt;
+    if (origUaDescriptor) {
+      Object.defineProperty(Navigator.prototype, "userAgent", origUaDescriptor);
+    }
+    errorSpy.mockRestore();
+  }
+});

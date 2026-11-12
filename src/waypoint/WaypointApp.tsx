@@ -1,3 +1,4 @@
+import "../App.css";
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { normalizeInset } from "../adapters/inset";
 import type {

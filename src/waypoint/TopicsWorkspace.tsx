@@ -16,6 +16,7 @@ import {
   nextBackfillTargetForScrollUp,
   type MatrixClient,
 } from "./matrix-client";
+import { MessageBody } from "./MessageBody";
 import type { DraftAttachment, DraftRecord } from "./session-store";
 import {
   classifyLoginFailure,
@@ -2612,7 +2613,7 @@ export function TopicsWorkspace({
                                   : undefined
                               }
                             >
-                              {item.body}
+                              <MessageBody body={item.body} />
                             </div>
                             {item.reactions && item.reactions.length > 0 ? (
                               <div className="waypoint-message-reactions">
