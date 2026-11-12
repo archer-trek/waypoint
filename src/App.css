@@ -158,6 +158,11 @@ main {
   flex-shrink: 0;
 }
 
+.waypoint-topic-edit-button {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
 .waypoint-topic-header-main {
   display: flex;
   align-items: baseline;
@@ -247,4 +252,153 @@ button {
 
 p[role="alert"] {
   color: #8a1f1f;
+}
+
+.waypoint-sidebar-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.waypoint-sidebar-actions button,
+.waypoint-settings-header button,
+.waypoint-agents-header button,
+.waypoint-bot-actions button,
+.waypoint-form-actions button {
+  margin-top: 0;
+}
+
+.waypoint-settings-header,
+.waypoint-agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.waypoint-bot-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+
+.waypoint-bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 0.0625rem solid #ddd9d0;
+}
+
+.waypoint-bot-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waypoint-bot-name {
+  font-weight: 600;
+}
+
+.waypoint-bot-id {
+  font-size: 0.875rem;
+  color: #555;
+  word-break: break-all;
+}
+
+.waypoint-bot-actions,
+.waypoint-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.waypoint-bot-actions {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.waypoint-agents-form,
+.waypoint-inline-register {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 0.0625rem solid #ddd9d0;
+  background: #efede7;
+}
+
+.waypoint-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.waypoint-day-separator {
+  align-self: center;
+  font-size: 0.75rem;
+  color: #666;
+  margin: 0.5rem 0;
+}
+
+.waypoint-message-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.waypoint-message-row.right {
+  justify-content: flex-end;
+}
+
+.waypoint-message-row.left {
+  justify-content: flex-start;
+}
+
+.waypoint-bubble {
+  max-width: min(36rem, 80%);
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #ffffff;
+}
+
+.waypoint-message-row.right .waypoint-bubble {
+  background: #d8e6f3;
+}
+
+.waypoint-unconfirmed-spinner {
+  display: inline-block;
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 0.125rem solid #999;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: waypoint-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes waypoint-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.waypoint-composer {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  border-top: 0.0625rem solid #ddd9d0;
+  background: #f6f5f2;
+  align-items: flex-end;
+}
+
+.waypoint-composer textarea {
+  flex: 1;
+  margin-top: 0;
+  resize: none;
+}
+
+.waypoint-composer button {
+  margin-top: 0;
+  flex-shrink: 0;
 }

@@ -5,6 +5,14 @@ export type StoredRoomEvents = {
   timelineEvents: RawMatrixEvent[];
 };
 
+export type PendingRoomEvent = {
+  txnId: string;
+  roomId: string;
+  type: string;
+  sender: string;
+  content: Record<string, unknown>;
+};
+
 export type SessionRecord = {
   baseUrl: string;
   userId: string;
@@ -13,6 +21,7 @@ export type SessionRecord = {
   syncCursor?: string;
   accountData?: Record<string, unknown>;
   rooms?: Record<string, StoredRoomEvents>;
+  pendingEvents?: PendingRoomEvent[];
 };
 
 const DB_NAME = "waypoint";
@@ -51,6 +60,9 @@ export async function dropCredential(): Promise<void> {
   }
   if (current.rooms && Object.keys(current.rooms).length > 0) {
     next.rooms = current.rooms;
+  }
+  if (current.pendingEvents && current.pendingEvents.length > 0) {
+    next.pendingEvents = current.pendingEvents;
   }
   await saveSession(next);
 }

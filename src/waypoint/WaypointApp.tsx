@@ -20,7 +20,7 @@ import {
   transportFailureMessage,
 } from "./matrix-errors";
 import { TopicsWorkspace } from "./TopicsWorkspace";
-import { isFullUserId, parseRegisteredAgents, serverName } from "./topics";
+import { isFullUserId, parseRegisteredAgents, validateAgentUserId } from "./topics";
 
 let liveAppInstanceToken: symbol | null = null;
 
@@ -662,39 +662,6 @@ function textField(body: Record<string, unknown>, key: string): string | undefin
 
 function hasValidAgent(content: unknown, ownerUserId: string): boolean {
   return parseRegisteredAgents(content, ownerUserId).length > 0;
-}
-
-function validateAgentUserId(
-  raw: string,
-  ownerUserId: string,
-): { ok: true; userId: string } | { ok: false; trimmed: string; message: string } {
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return { ok: false, trimmed, message: "登记 Bot 失败，因为用户 ID 是空的。" };
-  }
-  if (!isFullUserId(trimmed)) {
-    return {
-      ok: false,
-      trimmed,
-      message: "登记 Bot 失败，因为只接受完整的 Matrix 用户 ID，不自动补 @ 或 server name。",
-    };
-  }
-  const ownerServer = serverName(ownerUserId);
-  if (!ownerServer || serverName(trimmed) !== ownerServer) {
-    return {
-      ok: false,
-      trimmed,
-      message: "登记 Bot 失败，因为 Bot 的 server name 必须与当前账号完全一致。",
-    };
-  }
-  if (trimmed === ownerUserId) {
-    return {
-      ok: false,
-      trimmed,
-      message: "登记 Bot 失败，因为不能把自己登记成 Bot。",
-    };
-  }
-  return { ok: true, userId: trimmed };
 }
 
 function nextAgentsContent(existing: TransportResult, agentUserId: string): Record<string, unknown> {

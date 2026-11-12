@@ -1,15 +1,49 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
+import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
 import {
   appendDirectRoom,
+  buildAddAgentContent,
+  buildRemoveAgentContent,
+  buildRenameAgentContent,
   createTopicRoom,
+  deriveRoomTimelineItems,
   deriveTopics,
   parseRegisteredAgents,
   resolveBotName,
   resolvePreselectedBotId,
+  saveRegisteredAgents,
+  updateTopicDetails,
+  validateAgentUserId,
 } from "./topics";
+
+const FOREGROUND_SYNC_INTERVAL_MS = 1000;
+const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+type AgentsFormState =
+  | {
+      mode: "add";
+      userId: string;
+      handwrittenName: string;
+    }
+  | {
+      mode: "edit";
+      userId: string;
+      handwrittenName: string;
+    }
+  | {
+      mode: "remove";
+      userId: string;
+    };
 
 export function TopicsWorkspace({
   client,
@@ -26,13 +60,38 @@ export function TopicsWorkspace({
 }) {
   const [, setRevision] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [agentsForm, setAgentsForm] = useState<AgentsFormState | null>(null);
+  const [agentsSubmitting, setAgentsSubmitting] = useState(false);
+  const [agentsError, setAgentsError] = useState<string | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [descriptionInput, setDescriptionInput] = useState("");
   const [selectedBotId, setSelectedBotId] = useState("");
   const [formError, setFormError] = useState<string | undefined>(undefined);
+  const [quickRegisterOpen, setQuickRegisterOpen] = useState(false);
+  const [quickUserId, setQuickUserId] = useState("");
+  const [quickHandwrittenName, setQuickHandwrittenName] = useState("");
+  const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const [quickError, setQuickError] = useState<string | undefined>(undefined);
   const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editNameInput, setEditNameInput] = useState("");
+  const [editDescriptionInput, setEditDescriptionInput] = useState("");
+  const [editPendingFields, setEditPendingFields] = useState({ name: true, description: true });
+  const [editError, setEditError] = useState<string | undefined>(undefined);
+  const [draftsByRoom, setDraftsByRoom] = useState<Record<string, string>>({});
+  const [composerError, setComposerError] = useState<string | undefined>(undefined);
+  const persistingSendRef = useRef(false);
+  const mountedRef = useRef(true);
+  const pausedRef = useRef(false);
+  const syncTimerRef = useRef<number | undefined>(undefined);
+  const syncBackoffRef = useRef(0);
+  const retryQueueTimerRef = useRef<number | undefined>(undefined);
+  const retryQueueRunningRef = useRef(false);
+  const retryQueueBackoffRef = useRef(0);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -44,16 +103,34 @@ export function TopicsWorkspace({
   const activeTopic = activeTopicId
     ? topics.find((topic) => topic.roomId === activeTopicId)
     : undefined;
+  const nowMs = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+  const activeTimelineItems = activeTopic
+    ? deriveRoomTimelineItems(
+        rooms[activeTopic.roomId],
+        client.pendingRoomEvents(activeTopic.roomId),
+        client.ownerId,
+        activeTopic.agentUserId,
+        nowMs,
+      )
+    : [];
 
   useEffect(() => {
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
       setActiveTopicId(null);
       setDescriptionExpanded(false);
+      setEditSubmitting(false);
+      resetEditForm();
     }
   }, [activeTopicId, topics]);
 
   const navDepthRef = useRef(0);
-  const targetDepth = viewportMode === "narrow" ? (creating ? 1 : 0) + (activeTopic ? 1 : 0) : 0;
+  const targetDepth =
+    viewportMode === "narrow"
+      ? (settingsOpen ? 1 : 0) +
+        (creating ? 1 : 0) +
+        (activeTopic ? 1 : 0) +
+        (!settingsOpen && !creating && activeTopic && editing ? 1 : 0)
+      : 0;
 
   function syncNavigationDepth(desiredDepth: number) {
     while (navDepthRef.current < desiredDepth) {
@@ -71,18 +148,62 @@ export function TopicsWorkspace({
   }, [targetDepth, platform]);
 
   const backHandlerRef = useRef<() => boolean>(() => false);
+  function resetAgentsForm() {
+    setAgentsForm(null);
+    setAgentsError(undefined);
+  }
+
+  function resetQuickRegister() {
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+  }
+
+  function resetCreateForm() {
+    setCreating(false);
+    setFormError(undefined);
+    resetQuickRegister();
+  }
+
+  function resetEditForm() {
+    setEditing(false);
+    setEditError(undefined);
+    setEditPendingFields({ name: true, description: true });
+  }
+
+  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting;
+
   backHandlerRef.current = () => {
     if (viewportMode !== "narrow") {
       return false;
     }
-    if (creating) {
+    if (settingsOpen) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (submitting) {
+      if (agentsSubmitting) {
         syncNavigationDepth(targetDepth);
         return true;
       }
-      setCreating(false);
-      setFormError(undefined);
+      setSettingsOpen(false);
+      resetAgentsForm();
+      return true;
+    }
+    if (creating) {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      if (submitting || quickSubmitting) {
+        syncNavigationDepth(targetDepth);
+        return true;
+      }
+      resetCreateForm();
+      return true;
+    }
+    if (editing && activeTopic) {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      if (editSubmitting) {
+        syncNavigationDepth(targetDepth);
+        return true;
+      }
+      resetEditForm();
       return true;
     }
     if (activeTopic) {
@@ -107,10 +228,166 @@ export function TopicsWorkspace({
     };
   }, [platform]);
 
-  function openCreateForm() {
-    if (submitting) {
+  function openSettings() {
+    if (anyFormSubmitting) {
       return;
     }
+    resetCreateForm();
+    resetEditForm();
+    resetAgentsForm();
+    setSettingsOpen(true);
+  }
+
+  function closeSettings() {
+    if (agentsSubmitting) {
+      return;
+    }
+    setSettingsOpen(false);
+    resetAgentsForm();
+  }
+
+  function openAddAgentForm() {
+    if (agentsSubmitting) {
+      return;
+    }
+    setAgentsForm({ mode: "add", userId: "", handwrittenName: "" });
+    setAgentsError(undefined);
+  }
+
+  function openEditAgentForm(userId: string, currentName?: string) {
+    if (agentsSubmitting) {
+      return;
+    }
+    setAgentsForm({
+      mode: "edit",
+      userId,
+      handwrittenName: currentName ?? "",
+    });
+    setAgentsError(undefined);
+  }
+
+  async function handleEditAgentSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (agentsSubmitting || agentsForm?.mode !== "edit") {
+      return;
+    }
+    const nextContent = buildRenameAgentContent(
+      client.accountData("im.waypoint.agents"),
+      agentsForm.userId,
+      agentsForm.handwrittenName,
+    );
+    setAgentsSubmitting(true);
+    setAgentsError(undefined);
+    const result = await saveRegisteredAgents(client, "修改 Bot 名字", nextContent);
+    setAgentsSubmitting(false);
+    if (!result.ok) {
+      setAgentsError(result.message);
+      return;
+    }
+    resetAgentsForm();
+    setRevision((value) => value + 1);
+  }
+
+  function openRemoveAgentConfirm(userId: string) {
+    if (agentsSubmitting || registeredAgents.length <= 1) {
+      return;
+    }
+    setAgentsForm({ mode: "remove", userId });
+    setAgentsError(undefined);
+  }
+
+  async function confirmRemoveBot() {
+    if (agentsSubmitting || agentsForm?.mode !== "remove") {
+      return;
+    }
+    if (registeredAgents.length <= 1) {
+      setAgentsError("移除 Bot 失败，因为名册里至少要保留一个 Bot。");
+      return;
+    }
+    const nextContent = buildRemoveAgentContent(
+      client.accountData("im.waypoint.agents"),
+      agentsForm.userId,
+    );
+    setAgentsSubmitting(true);
+    setAgentsError(undefined);
+    const result = await saveRegisteredAgents(client, "移除 Bot", nextContent);
+    setAgentsSubmitting(false);
+    if (!result.ok) {
+      setAgentsError(result.message);
+      return;
+    }
+    resetAgentsForm();
+    setRevision((value) => value + 1);
+  }
+
+  function cancelAgentsAction() {
+    if (agentsSubmitting) {
+      return;
+    }
+    resetAgentsForm();
+  }
+
+  async function submitAddAgent({
+    userId,
+    handwrittenName,
+    onTrimmedUserId,
+    setBusy,
+    setError,
+    onSuccess,
+  }: {
+    userId: string;
+    handwrittenName: string;
+    onTrimmedUserId: (trimmed: string) => void;
+    setBusy: (busy: boolean) => void;
+    setError: (message: string | undefined) => void;
+    onSuccess: (addedUserId: string) => void;
+  }) {
+    const validation = validateAgentUserId(userId, client.ownerId, registeredAgents);
+    if (!validation.ok) {
+      onTrimmedUserId(validation.trimmed);
+      setError(validation.message);
+      return;
+    }
+    const nextContent = buildAddAgentContent(
+      client.accountData("im.waypoint.agents"),
+      validation.userId,
+      handwrittenName,
+    );
+    onTrimmedUserId(validation.userId);
+    setBusy(true);
+    setError(undefined);
+    const result = await saveRegisteredAgents(client, "登记 Bot", nextContent);
+    setBusy(false);
+    if (!result.ok) {
+      setError(result.message);
+      return;
+    }
+    onSuccess(validation.userId);
+    setRevision((value) => value + 1);
+  }
+
+  async function handleAddAgentSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (agentsSubmitting || agentsForm?.mode !== "add") {
+      return;
+    }
+    const draft = agentsForm;
+    await submitAddAgent({
+      userId: draft.userId,
+      handwrittenName: draft.handwrittenName,
+      onTrimmedUserId: (trimmed) => setAgentsForm({ ...draft, userId: trimmed }),
+      setBusy: setAgentsSubmitting,
+      setError: setAgentsError,
+      onSuccess: () => resetAgentsForm(),
+    });
+  }
+
+  function openCreateForm() {
+    if (anyFormSubmitting) {
+      return;
+    }
+    setSettingsOpen(false);
+    resetEditForm();
     setCreating(true);
     setSubmitting(false);
     setNameInput("");
@@ -121,29 +398,97 @@ export function TopicsWorkspace({
         : resolvePreselectedBotId(topics, registeredAgents),
     );
     setFormError(undefined);
+    resetQuickRegister();
   }
 
   function closeCreateForm() {
-    if (submitting) {
+    if (submitting || quickSubmitting) {
       return;
     }
-    setCreating(false);
-    setFormError(undefined);
+    resetCreateForm();
+  }
+
+  function openQuickRegister() {
+    if (submitting || quickSubmitting) {
+      return;
+    }
+    resetQuickRegister();
+    setQuickRegisterOpen(true);
+  }
+
+  function closeQuickRegister() {
+    if (quickSubmitting) {
+      return;
+    }
+    resetQuickRegister();
+  }
+
+  async function handleQuickRegister() {
+    if (quickSubmitting || submitting) {
+      return;
+    }
+    await submitAddAgent({
+      userId: quickUserId,
+      handwrittenName: quickHandwrittenName,
+      onTrimmedUserId: setQuickUserId,
+      setBusy: setQuickSubmitting,
+      setError: setQuickError,
+      onSuccess: (addedUserId) => {
+        setSelectedBotId(addedUserId);
+        resetQuickRegister();
+      },
+    });
+  }
+
+  function handleQuickRegisterKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleQuickRegister();
+    }
+  }
+
+  function openEditForm() {
+    if (anyFormSubmitting || !activeTopic) {
+      return;
+    }
+    setEditing(true);
+    setEditSubmitting(false);
+    setEditNameInput(activeTopic.name);
+    setEditDescriptionInput(activeTopic.description ?? "");
+    setEditPendingFields({ name: true, description: true });
+    setEditError(undefined);
+  }
+
+  function closeEditForm() {
+    if (editSubmitting) {
+      return;
+    }
+    resetEditForm();
   }
 
   function openTopic(roomId: string) {
-    if (submitting) {
+    if (anyFormSubmitting) {
       return;
     }
-    setCreating(false);
-    setFormError(undefined);
+    setSettingsOpen(false);
+    resetCreateForm();
+    resetEditForm();
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
   }
 
   function goBack() {
+    if (settingsOpen) {
+      closeSettings();
+      return;
+    }
     if (creating) {
       closeCreateForm();
+      return;
+    }
+    if (editing && activeTopic) {
+      closeEditForm();
       return;
     }
     if (activeTopic) {
@@ -152,13 +497,207 @@ export function TopicsWorkspace({
     }
   }
 
+  function clearSyncTimer() {
+    if (syncTimerRef.current !== undefined) {
+      clock.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = undefined;
+    }
+  }
+
+  function clearRetryQueueTimer() {
+    if (retryQueueTimerRef.current !== undefined) {
+      clock.clearTimeout(retryQueueTimerRef.current);
+      retryQueueTimerRef.current = undefined;
+    }
+  }
+
+  function scheduleForegroundSync(delayMs: number) {
+    clearSyncTimer();
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    syncTimerRef.current = clock.setTimeout(() => {
+      syncTimerRef.current = undefined;
+      void runForegroundSync();
+    }, delayMs);
+  }
+
+  async function runForegroundSync() {
+    if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+      return;
+    }
+    let attempt;
+    try {
+      attempt = await client.sync();
+    } catch {
+      if (!mountedRef.current || pausedRef.current) {
+        return;
+      }
+      const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+      syncBackoffRef.current += 1;
+      scheduleForegroundSync(delay);
+      return;
+    }
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    if (isCredentialRejected(attempt.result)) {
+      pausedRef.current = true;
+      clearSyncTimer();
+      clearRetryQueueTimer();
+      return;
+    }
+    if (attempt.result.type === "response" && attempt.result.status === 200) {
+      syncBackoffRef.current = 0;
+      await client.retainSync(attempt);
+      if (!mountedRef.current || pausedRef.current) {
+        return;
+      }
+      setRevision((value) => value + 1);
+      scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+      return;
+    }
+    const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+    syncBackoffRef.current += 1;
+    scheduleForegroundSync(delay);
+  }
+
+  function scheduleRetryQueue() {
+    clearRetryQueueTimer();
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    const delay =
+      RETRY_BACKOFF_MS[Math.min(retryQueueBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+    retryQueueBackoffRef.current += 1;
+    retryQueueTimerRef.current = clock.setTimeout(() => {
+      retryQueueTimerRef.current = undefined;
+      void flushRetryQueue();
+    }, delay);
+  }
+
+  async function flushRetryQueue() {
+    if (
+      retryQueueRunningRef.current ||
+      !mountedRef.current ||
+      pausedRef.current ||
+      !client.hasToken
+    ) {
+      return;
+    }
+    retryQueueRunningRef.current = true;
+    clearRetryQueueTimer();
+    try {
+      while (mountedRef.current && !pausedRef.current && client.hasToken) {
+        const pending = client.pendingRoomEvents();
+        if (pending.length === 0) {
+          retryQueueBackoffRef.current = 0;
+          break;
+        }
+        const head = pending[0];
+        let result;
+        try {
+          result = await client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);
+        } catch {
+          if (mountedRef.current && !pausedRef.current) {
+            scheduleRetryQueue();
+          }
+          break;
+        }
+        if (!mountedRef.current || pausedRef.current) {
+          break;
+        }
+        if (isCredentialRejected(result)) {
+          pausedRef.current = true;
+          clearSyncTimer();
+          clearRetryQueueTimer();
+          break;
+        }
+        if (
+          result.type === "response" &&
+          result.status === 200 &&
+          isRecord(result.body) &&
+          typeof result.body.event_id === "string" &&
+          result.body.event_id !== ""
+        ) {
+          await client.confirmSentRoomEvent(head.roomId, head.txnId, result.body.event_id);
+          retryQueueBackoffRef.current = 0;
+          if (!mountedRef.current) {
+            break;
+          }
+          setRevision((value) => value + 1);
+          continue;
+        }
+        if (
+          result.type === "failure" ||
+          isRateLimited(result.status, result.body) ||
+          result.status >= 500
+        ) {
+          scheduleRetryQueue();
+          break;
+        }
+        break;
+      }
+    } finally {
+      retryQueueRunningRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    pausedRef.current = false;
+    scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+    if (client.pendingRoomEvents().length > 0) {
+      void flushRetryQueue();
+    }
+    return () => {
+      mountedRef.current = false;
+      clearSyncTimer();
+      clearRetryQueueTimer();
+    };
+  }, [client, clock]);
+
   function collapseDescription() {
     setDescriptionExpanded(false);
   }
 
+  function updateDraft(roomId: string, text: string) {
+    setDraftsByRoom((prev) => ({ ...prev, [roomId]: text }));
+    if (composerError) {
+      setComposerError(undefined);
+    }
+  }
+
+  async function handleSendMessage(event: FormEvent) {
+    event.preventDefault();
+    if (!activeTopic || persistingSendRef.current) {
+      return;
+    }
+    const roomId = activeTopic.roomId;
+    const body = draftsByRoom[roomId] ?? "";
+    if (body.trim() === "") {
+      return;
+    }
+    persistingSendRef.current = true;
+    setComposerError(undefined);
+    try {
+      await client.enqueueRoomEvent(roomId, "m.room.message", {
+        msgtype: "m.text",
+        body,
+      });
+      setDraftsByRoom((prev) => ({ ...prev, [roomId]: "" }));
+      setRevision((value) => value + 1);
+      void flushRetryQueue();
+    } catch {
+      setComposerError("消息保存失败，请重试。");
+    } finally {
+      persistingSendRef.current = false;
+    }
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (submitting) {
+    if (submitting || quickSubmitting) {
       return;
     }
     const trimmedName = nameInput.trim();
@@ -191,14 +730,70 @@ export function TopicsWorkspace({
     }
 
     setCreating(false);
+    resetEditForm();
     setActiveTopicId(result.roomId);
     setDescriptionExpanded(false);
     setRevision((value) => value + 1);
     void appendDirectRoom(client, agentUserId, result.roomId);
   }
 
+  async function handleEditSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (editSubmitting || !activeTopic) {
+      return;
+    }
+    const nextName = editPendingFields.name ? editNameInput.trim() : activeTopic.name;
+    if (editPendingFields.name && !nextName) {
+      setEditError("请输入 Topic 名字。");
+      return;
+    }
+    const currentDescription = activeTopic.description ?? "";
+    const nextDescription = editPendingFields.description
+      ? editDescriptionInput.trim()
+      : currentDescription;
+
+    if (nextName === activeTopic.name && nextDescription === currentDescription) {
+      resetEditForm();
+      return;
+    }
+
+    setEditSubmitting(true);
+    setEditError(undefined);
+
+    const now = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+    const result = await updateTopicDetails(client, {
+      roomId: activeTopic.roomId,
+      currentName: activeTopic.name,
+      currentDescription,
+      nextName,
+      nextDescription,
+      now,
+    });
+
+    setEditSubmitting(false);
+    if (result.nameUpdated) {
+      setEditNameInput(nextName);
+    }
+    if (result.descriptionUpdated) {
+      setEditDescriptionInput(nextDescription);
+    }
+    if (result.nameUpdated || result.descriptionUpdated) {
+      setRevision((value) => value + 1);
+    }
+    if (!result.ok) {
+      setEditPendingFields((prev) => ({
+        name: prev.name && !result.nameUpdated,
+        description: prev.description && !result.descriptionUpdated,
+      }));
+      setEditError(result.message);
+      return;
+    }
+
+    resetEditForm();
+  }
+
   const isNarrow = viewportMode === "narrow";
-  const isNarrowPushed = isNarrow && (creating || Boolean(activeTopic));
+  const isNarrowPushed = isNarrow && (settingsOpen || creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
   const showDetail = !isNarrow || isNarrowPushed;
   const safeInset = normalizeInset(keyboardInsetBottom);
@@ -214,9 +809,14 @@ export function TopicsWorkspace({
           <p>已连接</p>
           <div className="waypoint-sidebar-header">
             <h1>Topic</h1>
-            <button type="button" onClick={openCreateForm}>
-              新建 Topic
-            </button>
+            <div className="waypoint-sidebar-actions">
+              <button type="button" onClick={openCreateForm}>
+                新建 Topic
+              </button>
+              <button type="button" onClick={openSettings}>
+                设置
+              </button>
+            </div>
           </div>
           {topics.length === 0 ? (
             <p>暂无 Topic</p>
@@ -249,7 +849,189 @@ export function TopicsWorkspace({
 
       {showDetail ? (
         <div className="waypoint-detail">
-          {creating ? (
+          {settingsOpen ? (
+            <section aria-label="设置" className="waypoint-dialog">
+              {isNarrow ? (
+                <div className="waypoint-topic-header">
+                  <div className="waypoint-topic-header-bar">
+                    <button
+                      type="button"
+                      className="waypoint-back-button"
+                      disabled={agentsSubmitting}
+                      onClick={goBack}
+                    >
+                      返回
+                    </button>
+                    <div className="waypoint-topic-header-main">
+                      <h2>设置</h2>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              <div
+                className="waypoint-dialog-body"
+                style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
+              >
+                {!isNarrow ? (
+                  <div className="waypoint-settings-header">
+                    <h2>设置</h2>
+                    <button type="button" disabled={agentsSubmitting} onClick={closeSettings}>
+                      关闭
+                    </button>
+                  </div>
+                ) : null}
+                <section aria-label="Bot 名册" className="waypoint-agents-section">
+                  <div className="waypoint-agents-header">
+                    <h3>Bot 名册</h3>
+                    <button
+                      type="button"
+                      disabled={agentsSubmitting}
+                      onClick={openAddAgentForm}
+                    >
+                      登记新 Bot
+                    </button>
+                  </div>
+                  <ul className="waypoint-bot-list">
+                    {registeredAgents.map((bot) => (
+                      <li key={bot.userId} className="waypoint-bot-row">
+                        <div className="waypoint-bot-info">
+                          <span className="waypoint-bot-name">
+                            {resolveBotName(bot.userId, registeredAgents, roomList)}
+                          </span>
+                          <span className="waypoint-bot-id">{bot.userId}</span>
+                        </div>
+                        <div className="waypoint-bot-actions">
+                          <button
+                            type="button"
+                            disabled={agentsSubmitting}
+                            onClick={() => openEditAgentForm(bot.userId, bot.handwrittenName)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            disabled={registeredAgents.length <= 1 || agentsSubmitting}
+                            onClick={() => openRemoveAgentConfirm(bot.userId)}
+                          >
+                            移除
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  {agentsForm?.mode === "add" ? (
+                    <form onSubmit={handleAddAgentSubmit} className="waypoint-agents-form">
+                      <h4>登记新 Bot</h4>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="agents-bot-user-id"
+                          value={agentsForm.userId}
+                          disabled={agentsSubmitting}
+                          onChange={(event) =>
+                            setAgentsForm({ ...agentsForm, userId: event.target.value })
+                          }
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="agents-bot-name"
+                          value={agentsForm.handwrittenName}
+                          disabled={agentsSubmitting}
+                          onChange={(event) =>
+                            setAgentsForm({ ...agentsForm, handwrittenName: event.target.value })
+                          }
+                        />
+                      </label>
+                      {agentsError ? <p role="alert">{agentsError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={agentsSubmitting}>
+                          {agentsSubmitting ? "正在保存…" : "登记 Bot"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={agentsSubmitting}
+                          onClick={cancelAgentsAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  ) : agentsForm?.mode === "edit" ? (
+                    <form onSubmit={handleEditAgentSubmit} className="waypoint-agents-form">
+                      <h4>编辑 Bot</h4>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="agents-edit-user-id"
+                          value={agentsForm.userId}
+                          disabled
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="agents-edit-name"
+                          value={agentsForm.handwrittenName}
+                          disabled={agentsSubmitting}
+                          onChange={(event) =>
+                            setAgentsForm({ ...agentsForm, handwrittenName: event.target.value })
+                          }
+                        />
+                      </label>
+                      {agentsError ? <p role="alert">{agentsError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={agentsSubmitting}>
+                          {agentsSubmitting ? "正在保存…" : "保存"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={agentsSubmitting}
+                          onClick={cancelAgentsAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  ) : agentsForm?.mode === "remove" ? (
+                    <div
+                      role="alertdialog"
+                      aria-label="确认移除 Bot"
+                      className="waypoint-agents-form"
+                    >
+                      <h4>确认移除 Bot</h4>
+                      <p>
+                        确定要从 Bot 名册移除{" "}
+                        {resolveBotName(agentsForm.userId, registeredAgents, roomList)}（
+                        {agentsForm.userId}）吗？
+                      </p>
+                      <p>
+                        移除不会删除已有 Topic，已有交流不受影响，也不会离开这些房间。
+                      </p>
+                      {agentsError ? <p role="alert">{agentsError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button
+                          type="button"
+                          disabled={agentsSubmitting}
+                          onClick={() => void confirmRemoveBot()}
+                        >
+                          {agentsSubmitting ? "正在移除…" : "确认移除"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={agentsSubmitting}
+                          onClick={cancelAgentsAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            </section>
+          ) : creating ? (
             <section aria-label="新建 Topic" className="waypoint-dialog">
               {isNarrow ? (
                 <div className="waypoint-topic-header">
@@ -257,7 +1039,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
-                      disabled={submitting}
+                      disabled={submitting || quickSubmitting}
                       onClick={goBack}
                     >
                       返回
@@ -299,6 +1081,7 @@ export function TopicsWorkspace({
                       <select
                         name="bot-user-id"
                         value={selectedBotId}
+                        disabled={submitting || quickSubmitting}
                         onChange={(event) => setSelectedBotId(event.target.value)}
                       >
                         <option value="">请选择 Bot</option>
@@ -310,12 +1093,66 @@ export function TopicsWorkspace({
                       </select>
                     </label>
                   ) : null}
+                  {!quickRegisterOpen ? (
+                    <button
+                      type="button"
+                      disabled={submitting || quickSubmitting}
+                      onClick={openQuickRegister}
+                    >
+                      登记新 Bot
+                    </button>
+                  ) : (
+                    <section aria-label="登记新 Bot" className="waypoint-inline-register">
+                      <h3>登记新 Bot</h3>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="quick-bot-user-id"
+                          value={quickUserId}
+                          disabled={quickSubmitting}
+                          onChange={(event) => setQuickUserId(event.target.value)}
+                          onKeyDown={handleQuickRegisterKeyDown}
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="quick-bot-name"
+                          value={quickHandwrittenName}
+                          disabled={quickSubmitting}
+                          onChange={(event) => setQuickHandwrittenName(event.target.value)}
+                          onKeyDown={handleQuickRegisterKeyDown}
+                        />
+                      </label>
+                      {quickError ? <p role="alert">{quickError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button
+                          type="button"
+                          disabled={quickSubmitting || submitting}
+                          onClick={() => void handleQuickRegister()}
+                        >
+                          {quickSubmitting ? "正在保存…" : "登记 Bot"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={quickSubmitting || submitting}
+                          onClick={closeQuickRegister}
+                        >
+                          取消登记
+                        </button>
+                      </div>
+                    </section>
+                  )}
                   {formError ? <p role="alert">{formError}</p> : null}
                   <div className="waypoint-form-actions">
-                    <button type="submit" disabled={submitting}>
+                    <button type="submit" disabled={submitting || quickSubmitting}>
                       {submitting ? "正在创建…" : "创建 Topic"}
                     </button>
-                    <button type="button" disabled={submitting} onClick={closeCreateForm}>
+                    <button
+                      type="button"
+                      disabled={submitting || quickSubmitting}
+                      onClick={closeCreateForm}
+                    >
                       取消
                     </button>
                   </div>
@@ -330,6 +1167,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
+                      disabled={editing && editSubmitting}
                       onClick={goBack}
                     >
                       返回
@@ -341,6 +1179,14 @@ export function TopicsWorkspace({
                       <p className="waypoint-topic-header-bot">{activeTopic.botDisplayName}</p>
                     ) : null}
                   </div>
+                  <button
+                    type="button"
+                    className="waypoint-topic-edit-button"
+                    disabled={editing}
+                    onClick={openEditForm}
+                  >
+                    编辑
+                  </button>
                 </div>
                 {activeTopic.description ? (
                   <button
@@ -357,21 +1203,109 @@ export function TopicsWorkspace({
                   </button>
                 ) : null}
               </header>
-              <main
-                className="waypoint-timeline-container"
-                style={{ paddingBottom: `${safeInset}px` }}
-              >
-                <div
-                  role="log"
-                  aria-label="对话时间线"
-                  className="waypoint-timeline"
-                  onScroll={collapseDescription}
-                />
-                <div
-                  className="waypoint-composer-safe-area"
-                  data-keyboard-inset={safeInset}
-                />
-              </main>
+              {editing ? (
+                <section aria-label="编辑 Topic" className="waypoint-dialog">
+                  <div
+                    className="waypoint-dialog-body"
+                    style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
+                  >
+                    <h2>编辑 Topic</h2>
+                    <form onSubmit={handleEditSubmit}>
+                      {editPendingFields.name ? (
+                        <label>
+                          Topic 名字
+                          <input
+                            name="edit-topic-name"
+                            value={editNameInput}
+                            disabled={editSubmitting}
+                            onChange={(event) => setEditNameInput(event.target.value)}
+                          />
+                        </label>
+                      ) : null}
+                      {editPendingFields.description ? (
+                        <>
+                          <label>
+                            Description（可选）
+                            <textarea
+                              name="edit-topic-description"
+                              value={editDescriptionInput}
+                              disabled={editSubmitting}
+                              onChange={(event) => setEditDescriptionInput(event.target.value)}
+                            />
+                          </label>
+                          <p className="waypoint-field-hint">
+                            留空表示没有额外上下文；填写后会发给这条 Topic 绑定的 Bot，不是私密备忘。
+                          </p>
+                        </>
+                      ) : null}
+                      {editError ? <p role="alert">{editError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={editSubmitting}>
+                          {editSubmitting ? "正在保存…" : "保存"}
+                        </button>
+                        <button type="button" disabled={editSubmitting} onClick={closeEditForm}>
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </section>
+              ) : (
+                <main
+                  className="waypoint-timeline-container"
+                  style={{ paddingBottom: `${safeInset}px` }}
+                >
+                  <div
+                    role="log"
+                    aria-label="对话时间线"
+                    className="waypoint-timeline"
+                    onScroll={collapseDescription}
+                  >
+                    {activeTimelineItems.map((item) =>
+                      item.kind === "day-separator" ? (
+                        <div
+                          key={item.key}
+                          role="separator"
+                          aria-label={item.label}
+                          className="waypoint-day-separator"
+                        >
+                          {item.label}
+                        </div>
+                      ) : (
+                        <div
+                          key={item.key}
+                          className={`waypoint-message-row ${item.side}`}
+                          data-side={item.side}
+                        >
+                          {!item.confirmed ? (
+                            <span
+                              role="status"
+                              aria-label="未确认"
+                              className="waypoint-unconfirmed-spinner"
+                            />
+                          ) : null}
+                          <div className="waypoint-bubble">{item.body}</div>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                  <div
+                    className="waypoint-composer-safe-area"
+                    data-keyboard-inset={safeInset}
+                  >
+                    {composerError ? <p role="alert">{composerError}</p> : null}
+                    <form className="waypoint-composer" onSubmit={handleSendMessage}>
+                      <textarea
+                        aria-label="输入消息"
+                        name="message"
+                        value={draftsByRoom[activeTopic.roomId] ?? ""}
+                        onChange={(event) => updateDraft(activeTopic.roomId, event.target.value)}
+                      />
+                      <button type="submit">发送</button>
+                    </form>
+                  </div>
+                </main>
+              )}
             </div>
           ) : (
             <section aria-label="Topic 引导" className="waypoint-empty-detail">

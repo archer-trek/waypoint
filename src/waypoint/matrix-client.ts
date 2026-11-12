@@ -4,6 +4,7 @@ import {
   dropPreListSession,
   loadSession,
   saveSession,
+  type PendingRoomEvent,
   type RawMatrixEvent,
   type SessionRecord,
   type StoredRoomEvents,
@@ -22,6 +23,8 @@ export class MatrixClient {
   private syncCursor?: string;
   private storedAccountData: Record<string, unknown> = {};
   private storedRooms: Record<string, StoredRoomEvents> = {};
+  private storedPendingEvents: PendingRoomEvent[] = [];
+  private txnCounter = 0;
   private persistTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: HomeserverTransport) {}
@@ -46,6 +49,14 @@ export class MatrixClient {
     return this.storedRooms;
   }
 
+  pendingRoomEvents(roomId?: string): PendingRoomEvent[] {
+    const filtered =
+      roomId === undefined
+        ? this.storedPendingEvents
+        : this.storedPendingEvents.filter((event) => event.roomId === roomId);
+    return filtered.map(clonePendingEvent);
+  }
+
   async restore(): Promise<"sync" | "password" | "address"> {
     const stored = await loadSession();
     if (!stored?.baseUrl) {
@@ -56,6 +67,9 @@ export class MatrixClient {
     this.syncCursor = stored.syncCursor;
     this.storedAccountData = isAccountData(stored.accountData) ? stored.accountData : {};
     this.storedRooms = isPlainObject(stored.rooms) ? cloneStoredRooms(stored.rooms) : {};
+    this.storedPendingEvents = Array.isArray(stored.pendingEvents)
+      ? clonePendingEvents(stored.pendingEvents)
+      : [];
     if (stored.accessToken && stored.deviceId) {
       this.accessToken = stored.accessToken;
       this.deviceId = stored.deviceId;
@@ -104,6 +118,7 @@ export class MatrixClient {
       this.syncCursor = undefined;
       this.storedAccountData = {};
       this.storedRooms = {};
+      this.storedPendingEvents = [];
       return saveSession({
         baseUrl: this.baseUrl,
         userId,
@@ -138,6 +153,7 @@ export class MatrixClient {
     await this.enqueuePersist(() => {
       this.storedAccountData = mergeAccountData(this.storedAccountData, body, attempt.incremental);
       this.storedRooms = mergeSyncRooms(this.storedRooms, body, attempt.incremental);
+      this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
       const cursor = nextBatch(body);
       if (cursor) {
         this.syncCursor = cursor;
@@ -217,6 +233,28 @@ export class MatrixClient {
     });
   }
 
+  putRoomStateEvent(
+    roomId: string,
+    eventType: string,
+    content: Record<string, unknown>,
+    stateKey = "",
+  ): Promise<TransportResult> {
+    if (!this.accessToken) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    const basePath = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(eventType)}`;
+    const path = stateKey === "" ? basePath : `${basePath}/${encodeURIComponent(stateKey)}`;
+    return this.transport.request({
+      method: "PUT",
+      url: matrixUrl(this.baseUrl, path),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: content,
+    });
+  }
+
   leaveRoom(roomId: string): Promise<TransportResult> {
     if (!this.accessToken) {
       return Promise.reject(new Error("没有 access token"));
@@ -253,16 +291,94 @@ export class MatrixClient {
     });
   }
 
-  async rememberCreatedRoom(
+  async enqueueRoomEvent(
     roomId: string,
-    initialStateEvents: RawMatrixEvent[],
+    type: string,
+    content: Record<string, unknown>,
+  ): Promise<PendingRoomEvent> {
+    if (!this.accessToken || !this.userId) {
+      throw new Error("没有 access token");
+    }
+    const item: PendingRoomEvent = {
+      txnId: this.nextTxnId(),
+      roomId,
+      type,
+      sender: this.userId,
+      content: cloneValue(content) as Record<string, unknown>,
+    };
+    await this.enqueuePersist(async () => {
+      const nextPending = [...this.storedPendingEvents, item];
+      await saveSession(this.sessionRecord(nextPending));
+      this.storedPendingEvents = nextPending;
+    });
+    return clonePendingEvent(item);
+  }
+
+  sendRoomEvent(
+    roomId: string,
+    eventType: string,
+    txnId: string,
+    content: Record<string, unknown>,
+  ): Promise<TransportResult> {
+    if (!this.accessToken) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "PUT",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/${encodeURIComponent(txnId)}`,
+      ),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: content,
+    });
+  }
+
+  async confirmSentRoomEvent(roomId: string, txnId: string, eventId: string): Promise<void> {
+    await this.enqueuePersist(async () => {
+      const pending = this.storedPendingEvents.find(
+        (item) => item.roomId === roomId && item.txnId === txnId,
+      );
+      const nextPending = this.storedPendingEvents.filter(
+        (item) => !(item.roomId === roomId && item.txnId === txnId),
+      );
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const alreadyConfirmed = existingRoom.timelineEvents.some(
+        (ev) => eventIdOf(ev) === eventId || transactionIdOf(ev) === txnId,
+      );
+      if (!alreadyConfirmed && pending) {
+        existingRoom.timelineEvents.push({
+          type: pending.type,
+          event_id: eventId,
+          sender: pending.sender,
+          content: cloneValue(pending.content),
+          unsigned: { transaction_id: txnId },
+        });
+        nextRooms[roomId] = existingRoom;
+      }
+      await saveSession({
+        ...this.sessionRecord(nextPending),
+        ...(Object.keys(nextRooms).length > 0 ? { rooms: nextRooms } : {}),
+      });
+      this.storedPendingEvents = nextPending;
+      this.storedRooms = nextRooms;
+    });
+  }
+
+  async rememberRoomStateEvents(
+    roomId: string,
+    stateEvents: RawMatrixEvent[],
   ): Promise<void> {
     await this.enqueuePersist(() => {
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: {
-          stateEvents: mergeStateEvents(existing.stateEvents, initialStateEvents),
+          stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
         },
       };
@@ -299,6 +415,7 @@ export class MatrixClient {
       this.syncCursor = undefined;
       this.storedAccountData = {};
       this.storedRooms = {};
+      this.storedPendingEvents = [];
       return dropPreListSession();
     });
   }
@@ -311,7 +428,7 @@ export class MatrixClient {
     });
   }
 
-  private sessionRecord(): SessionRecord {
+  private sessionRecord(pendingOverride?: PendingRoomEvent[]): SessionRecord {
     const session: SessionRecord = {
       baseUrl: this.baseUrl,
       userId: this.userId,
@@ -327,7 +444,20 @@ export class MatrixClient {
     if (Object.keys(this.storedRooms).length > 0) {
       session.rooms = this.storedRooms;
     }
+    const pending = pendingOverride ?? this.storedPendingEvents;
+    if (pending.length > 0) {
+      session.pendingEvents = pending;
+    }
     return session;
+  }
+
+  private nextTxnId(): string {
+    this.txnCounter += 1;
+    const suffix =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    return `txn-${this.txnCounter}-${suffix}`;
   }
 
   private enqueuePersist(write: () => Promise<void>): Promise<void> {
@@ -528,4 +658,107 @@ function nextBatch(body: unknown): string | undefined {
 
 function isAccountData(value: unknown): value is Record<string, unknown> {
   return isPlainObject(value);
+}
+
+function clonePendingEvent(item: PendingRoomEvent): PendingRoomEvent {
+  return {
+    txnId: item.txnId,
+    roomId: item.roomId,
+    type: item.type,
+    sender: item.sender,
+    content: cloneValue(item.content) as Record<string, unknown>,
+  };
+}
+
+function clonePendingEvents(raw: unknown[]): PendingRoomEvent[] {
+  const out: PendingRoomEvent[] = [];
+  for (const item of raw) {
+    if (
+      isPlainObject(item) &&
+      typeof item.txnId === "string" &&
+      item.txnId !== "" &&
+      typeof item.roomId === "string" &&
+      item.roomId !== "" &&
+      typeof item.type === "string" &&
+      item.type !== "" &&
+      typeof item.sender === "string" &&
+      item.sender !== "" &&
+      isPlainObject(item.content)
+    ) {
+      out.push(
+        clonePendingEvent({
+          txnId: item.txnId,
+          roomId: item.roomId,
+          type: item.type,
+          sender: item.sender,
+          content: item.content,
+        }),
+      );
+    }
+  }
+  return out;
+}
+
+function transactionIdOf(event: RawMatrixEvent): string | undefined {
+  if (!isPlainObject(event.unsigned)) {
+    return undefined;
+  }
+  const txnId = event.unsigned.transaction_id;
+  return typeof txnId === "string" && txnId !== "" ? txnId : undefined;
+}
+
+function reconcilePendingWithSync(
+  pending: PendingRoomEvent[],
+  body: unknown,
+): PendingRoomEvent[] {
+  if (pending.length === 0 || !isPlainObject(body) || !isPlainObject(body.rooms)) {
+    return pending;
+  }
+  const confirmedByRoom = new Map<string, Set<string>>();
+  const leftRooms = new Set<string>();
+
+  if (isPlainObject(body.rooms.join)) {
+    for (const [roomId, roomSync] of Object.entries(body.rooms.join)) {
+      if (
+        isPlainObject(roomSync) &&
+        isPlainObject(roomSync.timeline) &&
+        Array.isArray(roomSync.timeline.events)
+      ) {
+        const txnIds = new Set<string>();
+        for (const event of roomSync.timeline.events) {
+          if (!isPlainObject(event)) {
+            continue;
+          }
+          const txnId = transactionIdOf(event);
+          if (txnId) {
+            txnIds.add(txnId);
+          }
+        }
+        if (txnIds.size > 0) {
+          confirmedByRoom.set(roomId, txnIds);
+        }
+      }
+    }
+  }
+
+  if (isPlainObject(body.rooms.leave)) {
+    for (const roomId of Object.keys(body.rooms.leave)) {
+      leftRooms.add(roomId);
+    }
+  }
+
+  if (confirmedByRoom.size === 0 && leftRooms.size === 0) {
+    return pending;
+  }
+
+  return pending.filter((item) => {
+    if (leftRooms.has(item.roomId)) {
+      return false;
+    }
+    const confirmedTxns = confirmedByRoom.get(item.roomId);
+    if (confirmedTxns && confirmedTxns.has(item.txnId)) {
+      return false;
+    }
+    return true;
+  });
 }

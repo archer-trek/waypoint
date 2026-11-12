@@ -1,7 +1,12 @@
 import type { TransportResult } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
-import { formatMatrixActionFailure, isRecord } from "./matrix-errors";
-import type { RawMatrixEvent, StoredRoomEvents } from "./session-store";
+import {
+  disconnectedMessage,
+  formatMatrixActionFailure,
+  isRecord,
+  transportFailureMessage,
+} from "./matrix-errors";
+import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
   userId: string;
@@ -20,6 +25,19 @@ export type TopicSummary = {
 export type CreateTopicResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string };
+
+export type UpdateTopicResult =
+  | {
+      ok: true;
+      nameUpdated: boolean;
+      descriptionUpdated: boolean;
+    }
+  | {
+      ok: false;
+      nameUpdated: boolean;
+      descriptionUpdated: boolean;
+      message: string;
+    };
 
 const directAppendQueues = new WeakMap<MatrixClient, Promise<void>>();
 
@@ -49,6 +67,148 @@ export function localpartOf(userId: string): string {
   const withoutAt = userId.startsWith("@") ? userId.slice(1) : userId;
   const colon = withoutAt.indexOf(":");
   return colon >= 0 ? withoutAt.slice(0, colon) : withoutAt;
+}
+
+
+export type ValidateAgentResult =
+  | { ok: true; userId: string }
+  | { ok: false; trimmed: string; message: string };
+
+export function validateAgentUserId(
+  raw: string,
+  ownerUserId: string,
+  existingAgents?: RegisteredAgent[],
+): ValidateAgentResult {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, trimmed, message: "登记 Bot 失败，因为用户 ID 是空的。" };
+  }
+  if (!isFullUserId(trimmed)) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为只接受完整的 Matrix 用户 ID，不自动补 @ 或 server name。",
+    };
+  }
+  const ownerServer = serverName(ownerUserId);
+  if (!ownerServer || serverName(trimmed) !== ownerServer) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为 Bot 的 server name 必须与当前账号完全一致。",
+    };
+  }
+  if (trimmed === ownerUserId) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为不能把自己登记成 Bot。",
+    };
+  }
+  if (existingAgents?.some((agent) => agent.userId === trimmed)) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为这个 Bot 已经在名册里了。",
+    };
+  }
+  return { ok: true, userId: trimmed };
+}
+
+function updateAgentsAccountData(
+  existingContent: unknown,
+  transform: (prevAgents: unknown[]) => unknown[],
+): Record<string, unknown> {
+  const base = isRecord(existingContent) ? { ...existingContent } : {};
+  const prevAgents = Array.isArray(base.agents) ? base.agents : [];
+  return {
+    ...base,
+    agents: transform(prevAgents),
+  };
+}
+
+function makeAgentEntry(
+  agentUserId: string,
+  handwrittenName?: string,
+  existing?: Record<string, unknown>,
+): Record<string, unknown> {
+  const trimmedName = handwrittenName?.trim();
+  const entry: Record<string, unknown> = existing
+    ? { ...existing }
+    : { user_id: agentUserId };
+  if (trimmedName) {
+    entry.name = trimmedName;
+  } else {
+    delete entry.name;
+  }
+  return entry;
+}
+
+export function buildAddAgentContent(
+  existingContent: unknown,
+  agentUserId: string,
+  handwrittenName?: string,
+): Record<string, unknown> {
+  return updateAgentsAccountData(existingContent, (prevAgents) => [
+    ...prevAgents,
+    makeAgentEntry(agentUserId, handwrittenName),
+  ]);
+}
+
+export function buildRenameAgentContent(
+  existingContent: unknown,
+  agentUserId: string,
+  handwrittenName?: string,
+): Record<string, unknown> {
+  return updateAgentsAccountData(existingContent, (prevAgents) => {
+    let found = false;
+    const nextAgents = prevAgents.map((item) => {
+      if (!isRecord(item) || item.user_id !== agentUserId) {
+        return item;
+      }
+      found = true;
+      return makeAgentEntry(agentUserId, handwrittenName, item);
+    });
+    if (!found) {
+      nextAgents.push(makeAgentEntry(agentUserId, handwrittenName));
+    }
+    return nextAgents;
+  });
+}
+
+export function buildRemoveAgentContent(
+  existingContent: unknown,
+  agentUserId: string,
+): Record<string, unknown> {
+  return updateAgentsAccountData(existingContent, (prevAgents) =>
+    prevAgents.filter((item) => !(isRecord(item) && item.user_id === agentUserId)),
+  );
+}
+
+export type AgentsWriteResult = { ok: true } | { ok: false; message: string };
+
+export async function saveRegisteredAgents(
+  client: MatrixClient,
+  action: string,
+  nextContent: Record<string, unknown>,
+): Promise<AgentsWriteResult> {
+  if (!client.hasToken || !client.ownerId) {
+    return { ok: false, message: disconnectedMessage(action) };
+  }
+  let result: TransportResult;
+  try {
+    result = await client.putAccountData("im.waypoint.agents", nextContent);
+  } catch {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(action, { type: "failure", failure: { type: "network" } }),
+    };
+  }
+  if (result.type === "response" && result.status >= 200 && result.status < 300) {
+    await client.retainAccountData("im.waypoint.agents", nextContent);
+    return { ok: true };
+  }
+  return { ok: false, message: formatMatrixActionFailure(action, result) };
 }
 
 export function isValidAgentUserId(userId: string, ownerUserId: string): boolean {
@@ -91,22 +251,44 @@ export function resolveBotName(
     return registeredAgent.handwrittenName;
   }
   const rooms = Array.isArray(roomScope) ? roomScope : roomScope ? [roomScope] : [];
+  let best: { displayname: string; ts?: number } | undefined;
   for (const room of rooms) {
-    const memberDisplayName = findMemberDisplayName(room.stateEvents, agentUserId);
-    if (memberDisplayName) {
-      return memberDisplayName;
+    const found = findMemberDisplayNameEvent(room.stateEvents, agentUserId);
+    if (!found) {
+      continue;
     }
+    if (
+      best === undefined ||
+      (found.ts !== undefined && (best.ts === undefined || found.ts > best.ts))
+    ) {
+      best = found;
+    }
+  }
+  if (best?.displayname) {
+    return best.displayname;
   }
   return localpartOf(agentUserId);
 }
 
-function findMemberDisplayName(stateEvents: RawMatrixEvent[], userId: string): string | undefined {
+function findMemberDisplayNameEvent(
+  stateEvents: RawMatrixEvent[],
+  userId: string,
+): { displayname: string; ts?: number } | undefined {
   for (let i = stateEvents.length - 1; i >= 0; i -= 1) {
     const event = stateEvents[i];
     if (event.type === "m.room.member" && event.state_key === userId && isRecord(event.content)) {
-      const displayname = event.content.displayname;
-      if (typeof displayname === "string" && displayname.trim() !== "") {
-        return displayname.trim();
+      const rawDisplayName = event.content.displayname;
+      if (typeof rawDisplayName === "string") {
+        return {
+          displayname: rawDisplayName.trim(),
+          ts: validTimestamp(event.origin_server_ts),
+        };
+      }
+      if ("displayname" in event.content || event.content.membership === "join") {
+        return {
+          displayname: "",
+          ts: validTimestamp(event.origin_server_ts),
+        };
       }
       return undefined;
     }
@@ -120,6 +302,7 @@ export function deriveTopics(
   ownerUserId: string,
 ): TopicSummary[] {
   const topics: TopicSummary[] = [];
+  const allRooms = Object.values(rooms);
 
   for (const [roomId, room] of Object.entries(rooms)) {
     let hasTopicMarker = false;
@@ -181,7 +364,10 @@ export function deriveTopics(
     const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
     const agentUserId = marker.valid ? marker.agentUserId : undefined;
     const botDisplayName = agentUserId
-      ? resolveBotName(agentUserId, registeredAgents, room)
+      ? resolveBotName(agentUserId, registeredAgents, [
+          room,
+          ...allRooms.filter((candidate) => candidate !== room),
+        ])
       : undefined;
     const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
 
@@ -338,7 +524,7 @@ export async function createTopicRoom(
     },
   ];
 
-  await client.rememberCreatedRoom(roomId, initialStateEvents);
+  await client.rememberRoomStateEvents(roomId, initialStateEvents);
   return { ok: true, roomId };
 }
 
@@ -476,4 +662,204 @@ export function appendDirectRoomMapping(
     ? existingForAgent
     : [...existingForAgent, roomId];
   return next;
+}
+
+export async function updateTopicDetails(
+  client: MatrixClient,
+  input: {
+    roomId: string;
+    currentName: string;
+    currentDescription: string;
+    nextName: string;
+    nextDescription: string;
+    now: number;
+  },
+): Promise<UpdateTopicResult> {
+  const nameChanged = input.nextName !== input.currentName;
+  const descriptionChanged = input.nextDescription !== input.currentDescription;
+  if (!nameChanged && !descriptionChanged) {
+    return { ok: true, nameUpdated: false, descriptionUpdated: false };
+  }
+  if (!client.hasToken) {
+    return {
+      ok: false,
+      nameUpdated: false,
+      descriptionUpdated: false,
+      message: "更新 Topic 失败，因为尚未连接。",
+    };
+  }
+
+  async function sendStateField(
+    eventType: "m.room.name" | "m.room.topic",
+    content: Record<string, unknown>,
+    actionLabel: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    let result: TransportResult;
+    try {
+      result = await client.putRoomStateEvent(input.roomId, eventType, content);
+    } catch {
+      return {
+        ok: false,
+        message: transportFailureMessage(actionLabel, { type: "network" }),
+      };
+    }
+    if (result.type === "response" && result.status >= 200 && result.status < 300) {
+      const eventId =
+        isRecord(result.body) && typeof result.body.event_id === "string" && result.body.event_id
+          ? result.body.event_id
+          : undefined;
+      await client.rememberRoomStateEvents(input.roomId, [
+        {
+          type: eventType,
+          state_key: "",
+          origin_server_ts: input.now,
+          ...(eventId ? { event_id: eventId } : {}),
+          content,
+        },
+      ]);
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(actionLabel, result, {
+        serverErrorReason: "Homeserver 暂时不能完成请求",
+        rejectedReason: "Homeserver 拒绝了请求",
+      }),
+    };
+  }
+
+  const [nameOutcome, descriptionOutcome] = await Promise.all([
+    nameChanged
+      ? sendStateField("m.room.name", { name: input.nextName }, "更新 Topic 名字")
+      : Promise.resolve(undefined),
+    descriptionChanged
+      ? sendStateField("m.room.topic", { topic: input.nextDescription }, "更新 Description")
+      : Promise.resolve(undefined),
+  ]);
+
+  const nameUpdated = nameOutcome?.ok === true;
+  const descriptionUpdated = descriptionOutcome?.ok === true;
+  const errors: string[] = [];
+  if (nameOutcome && !nameOutcome.ok) {
+    errors.push(nameOutcome.message);
+  }
+  if (descriptionOutcome && !descriptionOutcome.ok) {
+    errors.push(descriptionOutcome.message);
+  }
+
+  if (errors.length === 0) {
+    return { ok: true, nameUpdated, descriptionUpdated };
+  }
+  return {
+    ok: false,
+    nameUpdated,
+    descriptionUpdated,
+    message: errors.join(" "),
+  };
+}
+
+export type TimelineItem =
+  | {
+      kind: "day-separator";
+      key: string;
+      label: string;
+    }
+  | {
+      kind: "message";
+      key: string;
+      side: "left" | "right";
+      body: string;
+      confirmed: boolean;
+    };
+
+export function deriveRoomTimelineItems(
+  room: StoredRoomEvents | undefined,
+  pendingEvents: PendingRoomEvent[],
+  ownerUserId: string,
+  agentUserId: string | undefined,
+  nowMs: number,
+): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let lastDayKey: string | undefined;
+
+  if (room) {
+    room.timelineEvents.forEach((event, index) => {
+      if (typeof event.state_key === "string" || !isActivityMessageEvent(event)) {
+        return;
+      }
+      const sender = typeof event.sender === "string" ? event.sender : undefined;
+      let side: "left" | "right" | undefined;
+      if (sender === ownerUserId) {
+        side = "right";
+      } else if (agentUserId && sender === agentUserId) {
+        side = "left";
+      }
+      if (!side) {
+        return;
+      }
+      if (!isRecord(event.content) || typeof event.content.body !== "string") {
+        return;
+      }
+      const ts = validTimestamp(event.origin_server_ts);
+      if (ts !== undefined) {
+        const currentDay = localDayKey(ts);
+        if (lastDayKey !== undefined && currentDay !== lastDayKey) {
+          items.push({
+            kind: "day-separator",
+            key: `day-${currentDay}-${index}`,
+            label: formatDaySeparator(ts, nowMs),
+          });
+        }
+        lastDayKey = currentDay;
+      }
+      const eventId =
+        typeof event.event_id === "string" && event.event_id !== ""
+          ? event.event_id
+          : `confirmed-${index}`;
+      items.push({
+        kind: "message",
+        key: eventId,
+        side,
+        body: event.content.body,
+        confirmed: true,
+      });
+    });
+  }
+
+  for (const pending of pendingEvents) {
+    if (pending.type !== "m.room.message" || typeof pending.content.body !== "string") {
+      continue;
+    }
+    items.push({
+      kind: "message",
+      key: `pending-${pending.txnId}`,
+      side: "right",
+      body: pending.content.body,
+      confirmed: false,
+    });
+  }
+
+  return items;
+}
+
+function localDayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function formatDaySeparator(ts: number, nowMs: number): string {
+  const targetKey = localDayKey(ts);
+  if (targetKey === localDayKey(nowMs)) {
+    return "今天";
+  }
+  const yesterday = new Date(nowMs);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (targetKey === localDayKey(yesterday.getTime())) {
+    return "昨天";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(ts));
 }
