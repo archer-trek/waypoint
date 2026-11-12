@@ -20976,3 +20976,73 @@ test("Tauri 环境下外链打开失败绝不静默回退到 window.open，且�
     }
   }
 });
+
+test("已进入 Topic 列表后刷新重开，不等下一次 sync 完成就立即进入 Topic 列表并展示本地缓存，同时后台发起增量 sync (#48)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const heldSync = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-cached",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!cached:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "本地缓存话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-cached-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "缓存里的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return heldSync.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByRole("button", { name: /本地缓存话题/ })).toBeInTheDocument();
+  first.unmount();
+
+  // 刷新重开时让下一次 /sync 挂起不返回：应立即看到 Topic 列表而非「尚未进入 Topic 列表」
+  renderApp(homeserver);
+  expect(await screen.findByRole("button", { name: /本地缓存话题/ })).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+  expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
+
+  await waitFor(() => {
+    expect(syncCalls).toBe(2);
+  });
+  expect(
+    homeserver.requests.filter((r) => r.url.includes("/sync")).at(-1)?.url,
+  ).toBe("https://matrix.example.com/_matrix/client/v3/sync?since=batch-cached");
+
+  await user.click(screen.getByRole("button", { name: /本地缓存话题/ }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("缓存里的消息");
+});

@@ -68,6 +68,10 @@ export class MatrixClient {
     return Boolean(this.accessToken);
   }
 
+  get hasSyncCursor(): boolean {
+    return Boolean(this.syncCursor);
+  }
+
   get currentDeviceId(): string | undefined {
     return this.deviceId;
   }

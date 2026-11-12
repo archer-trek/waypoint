@@ -41,7 +41,7 @@ type Phase =
       submitting: boolean;
       message?: string;
     }
-  | { name: "topics"; initialReauthRequired?: boolean };
+  | { name: "topics"; initialReauthRequired?: boolean; initialSyncImmediate?: boolean };
 
 export function WaypointApp({
   homeserver,
@@ -145,29 +145,16 @@ export function WaypointApp({
       }
       const matrix = client();
       if (restored === "sync") {
+        if (
+          matrix.hasSyncCursor &&
+          hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
+        ) {
+          setPhase({ name: "topics", initialSyncImmediate: true });
+          return;
+        }
         setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
         const suspended = shouldSuspendSyncInBackground(platformRef.current) && !readAppVisible();
         backgroundSuspendedRef.current = suspended;
-        if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
-          retryQueue().setCallbacks({
-            isRoomUnavailable,
-            onCredentialRejected: () => {
-              if (!cancelled) {
-                syncGeneration.current += 1;
-                syncAbortControllerRef.current?.abort();
-                syncAbortControllerRef.current = null;
-                clearRetry();
-                backoffStep.current = 0;
-                setPhase({ name: "topics", initialReauthRequired: true });
-              }
-            },
-          });
-          if (suspended) {
-            retryQueue().pause();
-          } else if (matrix.pendingRoomEvents().length > 0 || matrix.pendingReadMarkers().length > 0) {
-            void retryQueue().flush();
-          }
-        }
         if (!suspended) {
           void syncNow();
         }
@@ -657,7 +644,38 @@ export function WaypointApp({
         viewportMode={viewportMode}
         keyboardInsetBottom={keyboardInsetBottom}
         initialReauthRequired={phase.initialReauthRequired}
+        initialSyncImmediate={phase.initialSyncImmediate}
+        onAgentsInvalidated={() => {
+          syncGeneration.current += 1;
+          syncAbortControllerRef.current?.abort();
+          syncAbortControllerRef.current = null;
+          clearRetry();
+          retryQueue().pause();
+          const m = client();
+          setPhase({
+            name: "register",
+            address: m.address,
+            userId: m.ownerId,
+            agentUserId: "",
+            submitting: false,
+          });
+        }}
         onExitDevice={exitDevice}
+      />
+    );
+  }
+
+  if (phase.name === "booting") {
+    return (
+      <main
+        className="waypoint-auth-main"
+        aria-busy="true"
+        style={
+          {
+            "--keyboard-inset": `${keyboardInsetBottom}px`,
+            paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
+          } as CSSProperties
+        }
       />
     );
   }

@@ -80,6 +80,8 @@ export function TopicsWorkspace({
   viewportMode = "wide",
   keyboardInsetBottom = 0,
   initialReauthRequired = false,
+  initialSyncImmediate = false,
+  onAgentsInvalidated,
   onExitDevice,
 }: {
   client: MatrixClient;
@@ -89,6 +91,8 @@ export function TopicsWorkspace({
   viewportMode?: ViewportMode;
   keyboardInsetBottom?: number;
   initialReauthRequired?: boolean;
+  initialSyncImmediate?: boolean;
+  onAgentsInvalidated?: () => void;
   onExitDevice?: () => Promise<void>;
 }) {
   const retryQueue = useMemo(
@@ -986,6 +990,10 @@ export function TopicsWorkspace({
         if (!mountedRef.current || isSyncPaused() || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
+        if (parseRegisteredAgents(client.accountData("im.waypoint.agents"), client.ownerId).length === 0) {
+          onAgentsInvalidated?.();
+          return;
+        }
         await retryQueue.failUnavailablePendingEvents();
         if (!mountedRef.current || isSyncPaused() || syncEpochRef.current !== mySyncEpoch) {
           return;
@@ -1145,7 +1153,11 @@ export function TopicsWorkspace({
         retryQueue.pause();
       } else {
         backgroundSuspendedRef.current = false;
-        scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+        if (initialSyncImmediate && !initialReauthRequired) {
+          void runForegroundSync();
+        } else {
+          scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+        }
         if (
           (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
           !retryQueue.isActive()
