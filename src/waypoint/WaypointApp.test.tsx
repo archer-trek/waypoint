@@ -49,6 +49,13 @@ class ManualClock implements Clock {
   }
 }
 
+async function advanceWhenTimerScheduled(clock: ManualClock, ms: number) {
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
+  await act(async () => {
+    clock.advance(ms);
+  });
+}
+
 class FakeHomeserver implements HomeserverTransport {
   readonly requests: Array<HomeserverRequest & { headers: Record<string, string> }> = [];
   handler: (input: HomeserverRequest) => Promise<TransportResult> = async () => {
@@ -10562,7 +10569,7 @@ test("打开未读Topic停在第一条未读且仅把屏上可见消息标为已
     expect(unreadRow).toHaveAttribute("data-unread", "true");
 
     // 2. 人已经在 Topic 里，新消息 $m6 同步到达：不把视口拉走（scrollTop 仍为 100）
-    await act(async () => { clock.advance(1000); });
+    await advanceWhenTimerScheduled(clock, 1000);
     await waitFor(() => expect(timeline).toHaveTextContent("消息-6"));
     expect(timeline.scrollTop).toBe(100);
     expect(readMarkerPosts).toHaveLength(1);
@@ -10695,7 +10702,7 @@ test("已读标记写失败不回退已采纳位置、队列每条Topic只留最
     expect(row).not.toHaveTextContent("!");
 
     // 即使服务器在下一轮同步带回旧的 $rm1，也不回退到本地未读
-    await act(async () => { first.clock.advance(1000); });
+    await advanceWhenTimerScheduled(first.clock, 1000);
     expect(row).not.toHaveAttribute("data-unread", "true");
 
     // 模拟进程重启，网络恢复：只重放队列里留下的最靠前一条 $rm5
@@ -13159,9 +13166,7 @@ test("置顶写在 Owner 的 im.waypoint.pinned 标签（不用 order 和 favour
   });
 
   // 另一台设备通过 /sync 取消置顶话题一并置顶话题三
-  await act(async () => {
-    first.clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(first.clock, 1000);
   await waitFor(() => {
     expect(getTitles()).toEqual(["话题二(收藏未置顶最新)", "话题三(置顶新)", "话题一(置顶旧)"]);
   });
@@ -13479,9 +13484,7 @@ test("未确认和失败消息不提前修改列表行时刻也不重排，确�
   expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
 
   // 同步回声到达并带来 origin_server_ts -> 时刻更新为服务器时刻，在置顶区内重排到「置顶新」之前
-  await act(async () => {
-    clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEchoTime);
   });
@@ -15407,9 +15410,7 @@ test("标记版本不是 1 或绑定 Agent 用户 ID 不合法时 Topic 不可�
   expect(screen.queryByText("旧版绑定不应展示的 Bot 消息")).not.toBeInTheDocument();
 
   // 后续同步把高版本话题的标记修回 v: 1，不可用自动消失
-  await act(async () => {
-    clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(badVerRow).not.toHaveAttribute("data-unavailable", "true");
   });
@@ -15541,9 +15542,7 @@ test("普通加密房间不进列表；已有加密标记或诞生后才加密�
   expect(encLaterRow).toHaveAttribute("data-unread", "true");
 
   // 下一轮同步收到 m.room.encryption -> 留在列表且标不可用，未读圆点与加粗仍在
-  await act(async () => {
-    first.clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(first.clock, 1000);
   await waitFor(() => {
     expect(encLaterRow).toHaveAttribute("data-unavailable", "true");
   });
@@ -15751,9 +15750,7 @@ test("Agent 被 ban、多于两人（含其他人未接受邀请）或邀请明�
   expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("无法发送新消息");
 
   // 后续同步恢复成只有 Owner 与绑定 Bot
-  await act(async () => {
-    clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(bannedRow).not.toHaveAttribute("data-unavailable", "true");
     expect(threeRow).not.toHaveAttribute("data-unavailable", "true");
@@ -15915,9 +15912,7 @@ test("Topic 不可用时保留草稿（含文字与附件）并在恢复后可�
   expect(await screen.findByText("notes.txt")).toBeInTheDocument();
 
   // 第三人加入 -> 话题变不可用，草稿（文字与附件）完整保留且输入/发送/移除附件全部禁用
-  await act(async () => {
-    first.clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(first.clock, 1000);
   await waitFor(() => {
     expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("多于两人");
   });
@@ -15965,9 +15960,7 @@ test("Topic 不可用时保留草稿（含文字与附件）并在恢复后可�
   expect(screen.getByText("notes.txt")).toBeInTheDocument();
 
   // 第三人离开 -> 恢复可用，草稿可继续编辑并发送
-  await act(async () => {
-    second.clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(second.clock, 1000);
   await waitFor(() => {
     expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
   });
@@ -16685,7 +16678,7 @@ test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正
   expect(msgQ2Row).toHaveTextContent("正在回应");
 
   // 回答出现且撤回 $eyes-q1 后：$msg-q1 取消，但 $msg-q2 仍有 👀，所以 $msg-q2 和列表行仍在
-  await act(async () => { clock.advance(1000); });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(timeline.querySelector("[data-event-id=\"$msg-ans\"]")).not.toBeNull();
   });
@@ -16694,7 +16687,7 @@ test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正
   expect(within(row).getAllByText("正在回应")).toHaveLength(1);
 
   // 撤回 $eyes-q2 后，所有正在回应消失
-  await act(async () => { clock.advance(1000); });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(msgQ2Row).not.toHaveTextContent("正在回应");
   });
@@ -16860,7 +16853,7 @@ test("消息上的 ✅ 和 ❌ 留在原消息上可见，不藏起、不升级�
   expect(okMsgRow.querySelector(".waypoint-bubble")).not.toHaveTextContent("✅");
 
   // 撤回 👀 后，正在回应消失，但 ✅ 仍留在原消息上
-  await act(async () => { clock.advance(1000); });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(okMsgRow).not.toHaveTextContent("正在回应");
   });
@@ -17856,9 +17849,7 @@ test("Topic 变为不可用或需重新验证时隐藏斜杠提示并保留 / �
   expect(screen.getByRole("region", { name: "斜杠命令提示" })).toBeInTheDocument();
 
   // 第三人加入 -> Topic 不可用，提示消失但 / 草稿还在
-  await act(async () => {
-    clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(screen.getByRole("status", { name: "Topic 不可用" })).toBeInTheDocument();
   });
@@ -17866,9 +17857,7 @@ test("Topic 变为不可用或需重新验证时隐藏斜杠提示并保留 / �
   expect(input).toHaveValue("/");
 
   // 第三人离开 -> Topic 恢复可用，/ 草稿触发四条提示再次出现
-  await act(async () => {
-    clock.advance(1000);
-  });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
   });
@@ -18251,7 +18240,7 @@ test("macOS 窗口失焦或不可见不挂起同步，且桌面从休眠或断�
   await waitFor(() => {
     expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("失焦期间照常收到");
   });
-  await act(async () => { clock.advance(1000); });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => expect(syncCalls).toBe(3));
 
   // 断网并入队两条消息，进入退避；再挂起一轮休眠前僵死的 /sync #4
@@ -18264,7 +18253,7 @@ test("macOS 窗口失焦或不可见不挂起同步，且桌面从休眠或断�
 
   const stale2 = deferred<TransportResult>();
   staleSync = stale2;
-  await act(async () => { clock.advance(1000); });
+  await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => expect(syncCalls).toBe(4));
 
   // 桌面从休眠/断网恢复：立刻中止僵死的同步 #4、清零退避、带 since=batch-mac-2 增量同步，并按序重放两条消息
@@ -18733,7 +18722,7 @@ test("生产适配器 createFetchTransport 与 detectPlatform 正确透传并中
     await login(user);
     await screen.findByText("暂无 Topic");
 
-    await act(async () => { clock.advance(1000); });
+    await advanceWhenTimerScheduled(clock, 1000);
     await waitFor(() => expect(syncCalls).toBe(2));
     expect(syncSignals[1]).toBeDefined();
     expect(syncSignals[1]?.aborted).toBe(false);
@@ -19294,7 +19283,7 @@ test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、�
   // 推进时间 1 小时（假设只有空 sync）：不猜超时，按钮依然可用
   for (let i = 0; i < 1; i += 1) {
     // 下一轮 sync 2 撤回 $sel-1 的预种表情
-    await act(async () => { first.clock.advance(1000); });
+    await advanceWhenTimerScheduled(first.clock, 1000);
   }
   await waitFor(() => {
     expect(within(sel1Row).getByRole("button", { name: "1" })).toBeDisabled();
@@ -19304,7 +19293,7 @@ test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、�
   expect(within(ap1Row).getByRole("button", { name: /仅此次/ })).toBeEnabled();
 
   // sync 3 带来更新的审批 $ap-2 -> $ap-1 停用，$ap-2 可用
-  await act(async () => { first.clock.advance(1000); });
+  await advanceWhenTimerScheduled(first.clock, 1000);
   await waitFor(() => {
     expect(within(ap1Row).getByRole("button", { name: /仅此次/ })).toBeDisabled();
     expect(within(ap1Row).getByRole("button", { name: /拒绝/ })).toBeDisabled();
@@ -20804,9 +20793,7 @@ test("已停在存在中间 limited 缺口的 Topic 底部时，新同步消息�
     expect(timeline.scrollTop).toBe(400);
 
     // 增量 sync 3 带来新消息 $m14：绝不能把视口向上拉回 $m10 (200)
-    await act(async () => {
-      clock.advance(1000);
-    });
+    await advanceWhenTimerScheduled(clock, 1000);
     await waitFor(() => {
       expect(timeline).toHaveTextContent("m-14");
     });
@@ -20913,9 +20900,7 @@ test("无游标回退 sync 返回 limited: true 且与现有时间线重叠时�
     await login(user);
 
     const row = await screen.findByRole("button", { name: "回退重叠不伪造缺口" });
-    await act(async () => {
-      clock.advance(1000);
-    });
+    await advanceWhenTimerScheduled(clock, 1000);
     await waitFor(() => expect(syncCalls).toBe(3));
     expect(row).toHaveAttribute("data-unread", "true");
 
