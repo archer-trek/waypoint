@@ -16132,3 +16132,713 @@ test("Topic 不可用时失败消息的红叹号仍在，点击马上又失败�
   expect(bubbleRow).not.toHaveTextContent("多于两人");
   expect(bubbleRow).not.toHaveTextContent("无法发送");
 });
+
+test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 只显示一次，回答出现未撤回前仍在，typing 与非绑定者 👀 不触发，单 Bot 无状态时不显示次行", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "处理中话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$a1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u0",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "问题零" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$u1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2100,
+                        content: { msgtype: "m.text", body: "问题一" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-0",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u0", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2300,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u1", key: "👀" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$a1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2400,
+                        content: { msgtype: "m.text", body: "已经出现的回答" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "仅typing话题" } },
+                    ],
+                  },
+                  ephemeral: {
+                    events: [{ type: "m.typing", content: { user_ids: ["@bot:example.com"] } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "纯文本" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$owner-eyes",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u2", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$other-eyes",
+                        sender: "@stranger:example.com",
+                        origin_server_ts: 2200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u2", key: "👀" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-0",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        redacts: "$eyes-0",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2600,
+                        redacts: "$eyes-1",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const row1 = await screen.findByRole("button", { name: "处理中话题" });
+  expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
+  expect(row1).not.toHaveAttribute("data-unread", "true");
+  expect(row1.querySelector(".waypoint-topic-row-bot")).toBeNull();
+
+  const row2 = screen.getByRole("button", { name: "仅typing话题" });
+  expect(row2).not.toHaveTextContent("正在回应");
+  expect(row2.querySelector(".waypoint-topic-row-subtitle")).toBeNull();
+
+  // 撤回第一条 👀，第二条 👀 还在，依然显示一次正在回应
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBeGreaterThanOrEqual(2));
+  expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
+
+  // 撤回第二条 👀，正在回应消失，单 Bot 次行也消失
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(row1).not.toHaveTextContent("正在回应");
+  });
+  expect(row1.querySelector(".waypoint-topic-row-subtitle")).toBeNull();
+});
+
+test("多 Bot 时列表次行同时显示 Bot 名字与正在回应，并与未读圆点、置顶及发送状态共存，且不认非绑定 Bot 的 👀", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "研究助理" },
+                    { user_id: "@bot2:example.com", name: "编程助理" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!multi-1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "全状态话题" } },
+                  ],
+                },
+                account_data: {
+                  events: [
+                    { type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } },
+                    { type: "m.fully_read", content: { event_id: "$m1" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$m1",
+                      sender: "@alice:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "老问题" },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$m-eyes",
+                      sender: "@bot1:example.com",
+                      origin_server_ts: 2100,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$m1", key: "👀" } },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$m2",
+                      sender: "@bot1:example.com",
+                      origin_server_ts: 2200,
+                      content: { msgtype: "m.text", body: "新进度消息" },
+                    },
+                  ],
+                },
+              },
+              "!multi-2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "空闲多Bot话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$b2-m1",
+                      sender: "@alice:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "问编程助理" },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$wrong-bot-eyes",
+                      sender: "@bot1:example.com",
+                      origin_server_ts: 2100,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$b2-m1", key: "👀" } },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      return { type: "response", status: 403, body: { errcode: "M_FORBIDDEN", error: "Forbidden" } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  const row1 = await screen.findByRole("button", { name: "全状态话题" });
+  expect(row1).toHaveAttribute("data-unread", "true");
+  expect(row1).toHaveAttribute("data-pinned", "true");
+  expect(row1.querySelector(".waypoint-unread-dot")).not.toBeNull();
+  expect(within(row1).getByText("置顶")).toBeInTheDocument();
+  expect(within(row1).getByText("研究助理")).toBeInTheDocument();
+  expect(within(row1).getByText("正在回应")).toBeInTheDocument();
+  expect(row1.querySelector(".waypoint-topic-row-time")).not.toBeNull();
+
+  // 在另一个 Topic 上发送失败，然后验证未读+置顶+Bot名+正在回应+失败红叹号五者共存
+  await user.click(row1);
+  const input = screen.getByLabelText("输入消息");
+  await user.type(input, "这句会失败");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => {
+    expect(within(row1).getByRole("img", { name: "失败" })).toBeInTheDocument();
+  });
+  expect(within(row1).getByText("研究助理")).toBeInTheDocument();
+  expect(within(row1).getByText("正在回应")).toBeInTheDocument();
+  expect(within(row1).getByText("置顶")).toBeInTheDocument();
+
+  const row2 = screen.getByRole("button", { name: "空闲多Bot话题" });
+  expect(within(row2).getByText("编程助理")).toBeInTheDocument();
+  expect(row2).not.toHaveTextContent("正在回应");
+});
+
+test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正在回应（不设全局横幅），进度文字按普通气泡渲染，撤回 👀 后消失", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!open-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "对话内指示话题" } },
+                    ],
+                  },
+                  ephemeral: {
+                    events: [{ type: "m.typing", content: { user_ids: ["@bot:example.com"] } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-old",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "早先的问题" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-q1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2100,
+                        content: { msgtype: "m.text", body: "请分析日志" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-q1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$msg-q1", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-old-owner",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2250,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$msg-old", key: "👀" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-prog",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2300,
+                        content: { msgtype: "m.text", body: "🔧 正在读取日志文件" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-prog-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2350,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 🔧 已读取 3 个日志",
+                          "m.new_content": { msgtype: "m.text", body: "🔧 已读取 3 个日志" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$msg-prog" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-q2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2400,
+                        content: { msgtype: "m.text", body: "顺便看下配置" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-q2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$msg-q2", key: "👀" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!open-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-ans",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2600,
+                        content: { msgtype: "m.text", body: "分析完成，一切正常" },
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-q1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2700,
+                        redacts: "$eyes-q1",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!open-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-q2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2800,
+                        redacts: "$eyes-q2",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const row = await screen.findByRole("button", { name: "对话内指示话题" });
+  expect(within(row).getAllByText("正在回应")).toHaveLength(1);
+
+  await user.click(row);
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+
+  // 不存在全局横幅：正在回应只在挂着 👀 的消息行内
+  const topicView = timeline.closest(".waypoint-topic-view") as HTMLElement;
+  expect(topicView.querySelector(".waypoint-topic-header")).not.toHaveTextContent("正在回应");
+
+  // 进度文字作为普通气泡渲染
+  const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+  expect(bubbles).toEqual(["早先的问题", "请分析日志", "🔧 已读取 3 个日志", "顺便看下配置"]);
+
+  const msgOldRow = timeline.querySelector("[data-event-id=\"$msg-old\"]") as HTMLElement;
+  const msgQ1Row = timeline.querySelector("[data-event-id=\"$msg-q1\"]") as HTMLElement;
+  const msgProgRow = timeline.querySelector("[data-event-id=\"$msg-prog\"]") as HTMLElement;
+  const msgQ2Row = timeline.querySelector("[data-event-id=\"$msg-q2\"]") as HTMLElement;
+
+  expect(msgOldRow).not.toHaveTextContent("正在回应");
+  expect(msgQ1Row).toHaveTextContent("正在回应");
+  expect(msgProgRow).not.toHaveTextContent("正在回应");
+  expect(msgQ2Row).toHaveTextContent("正在回应");
+
+  // 回答出现且撤回 $eyes-q1 后：$msg-q1 取消，但 $msg-q2 仍有 👀，所以 $msg-q2 和列表行仍在
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(timeline.querySelector("[data-event-id=\"$msg-ans\"]")).not.toBeNull();
+  });
+  expect(msgQ1Row).not.toHaveTextContent("正在回应");
+  expect(msgQ2Row).toHaveTextContent("正在回应");
+  expect(within(row).getAllByText("正在回应")).toHaveLength(1);
+
+  // 撤回 $eyes-q2 后，所有正在回应消失
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(msgQ2Row).not.toHaveTextContent("正在回应");
+  });
+  expect(row).not.toHaveTextContent("正在回应");
+});
+
+test("消息上的 ✅ 和 ❌ 留在原消息上可见，不藏起、不升级为正在回应或失败状态，撤回 👀 后 ✅ 仍保留", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!rx-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "反应保留话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ok-msg",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "执行任务一" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ok-eyes",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ok-msg", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ok-check",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ok-msg", key: "✅" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$err-msg",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2300,
+                        content: { msgtype: "m.text", body: "执行任务二" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$err-cross",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2400,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$err-msg", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+                "!rx-only-done:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "仅完成叉号话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$done-msg",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "只有叉号" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$done-cross",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$done-msg", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!rx-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-ok-eyes",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        redacts: "$ok-eyes",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  // 仅 ✅/❌ 的 Topic 列表行不显示正在回应、也不显示失败红叹号
+  const doneRow = await screen.findByRole("button", { name: "仅完成叉号话题" });
+  expect(doneRow).not.toHaveTextContent("正在回应");
+  expect(within(doneRow).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+
+  const rxRow = screen.getByRole("button", { name: "反应保留话题" });
+  await user.click(rxRow);
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const okMsgRow = timeline.querySelector("[data-event-id=\"$ok-msg\"]") as HTMLElement;
+  const errMsgRow = timeline.querySelector("[data-event-id=\"$err-msg\"]") as HTMLElement;
+
+  expect(within(okMsgRow).getByText("✅")).toBeInTheDocument();
+  expect(okMsgRow).toHaveTextContent("正在回应");
+  expect(within(okMsgRow).queryByRole("button")).not.toBeInTheDocument();
+
+  expect(within(errMsgRow).getByText("❌")).toBeInTheDocument();
+  expect(errMsgRow).not.toHaveTextContent("正在回应");
+  expect(within(errMsgRow).queryByRole("button")).not.toBeInTheDocument();
+  // 气泡正文保持纯净
+  expect(okMsgRow.querySelector(".waypoint-bubble")).toHaveTextContent("执行任务一");
+  expect(okMsgRow.querySelector(".waypoint-bubble")).not.toHaveTextContent("✅");
+
+  // 撤回 👀 后，正在回应消失，但 ✅ 仍留在原消息上
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(okMsgRow).not.toHaveTextContent("正在回应");
+  });
+  expect(within(okMsgRow).getByText("✅")).toBeInTheDocument();
+  expect(within(errMsgRow).getByText("❌")).toBeInTheDocument();
+  expect(rxRow).not.toHaveTextContent("正在回应");
+});

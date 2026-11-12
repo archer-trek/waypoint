@@ -199,7 +199,7 @@ export function TopicsWorkspace({
     .map((item) =>
       item.kind === "day-separator"
         ? `s:${item.key}`
-        : `m:${item.key}:${item.status}:${item.body}`,
+        : `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${item.body}`,
     )
     .join("\0");
 
@@ -2018,8 +2018,15 @@ export function TopicsWorkspace({
                         ) : null}
                       </span>
                     </span>
-                    {registeredAgents.length > 1 && topic.botDisplayName ? (
-                      <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
+                    {(registeredAgents.length > 1 && topic.botDisplayName) || topic.responding ? (
+                      <span className="waypoint-topic-row-subtitle">
+                        {registeredAgents.length > 1 && topic.botDisplayName ? (
+                          <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
+                        ) : null}
+                        {topic.responding ? (
+                          <span className="waypoint-topic-row-responding">正在回应</span>
+                        ) : null}
+                      </span>
                     ) : null}
                   </button>
                 </li>
@@ -2593,18 +2600,32 @@ export function TopicsWorkspace({
                               ) : null}
                             </div>
                           ) : null}
-                          <div
-                            className="waypoint-bubble"
-                            onContextMenu={
-                              item.status === "failed" && item.localId
-                                ? (event) => {
-                                    event.preventDefault();
-                                    setOpenFailedMenuId(item.localId!);
-                                  }
-                                : undefined
-                            }
-                          >
-                            {item.body}
+                          <div className="waypoint-message-content">
+                            <div
+                              className="waypoint-bubble"
+                              onContextMenu={
+                                item.status === "failed" && item.localId
+                                  ? (event) => {
+                                      event.preventDefault();
+                                      setOpenFailedMenuId(item.localId!);
+                                    }
+                                  : undefined
+                              }
+                            >
+                              {item.body}
+                            </div>
+                            {item.reactions && item.reactions.length > 0 ? (
+                              <div className="waypoint-message-reactions">
+                                {item.reactions.map((key) => (
+                                  <span key={key} className="waypoint-message-reaction">
+                                    {key}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {item.responding ? (
+                              <div className="waypoint-message-responding">正在回应</div>
+                            ) : null}
                           </div>
                         </div>
                       ),

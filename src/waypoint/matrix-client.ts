@@ -1635,6 +1635,10 @@ function applyRoomBackfillPage(
     if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
       return true;
     }
+    const reactionTarget = reactionTargetIdOf(event);
+    if (reactionTarget !== undefined && redactedIds.has(reactionTarget)) {
+      return true;
+    }
     return false;
   };
 
@@ -1996,6 +2000,22 @@ function isRedactedStub(event: RawMatrixEvent): boolean {
   return isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because);
 }
 
+function reactionTargetIdOf(event: RawMatrixEvent): string | undefined {
+  if (event.type !== "m.reaction" || !isPlainObject(event.content)) {
+    return undefined;
+  }
+  const relatesTo = event.content["m.relates_to"];
+  if (
+    isPlainObject(relatesTo) &&
+    relatesTo.rel_type === "m.annotation" &&
+    typeof relatesTo.event_id === "string" &&
+    relatesTo.event_id !== ""
+  ) {
+    return relatesTo.event_id;
+  }
+  return undefined;
+}
+
 function replaceTargetIdOf(event: RawMatrixEvent): string | undefined {
   if (event.type !== "m.room.message" || !isPlainObject(event.content)) {
     return undefined;
@@ -2043,6 +2063,10 @@ function mergeTimelineEventsWithRedactions(
     }
     const replaceTarget = replaceTargetIdOf(event);
     if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
+      return true;
+    }
+    const reactionTarget = reactionTargetIdOf(event);
+    if (reactionTarget !== undefined && redactedIds.has(reactionTarget)) {
       return true;
     }
     return false;

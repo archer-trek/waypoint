@@ -24,6 +24,7 @@ export type TopicSummary = {
   unread: boolean;
   firstUnreadEventId?: string;
   readPositionUnknown: boolean;
+  responding: boolean;
   sendStatus?: "unconfirmed" | "failed";
   unavailable: boolean;
   unavailableReason?: string;
@@ -447,6 +448,7 @@ export function deriveTopics(
     const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
     const pinned = isRecord(room.tags) && isRecord(room.tags["im.waypoint.pinned"]);
     const unreadState = deriveTopicUnreadState(room, agentUserId);
+    const responding = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId).size > 0;
 
     topics.push({
       roomId,
@@ -459,6 +461,7 @@ export function deriveTopics(
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
+      responding,
       ...(sendStatus ? { sendStatus } : {}),
       unavailable: availability.unavailable,
       ...(availability.reason ? { unavailableReason: availability.reason } : {}),
@@ -1113,6 +1116,8 @@ export type TimelineItem =
       body: string;
       status: "confirmed" | "unconfirmed" | "failed";
       localId?: string;
+      responding?: boolean;
+      reactions?: string[];
     };
 
 function stripStreamingCursor(body: string): string {
@@ -1210,6 +1215,13 @@ export function deriveRoomTimelineItems(
   if (room) {
     const redactedIds = collectRedactedEventIds(room.timelineEvents);
     const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
+    const eyesTargetIds = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId);
+    const reactionsByEventId = collectMessageReactions(
+      room.timelineEvents,
+      redactedIds,
+      ownerUserId,
+      agentUserId,
+    );
     room.timelineEvents.forEach((event, index) => {
       if (
         typeof event.state_key === "string" ||
@@ -1279,13 +1291,16 @@ export function deriveRoomTimelineItems(
         }
         lastDayKey = currentDay;
       }
+      const reactions = rawEventId ? reactionsByEventId.get(rawEventId) : undefined;
       items.push({
         kind: "message",
         key: eventId,
-        eventId: typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined,
+        eventId: rawEventId,
         side,
         body,
         status: "confirmed",
+        ...(rawEventId && eyesTargetIds.has(rawEventId) ? { responding: true } : {}),
+        ...(reactions && reactions.length > 0 ? { reactions } : {}),
       });
     });
   }
@@ -1363,6 +1378,85 @@ function formatDaySeparator(ts: number, nowMs: number): string {
     month: "numeric",
     day: "numeric",
   }).format(new Date(ts));
+}
+
+function collectActiveEyesTargetIds(
+  events: RawMatrixEvent[],
+  redactedIds: Set<string>,
+  agentUserId: string | undefined,
+): Set<string> {
+  const targets = new Set<string>();
+  if (!agentUserId) {
+    return targets;
+  }
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
+      isRedactedEvent(event, redactedIds) ||
+      event.type !== "m.reaction" ||
+      event.sender !== agentUserId ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    const relatesTo = event.content["m.relates_to"];
+    if (
+      !isRecord(relatesTo) ||
+      relatesTo.rel_type !== "m.annotation" ||
+      typeof relatesTo.event_id !== "string" ||
+      relatesTo.event_id === "" ||
+      redactedIds.has(relatesTo.event_id) ||
+      relatesTo.key !== "👀"
+    ) {
+      continue;
+    }
+    targets.add(relatesTo.event_id);
+  }
+  return targets;
+}
+
+function collectMessageReactions(
+  events: RawMatrixEvent[],
+  redactedIds: Set<string>,
+  ownerUserId: string,
+  agentUserId: string | undefined,
+): Map<string, string[]> {
+  const byTarget = new Map<string, string[]>();
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
+      isRedactedEvent(event, redactedIds) ||
+      event.type !== "m.reaction" ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    const sender = typeof event.sender === "string" ? event.sender : undefined;
+    if (sender !== ownerUserId && !(agentUserId && sender === agentUserId)) {
+      continue;
+    }
+    const relatesTo = event.content["m.relates_to"];
+    if (
+      !isRecord(relatesTo) ||
+      relatesTo.rel_type !== "m.annotation" ||
+      typeof relatesTo.event_id !== "string" ||
+      relatesTo.event_id === "" ||
+      redactedIds.has(relatesTo.event_id) ||
+      typeof relatesTo.key !== "string" ||
+      relatesTo.key === "" ||
+      relatesTo.key === "👀"
+    ) {
+      continue;
+    }
+    const list = byTarget.get(relatesTo.event_id) ?? [];
+    if (!list.includes(relatesTo.key)) {
+      list.push(relatesTo.key);
+      byTarget.set(relatesTo.event_id, list);
+    }
+  }
+  return byTarget;
 }
 
 export function collectRedactedEventIds(events: RawMatrixEvent[]): Set<string> {
