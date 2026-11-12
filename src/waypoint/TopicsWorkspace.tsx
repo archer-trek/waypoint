@@ -9,8 +9,13 @@ import {
   type KeyboardEvent,
 } from "react";
 import { normalizeInset } from "../adapters/inset";
-import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
-import type { MatrixClient } from "./matrix-client";
+import type { Clock, PlatformAdapter, TransportResult, ViewportMode } from "../adapters/types";
+import {
+  BACKFILL_PAGE_LIMIT,
+  nextBackfillTargetForReadPosition,
+  nextBackfillTargetForScrollUp,
+  type MatrixClient,
+} from "./matrix-client";
 import type { DraftAttachment, DraftRecord } from "./session-store";
 import {
   classifyLoginFailure,
@@ -43,6 +48,7 @@ import {
 
 const FOREGROUND_SYNC_INTERVAL_MS = 1000;
 const AT_BOTTOM_THRESHOLD_PX = 24;
+const TOP_SCROLL_THRESHOLD_PX = 24;
 
 type AgentsFormState =
   | {
@@ -84,6 +90,7 @@ export function TopicsWorkspace({
     [providedRetryQueue, client, clock],
   );
   const [, setRevision] = useState(0);
+  const [backfillTick, setBackfillTick] = useState(0);
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [agentsForm, setAgentsForm] = useState<AgentsFormState | null>(null);
@@ -152,6 +159,20 @@ export function TopicsWorkspace({
   const syncWakePendingRef = useRef(false);
   const isAtBottomRef = useRef(true);
   const prevTimelineKeyRef = useRef<string>("");
+  const activeVisibleRoomRef = useRef<string | null>(null);
+  const backfillInFlightRoomsRef = useRef(new Set<string>());
+  const openBackfillStoppedRoomsRef = useRef(new Set<string>());
+  const pendingScrollPreserveRef = useRef<{
+    roomId: string;
+    prevScrollHeight: number;
+    prevScrollTop: number;
+  } | null>(null);
+  const awaitingReadPosLandingRoomRef = useRef<string | null>(null);
+  const programmaticScrollRef = useRef<{ active: boolean; top: number }>({
+    active: false,
+    top: 0,
+  });
+  const userScrolledRoomRef = useRef<string | null>(null);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -858,6 +879,7 @@ export function TopicsWorkspace({
 
   const visibleComposerRoomId =
     !settingsOpen && !creating && !editing && activeTopic ? activeTopic.roomId : null;
+  activeVisibleRoomRef.current = visibleComposerRoomId;
 
   useEffect(() => {
     if (visibleComposerRoomId === null) {
@@ -1010,6 +1032,203 @@ export function TopicsWorkspace({
     };
   }, [client, clock, retryQueue, providedRetryQueue]);
 
+  function setTimelineScrollTop(container: HTMLElement, nextTop: number) {
+    programmaticScrollRef.current = { active: true, top: nextTop };
+    container.scrollTop = nextTop;
+  }
+
+  async function triggerScrollBackfill(roomId: string) {
+    if (
+      pausedRef.current ||
+      reauthRequiredRef.current ||
+      exiting ||
+      !client.hasToken ||
+      backfillInFlightRoomsRef.current.has(roomId)
+    ) {
+      return;
+    }
+    const target = nextBackfillTargetForScrollUp(client.rooms()[roomId]);
+    if (!target) {
+      return;
+    }
+    backfillInFlightRoomsRef.current.add(roomId);
+    const leaveGen = client.currentLeaveGeneration;
+    const myEpoch = syncEpochRef.current;
+    try {
+      let result: TransportResult;
+      try {
+        result = await client.roomMessagesBackward(roomId, target.fromToken, BACKFILL_PAGE_LIMIT);
+      } catch {
+        return;
+      }
+      if (
+        !mountedRef.current ||
+        pausedRef.current ||
+        reauthRequiredRef.current ||
+        exiting ||
+        !client.hasToken ||
+        syncEpochRef.current !== myEpoch
+      ) {
+        return;
+      }
+      if (isCredentialRejected(result)) {
+        pauseForCredentialRejection();
+        return;
+      }
+      if (result.type !== "response" || result.status !== 200) {
+        return;
+      }
+      const el = timelineRef.current;
+      const shouldPreserve = el !== null && activeVisibleRoomRef.current === roomId;
+      const prevScrollHeight = el?.scrollHeight ?? 0;
+      const prevScrollTop = el?.scrollTop ?? 0;
+      await client.applyBackfillPage(roomId, {
+        fromToken: target.fromToken,
+        body: result.body,
+        gapIndex: target.gapIndex,
+        leaveGeneration: leaveGen,
+      });
+      if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== myEpoch) {
+        return;
+      }
+      if (shouldPreserve && el) {
+        pendingScrollPreserveRef.current = {
+          roomId,
+          prevScrollHeight,
+          prevScrollTop,
+        };
+      }
+      setRevision((value) => value + 1);
+    } finally {
+      backfillInFlightRoomsRef.current.delete(roomId);
+    }
+  }
+
+  useEffect(() => {
+    if (userScrolledRoomRef.current !== visibleComposerRoomId) {
+      userScrolledRoomRef.current = null;
+    }
+    for (const roomId of Array.from(openBackfillStoppedRoomsRef.current)) {
+      if (roomId !== visibleComposerRoomId) {
+        openBackfillStoppedRoomsRef.current.delete(roomId);
+      }
+    }
+    if (!visibleComposerRoomId || !activeTopic || !activeTopic.readPositionUnknown) {
+      return;
+    }
+    if (
+      pausedRef.current ||
+      reauthRequiredRef.current ||
+      exiting ||
+      !client.hasToken ||
+      backfillInFlightRoomsRef.current.has(visibleComposerRoomId) ||
+      openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId)
+    ) {
+      return;
+    }
+    if (!nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId])) {
+      return;
+    }
+    const roomId = visibleComposerRoomId;
+    const myEpoch = syncEpochRef.current;
+    awaitingReadPosLandingRoomRef.current = roomId;
+    backfillInFlightRoomsRef.current.add(roomId);
+    let cancelled = false;
+    void (async () => {
+      try {
+        while (
+          !cancelled &&
+          mountedRef.current &&
+          !pausedRef.current &&
+          !reauthRequiredRef.current &&
+          !exiting &&
+          client.hasToken &&
+          syncEpochRef.current === myEpoch &&
+          activeVisibleRoomRef.current === roomId
+        ) {
+          const currentRoom = client.rooms()[roomId];
+          const target = nextBackfillTargetForReadPosition(currentRoom);
+          if (!target) {
+            break;
+          }
+          const leaveGen = client.currentLeaveGeneration;
+          let result: TransportResult;
+          try {
+            result = await client.roomMessagesBackward(
+              roomId,
+              target.fromToken,
+              BACKFILL_PAGE_LIMIT,
+            );
+          } catch {
+            openBackfillStoppedRoomsRef.current.add(roomId);
+            break;
+          }
+          if (
+            cancelled ||
+            !mountedRef.current ||
+            pausedRef.current ||
+            reauthRequiredRef.current ||
+            exiting ||
+            !client.hasToken ||
+            syncEpochRef.current !== myEpoch
+          ) {
+            break;
+          }
+          if (isCredentialRejected(result)) {
+            pauseForCredentialRejection();
+            break;
+          }
+          if (result.type !== "response" || result.status !== 200) {
+            openBackfillStoppedRoomsRef.current.add(roomId);
+            break;
+          }
+          const el = timelineRef.current;
+          const shouldPreserve =
+            el !== null &&
+            activeVisibleRoomRef.current === roomId &&
+            userScrolledRoomRef.current === roomId;
+          const prevScrollHeight = el?.scrollHeight ?? 0;
+          const prevScrollTop = el?.scrollTop ?? 0;
+          const outcome = await client.applyBackfillPage(roomId, {
+            fromToken: target.fromToken,
+            body: result.body,
+            gapIndex: target.gapIndex,
+            leaveGeneration: leaveGen,
+          });
+          if (cancelled || !mountedRef.current || pausedRef.current || syncEpochRef.current !== myEpoch) {
+            break;
+          }
+          if (shouldPreserve && el) {
+            pendingScrollPreserveRef.current = {
+              roomId,
+              prevScrollHeight,
+              prevScrollTop,
+            };
+          }
+          setRevision((value) => value + 1);
+          if (outcome.hasReadPosition) {
+            break;
+          }
+          if (!nextBackfillTargetForReadPosition(client.rooms()[roomId])) {
+            openBackfillStoppedRoomsRef.current.add(roomId);
+            break;
+          }
+        }
+      } finally {
+        backfillInFlightRoomsRef.current.delete(roomId);
+        if (mountedRef.current && activeVisibleRoomRef.current === roomId) {
+          setRevision((value) => value + 1);
+          if (cancelled) {
+            setBackfillTick((value) => value + 1);
+          }
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visibleComposerRoomId, activeTopic?.readPositionUnknown, backfillTick, client, exiting, reauthRequired]);
+
   function collapseDescription() {
     setDescriptionExpanded(false);
   }
@@ -1017,9 +1236,22 @@ export function TopicsWorkspace({
   function handleTimelineScroll() {
     collapseDescription();
     const el = timelineRef.current;
+    if (el && programmaticScrollRef.current.active) {
+      const same = Math.abs(el.scrollTop - programmaticScrollRef.current.top) < 1;
+      programmaticScrollRef.current.active = false;
+      if (same) {
+        return;
+      }
+    }
+    if (visibleComposerRoomId) {
+      userScrolledRoomRef.current = visibleComposerRoomId;
+    }
     if (el) {
       isAtBottomRef.current =
         el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX;
+      if (visibleComposerRoomId && el.scrollTop <= TOP_SCROLL_THRESHOLD_PX) {
+        void triggerScrollBackfill(visibleComposerRoomId);
+      }
     }
     if (visibleComposerRoomId) {
       evaluateVisibleReadPosition(visibleComposerRoomId);
@@ -1128,9 +1360,41 @@ export function TopicsWorkspace({
       });
   }
 
+  function landTimelineScroll(container: HTMLElement, firstUnreadEventId: string | undefined) {
+    if (firstUnreadEventId) {
+      const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
+      const targetEl = rowEls.find((el) => el.dataset.eventId === firstUnreadEventId);
+      if (targetEl) {
+        const containerRect = container.getBoundingClientRect();
+        const targetRect = targetEl.getBoundingClientRect();
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (containerRect.height > 0 && targetRect.height > 0) {
+          const desiredTop = container.scrollTop + (targetRect.top - containerRect.top);
+          setTimelineScrollTop(
+            container,
+            maxScroll > 0 ? Math.max(0, Math.min(desiredTop, maxScroll)) : Math.max(0, desiredTop),
+          );
+        } else if (container.clientHeight > 0) {
+          setTimelineScrollTop(container, Math.max(0, Math.min(targetEl.offsetTop, maxScroll)));
+        }
+      }
+      isAtBottomRef.current =
+        container.scrollHeight - container.scrollTop - container.clientHeight <=
+        AT_BOTTOM_THRESHOLD_PX;
+    } else {
+      setTimelineScrollTop(
+        container,
+        Math.max(0, container.scrollHeight - container.clientHeight),
+      );
+      isAtBottomRef.current = true;
+    }
+  }
+
   useLayoutEffect(() => {
     if (!visibleComposerRoomId || !activeTopic || activeTopic.roomId !== visibleComposerRoomId) {
       lastLandedRoomRef.current = null;
+      awaitingReadPosLandingRoomRef.current = null;
+      pendingScrollPreserveRef.current = null;
       isAtBottomRef.current = true;
       prevTimelineKeyRef.current = "";
       return;
@@ -1139,37 +1403,47 @@ export function TopicsWorkspace({
     if (!container) {
       return;
     }
+    const shouldWaitForBackfill =
+      !reauthRequired &&
+      activeTopic.readPositionUnknown &&
+      Boolean(nextBackfillTargetForReadPosition(rooms[visibleComposerRoomId])) &&
+      !openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId);
+
     if (lastLandedRoomRef.current !== visibleComposerRoomId) {
       lastLandedRoomRef.current = visibleComposerRoomId;
-      if (activeTopic.firstUnreadEventId) {
-        const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
-        const targetEl = rowEls.find(
-          (el) => el.dataset.eventId === activeTopic.firstUnreadEventId,
-        );
-        if (targetEl) {
-          const containerRect = container.getBoundingClientRect();
-          const targetRect = targetEl.getBoundingClientRect();
-          const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
-          if (containerRect.height > 0 && targetRect.height > 0) {
-            const desiredTop = container.scrollTop + (targetRect.top - containerRect.top);
-            container.scrollTop =
-              maxScroll > 0 ? Math.max(0, Math.min(desiredTop, maxScroll)) : Math.max(0, desiredTop);
-          } else if (container.clientHeight > 0) {
-            container.scrollTop = Math.max(0, Math.min(targetEl.offsetTop, maxScroll));
-          }
-        }
-        isAtBottomRef.current =
-          container.scrollHeight - container.scrollTop - container.clientHeight <=
-          AT_BOTTOM_THRESHOLD_PX;
+      if (shouldWaitForBackfill) {
+        awaitingReadPosLandingRoomRef.current = visibleComposerRoomId;
       } else {
-        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
-        isAtBottomRef.current = true;
+        awaitingReadPosLandingRoomRef.current = null;
+        landTimelineScroll(container, activeTopic.firstUnreadEventId);
       }
+      prevTimelineKeyRef.current = timelineContentKey;
+    } else if (
+      awaitingReadPosLandingRoomRef.current === visibleComposerRoomId &&
+      !shouldWaitForBackfill
+    ) {
+      awaitingReadPosLandingRoomRef.current = null;
+      pendingScrollPreserveRef.current = null;
+      if (userScrolledRoomRef.current !== visibleComposerRoomId) {
+        landTimelineScroll(container, activeTopic.firstUnreadEventId);
+      }
+      prevTimelineKeyRef.current = timelineContentKey;
+    } else if (pendingScrollPreserveRef.current?.roomId === visibleComposerRoomId) {
+      const pending = pendingScrollPreserveRef.current;
+      pendingScrollPreserveRef.current = null;
+      const delta = container.scrollHeight - pending.prevScrollHeight;
+      setTimelineScrollTop(container, Math.max(0, pending.prevScrollTop + delta));
+      isAtBottomRef.current =
+        container.scrollHeight - container.scrollTop - container.clientHeight <=
+        AT_BOTTOM_THRESHOLD_PX;
       prevTimelineKeyRef.current = timelineContentKey;
     } else if (prevTimelineKeyRef.current !== timelineContentKey) {
       prevTimelineKeyRef.current = timelineContentKey;
       if (isAtBottomRef.current) {
-        container.scrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+        setTimelineScrollTop(
+          container,
+          Math.max(0, container.scrollHeight - container.clientHeight),
+        );
       }
     }
     evaluateVisibleReadPosition(visibleComposerRoomId);

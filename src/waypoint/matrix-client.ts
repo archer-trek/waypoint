@@ -16,6 +16,7 @@ import {
 } from "./session-store";
 
 const MAX_SYNC_TIMELINE_EVENTS_PER_ROOM = 20;
+export const BACKFILL_PAGE_LIMIT = 50;
 
 export type SyncAttempt = {
   result: TransportResult;
@@ -322,6 +323,75 @@ export class MatrixClient {
       }
       return saveSession(this.sessionRecord());
     });
+  }
+
+  roomMessagesBackward(
+    roomId: string,
+    fromToken: string,
+    limit = BACKFILL_PAGE_LIMIT,
+  ): Promise<TransportResult> {
+    const query = `dir=b&limit=${limit}&from=${encodeURIComponent(fromToken)}`;
+    return this.authedRequest({
+      method: "GET",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${query}`,
+      ),
+    });
+  }
+
+  async applyBackfillPage(
+    roomId: string,
+    options: {
+      fromToken: string;
+      body: unknown;
+      gapIndex?: number;
+      leaveGeneration?: number;
+    },
+  ): Promise<{ prependedCount: number; reachedStart: boolean; hasReadPosition: boolean }> {
+    let outcome = { prependedCount: 0, reachedStart: false, hasReadPosition: false };
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      if (
+        options.leaveGeneration !== undefined &&
+        (this.leftAtGeneration.get(roomId) ?? 0) > options.leaveGeneration
+      ) {
+        return;
+      }
+      const room = this.storedRooms[roomId];
+      if (!room) {
+        return;
+      }
+      const applied = applyRoomBackfillPage(room, options.fromToken, options.body, options.gapIndex);
+      if (!applied.changed) {
+        outcome = {
+          prependedCount: 0,
+          reachedStart: Boolean(room.reachedStart),
+          hasReadPosition:
+            room.readPositionEventId !== undefined &&
+            timelineIndexOf(room.timelineEvents, room.readPositionEventId) !== -1,
+        };
+        return;
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      nextRooms[roomId] = applied.room;
+      await saveSession(this.sessionRecord({ rooms: nextRooms }));
+      this.storedRooms = nextRooms;
+      outcome = {
+        prependedCount: applied.prependedCount,
+        reachedStart: Boolean(applied.room.reachedStart),
+        hasReadPosition:
+          applied.room.readPositionEventId !== undefined &&
+          timelineIndexOf(applied.room.timelineEvents, applied.room.readPositionEventId) !== -1,
+      };
+    });
+    return outcome;
+  }
+
+  get currentLeaveGeneration(): number {
+    return this.leaveGeneration;
   }
 
   getAccountData(type: string): Promise<TransportResult> {
@@ -891,13 +961,14 @@ export class MatrixClient {
         return Promise.resolve();
       }
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const gaps = roomTimelineGaps(existing).map((g) => ({ ...g }));
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: {
           ...existing,
           stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
-          ...(existing.timelineGap ? { timelineGap: { ...existing.timelineGap } } : {}),
+          ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
         },
       };
       return saveSession(this.sessionRecord());
@@ -1043,6 +1114,127 @@ function cloneObject(obj: RawMatrixEvent): RawMatrixEvent {
   return cloneValue(obj) as RawMatrixEvent;
 }
 
+function cloneStoredGap(raw: unknown): StoredTimelineGap | undefined {
+  if (!isPlainObject(raw) || raw.limited !== true) {
+    return undefined;
+  }
+  return {
+    limited: true,
+    ...(typeof raw.prevBatch === "string" && raw.prevBatch !== ""
+      ? { prevBatch: raw.prevBatch }
+      : {}),
+    ...(typeof raw.gapBeforeEventId === "string" && raw.gapBeforeEventId !== ""
+      ? { gapBeforeEventId: raw.gapBeforeEventId }
+      : {}),
+    ...(raw.pendingGapAtEnd === true ? { pendingGapAtEnd: true as const } : {}),
+  };
+}
+
+export function roomTimelineGaps(room: StoredRoomEvents): StoredTimelineGap[] {
+  if (Array.isArray(room.timelineGaps) && room.timelineGaps.length > 0) {
+    return room.timelineGaps;
+  }
+  if (room.timelineGap) {
+    return [room.timelineGap];
+  }
+  return [];
+}
+
+export function nextBackfillTargetForReadPosition(
+  room: StoredRoomEvents | undefined,
+): { fromToken: string; gapIndex?: number } | undefined {
+  if (!room || !room.readPositionEventId) {
+    return undefined;
+  }
+  if (timelineIndexOf(room.timelineEvents, room.readPositionEventId) !== -1) {
+    return undefined;
+  }
+  const gaps = roomTimelineGaps(room);
+  for (let i = gaps.length - 1; i >= 0; i -= 1) {
+    const gap = gaps[i];
+    if (gap.prevBatch) {
+      return { fromToken: gap.prevBatch, gapIndex: i };
+    }
+  }
+  if (!room.reachedStart && room.backwardToken) {
+    return { fromToken: room.backwardToken };
+  }
+  return undefined;
+}
+
+export function nextBackfillTargetForScrollUp(
+  room: StoredRoomEvents | undefined,
+): { fromToken: string; gapIndex?: number } | undefined {
+  if (!room) {
+    return undefined;
+  }
+  const gaps = roomTimelineGaps(room);
+  if (!room.reachedStart && room.backwardToken) {
+    const firstConfirmedId = room.timelineEvents
+      .map(eventIdOf)
+      .find((id): id is string => id !== undefined);
+    const startGapIdx = gaps.findIndex(
+      (g) =>
+        (g.prevBatch && g.prevBatch === room.backwardToken) ||
+        (firstConfirmedId !== undefined && g.gapBeforeEventId === firstConfirmedId),
+    );
+    return {
+      fromToken: room.backwardToken,
+      ...(startGapIdx !== -1 ? { gapIndex: startGapIdx } : {}),
+    };
+  }
+  for (let i = 0; i < gaps.length; i += 1) {
+    const gap = gaps[i];
+    if (gap.prevBatch) {
+      return { fromToken: gap.prevBatch, gapIndex: i };
+    }
+  }
+  return undefined;
+}
+
+function normalizeGaps(
+  gaps: StoredTimelineGap[],
+  timeline: RawMatrixEvent[],
+): StoredTimelineGap[] {
+  if (gaps.length === 0) {
+    return [];
+  }
+  const seenKey = new Set<string>();
+  const deduped: StoredTimelineGap[] = [];
+  for (const gap of gaps) {
+    const key = gap.gapBeforeEventId
+      ? `before:${gap.gapBeforeEventId}`
+      : gap.pendingGapAtEnd
+        ? "pendingEnd"
+        : `token:${gap.prevBatch ?? ""}`;
+    if (seenKey.has(key)) {
+      const idx = deduped.findIndex((item) =>
+        gap.gapBeforeEventId
+          ? item.gapBeforeEventId === gap.gapBeforeEventId
+          : gap.pendingGapAtEnd
+            ? Boolean(item.pendingGapAtEnd)
+            : item.prevBatch === gap.prevBatch,
+      );
+      if (idx !== -1) {
+        deduped[idx] = { ...gap };
+      }
+      continue;
+    }
+    seenKey.add(key);
+    deduped.push({ ...gap });
+  }
+  deduped.sort((a, b) => {
+    const aIdx = a.gapBeforeEventId
+      ? timelineIndexOf(timeline, a.gapBeforeEventId)
+      : timeline.length;
+    const bIdx = b.gapBeforeEventId
+      ? timelineIndexOf(timeline, b.gapBeforeEventId)
+      : timeline.length;
+    return aIdx - bIdx;
+  });
+  return deduped;
+}
+
 function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, StoredRoomEvents> {
   const cloned: Record<string, StoredRoomEvents> = {};
   for (const [roomId, value] of Object.entries(rooms)) {
@@ -1055,24 +1247,40 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
     const timelineEvents = Array.isArray(value.timelineEvents)
       ? value.timelineEvents.filter(isPlainObject).map(cloneObject)
       : [];
-    let timelineGap: StoredTimelineGap | undefined;
-    if (isPlainObject(value.timelineGap) && value.timelineGap.limited === true) {
-      timelineGap = {
-        limited: true,
-        ...(typeof value.timelineGap.prevBatch === "string" && value.timelineGap.prevBatch !== ""
-          ? { prevBatch: value.timelineGap.prevBatch }
-          : {}),
-        ...(typeof value.timelineGap.gapBeforeEventId === "string" &&
-        value.timelineGap.gapBeforeEventId !== ""
-          ? { gapBeforeEventId: value.timelineGap.gapBeforeEventId }
-          : {}),
-        ...(value.timelineGap.pendingGapAtEnd === true ? { pendingGapAtEnd: true as const } : {}),
-      };
+    const gaps: StoredTimelineGap[] = [];
+    if (Array.isArray(value.timelineGaps)) {
+      for (const rawGap of value.timelineGaps) {
+        const g = cloneStoredGap(rawGap);
+        if (g) {
+          gaps.push(g);
+        }
+      }
     }
+    if (gaps.length === 0) {
+      const single = cloneStoredGap(value.timelineGap);
+      if (single) {
+        gaps.push(single);
+      }
+    }
+    const backwardToken =
+      typeof value.backwardToken === "string" && value.backwardToken !== ""
+        ? value.backwardToken
+        : gaps.length === 1 &&
+            gaps[0].prevBatch &&
+            (timelineEvents.findIndex((ev) => !localPlaceholderOf(ev)) === -1 ||
+              gaps[0].gapBeforeEventId ===
+                eventIdOf(
+                  timelineEvents[timelineEvents.findIndex((ev) => !localPlaceholderOf(ev))] ?? {},
+                ))
+          ? gaps[0].prevBatch
+          : undefined;
+    const reachedStart = value.reachedStart === true;
     cloned[roomId] = {
       stateEvents,
       timelineEvents,
-      ...(timelineGap ? { timelineGap } : {}),
+      ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
+      ...(backwardToken && !reachedStart ? { backwardToken } : {}),
+      ...(reachedStart ? { reachedStart: true } : {}),
       ...(typeof value.readPositionEventId === "string" && value.readPositionEventId !== ""
         ? { readPositionEventId: value.readPositionEventId }
         : {}),
@@ -1088,6 +1296,53 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
     };
   }
   return cloned;
+}
+
+function reconcileGapsAfterTimelineChange(
+  gaps: StoredTimelineGap[],
+  oldTimeline: RawMatrixEvent[],
+  mergedIds: Set<string>,
+  firstNewInBatch: string | undefined,
+): StoredTimelineGap[] {
+  const next: StoredTimelineGap[] = [];
+  for (const gap of gaps) {
+    if (!gap.limited) {
+      continue;
+    }
+    if (gap.pendingGapAtEnd) {
+      if (firstNewInBatch) {
+        next.push({
+          limited: true,
+          ...(gap.prevBatch ? { prevBatch: gap.prevBatch } : {}),
+          gapBeforeEventId: firstNewInBatch,
+        });
+      } else {
+        next.push({ ...gap });
+      }
+      continue;
+    }
+    if (gap.gapBeforeEventId && !mergedIds.has(gap.gapBeforeEventId)) {
+      const oldGapIdx = timelineIndexOf(oldTimeline, gap.gapBeforeEventId);
+      const nextExistingAnchor =
+        oldGapIdx !== -1
+          ? oldTimeline
+              .slice(oldGapIdx + 1)
+              .map(eventIdOf)
+              .find((id): id is string => id !== undefined && mergedIds.has(id))
+          : undefined;
+      const replacementAnchor = nextExistingAnchor ?? firstNewInBatch;
+      next.push({
+        limited: true,
+        ...(gap.prevBatch ? { prevBatch: gap.prevBatch } : {}),
+        ...(replacementAnchor
+          ? { gapBeforeEventId: replacementAnchor }
+          : { pendingGapAtEnd: true as const }),
+      });
+      continue;
+    }
+    next.push({ ...gap });
+  }
+  return next;
 }
 
 function mergeSyncRooms(
@@ -1118,6 +1373,9 @@ function mergeSyncRooms(
         continue;
       }
       const existing = next[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const existingConfirmedCount = existing.timelineEvents.filter(
+        (ev) => !localPlaceholderOf(ev),
+      ).length;
       const rawState =
         isPlainObject(roomSync.state) && Array.isArray(roomSync.state.events)
           ? roomSync.state.events.filter(isPlainObject)
@@ -1149,47 +1407,36 @@ function mergeSyncRooms(
       const firstNewInBatch = mergedTimeline
         .map(eventIdOf)
         .find((id): id is string => id !== undefined && !existingIds.has(id));
-      let timelineGap: StoredTimelineGap | undefined = existing.timelineGap;
+
+      let nextGaps = reconcileGapsAfterTimelineChange(
+        roomTimelineGaps(existing),
+        existing.timelineEvents,
+        mergedIds,
+        firstNewInBatch,
+      );
       if (isLimited) {
         const survivingIncomingAnchor = rawTimeline
           .map(eventIdOf)
           .find((id): id is string => id !== undefined && mergedIds.has(id));
         const anchor = firstNewInBatch ?? survivingIncomingAnchor;
-        timelineGap = {
+        const incomingGap: StoredTimelineGap = {
           limited: true,
           ...(prevBatch ? { prevBatch } : {}),
           ...(anchor ? { gapBeforeEventId: anchor } : { pendingGapAtEnd: true as const }),
         };
-      } else if (existing.timelineGap?.pendingGapAtEnd && firstNewInBatch) {
-        timelineGap = {
-          limited: true,
-          ...(existing.timelineGap.prevBatch ? { prevBatch: existing.timelineGap.prevBatch } : {}),
-          gapBeforeEventId: firstNewInBatch,
-        };
-      } else if (
-        existing.timelineGap?.limited &&
-        existing.timelineGap.gapBeforeEventId &&
-        !mergedIds.has(existing.timelineGap.gapBeforeEventId)
-      ) {
-        const oldGapIdx = timelineIndexOf(
-          existing.timelineEvents,
-          existing.timelineGap.gapBeforeEventId,
-        );
-        const nextExistingAnchor =
-          oldGapIdx !== -1
-            ? existing.timelineEvents
-                .slice(oldGapIdx + 1)
-                .map(eventIdOf)
-                .find((id): id is string => id !== undefined && mergedIds.has(id))
-            : undefined;
-        const replacementAnchor = nextExistingAnchor ?? firstNewInBatch;
-        timelineGap = {
-          limited: true,
-          ...(existing.timelineGap.prevBatch ? { prevBatch: existing.timelineGap.prevBatch } : {}),
-          ...(replacementAnchor
-            ? { gapBeforeEventId: replacementAnchor }
-            : { pendingGapAtEnd: true as const }),
-        };
+        if (nextGaps.length > 0 && nextGaps[nextGaps.length - 1].pendingGapAtEnd && !anchor) {
+          nextGaps[nextGaps.length - 1] = incomingGap;
+        } else {
+          nextGaps.push(incomingGap);
+        }
+      }
+      nextGaps = normalizeGaps(nextGaps, mergedTimeline);
+
+      let nextBackwardToken = existing.backwardToken;
+      let nextReachedStart = Boolean(existing.reachedStart);
+      if (existingConfirmedCount === 0 && prevBatch) {
+        nextBackwardToken = prevBatch;
+        nextReachedStart = false;
       }
 
       const timelineStateEvents = rawTimeline.filter(
@@ -1238,7 +1485,7 @@ function mergeSyncRooms(
 
       const nextReadPositionEventId = resolveNextReadPosition(
         mergedTimeline,
-        timelineGap,
+        nextGaps,
         effectivePrevReadPos,
         effectiveSyncFullyReadId,
         effectiveSyncPrivateReadIds,
@@ -1250,7 +1497,9 @@ function mergeSyncRooms(
           ...timelineStateEvents,
         ]),
         timelineEvents: mergedTimeline,
-        ...(timelineGap ? { timelineGap } : {}),
+        ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
+        ...(nextBackwardToken && !nextReachedStart ? { backwardToken: nextBackwardToken } : {}),
+        ...(nextReachedStart ? { reachedStart: true } : {}),
         ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
         ...(nextFullyReadEventId ? { fullyReadEventId: nextFullyReadEventId } : {}),
         ...(nextPrivateReadEventId ? { privateReadEventId: nextPrivateReadEventId } : {}),
@@ -1282,6 +1531,251 @@ function extractRoomTags(roomSync: Record<string, unknown>): Record<string, unkn
     }
   }
   return found;
+}
+
+function applyRoomBackfillPage(
+  room: StoredRoomEvents,
+  fromToken: string,
+  body: unknown,
+  gapIndex?: number,
+): { changed: boolean; room: StoredRoomEvents; prependedCount: number } {
+  if (!isPlainObject(body)) {
+    return { changed: false, room, prependedCount: 0 };
+  }
+  const rawChunk = Array.isArray(body.chunk) ? body.chunk.filter(isPlainObject) : [];
+  const rawState = Array.isArray(body.state) ? body.state.filter(isPlainObject) : [];
+  const endToken =
+    typeof body.end === "string" && body.end !== "" ? body.end : undefined;
+  const atEnd = rawChunk.length === 0 || !endToken || endToken === fromToken;
+
+  const incomingChronological = [...rawChunk].reverse();
+  const gaps = roomTimelineGaps(room);
+  const resolvedGapIndex =
+    gapIndex !== undefined && gapIndex >= 0 && gapIndex < gaps.length
+      ? gapIndex
+      : gaps.findIndex((g) => g.prevBatch === fromToken);
+  const targetGap = resolvedGapIndex !== -1 ? gaps[resolvedGapIndex] : undefined;
+
+  let insertIdx = 0;
+  if (targetGap?.gapBeforeEventId) {
+    const foundIdx = timelineIndexOf(room.timelineEvents, targetGap.gapBeforeEventId);
+    insertIdx = foundIdx !== -1 ? foundIdx : 0;
+  } else if (targetGap?.pendingGapAtEnd) {
+    insertIdx = room.timelineEvents.length;
+  }
+
+  const beforeSlice = room.timelineEvents.slice(0, insertIdx);
+  const afterSlice = room.timelineEvents.slice(insertIdx);
+  const beforeHasConfirmed = beforeSlice.some((ev) => !localPlaceholderOf(ev));
+
+  const redactedIds = new Set<string>();
+  for (const event of [...room.timelineEvents, ...incomingChronological]) {
+    const targetId = redactedEventIdOf(event);
+    if (targetId !== undefined) {
+      redactedIds.add(targetId);
+    }
+    if (isRedactedStub(event)) {
+      const id = eventIdOf(event);
+      if (id !== undefined) {
+        redactedIds.add(id);
+      }
+    }
+  }
+
+  const shouldOmit = (event: RawMatrixEvent): boolean => {
+    if (event.type === "m.room.redaction" || isRedactedStub(event)) {
+      return true;
+    }
+    const id = eventIdOf(event);
+    if (id !== undefined && redactedIds.has(id)) {
+      return true;
+    }
+    const replaceTarget = replaceTargetIdOf(event);
+    if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
+      return true;
+    }
+    return false;
+  };
+
+  let effectiveReadPos = room.readPositionEventId;
+  if (effectiveReadPos !== undefined) {
+    const readIdxInIncoming = incomingChronological.findIndex(
+      (ev) => eventIdOf(ev) === effectiveReadPos,
+    );
+    if (readIdxInIncoming !== -1 && shouldOmit(incomingChronological[readIdxInIncoming])) {
+      let fallback: string | undefined;
+      for (let i = readIdxInIncoming - 1; i >= 0; i -= 1) {
+        const candidate = incomingChronological[i];
+        const id = eventIdOf(candidate);
+        if (id !== undefined && !shouldOmit(candidate)) {
+          fallback = id;
+          break;
+        }
+      }
+      if (fallback === undefined) {
+        for (let i = beforeSlice.length - 1; i >= 0; i -= 1) {
+          const candidate = beforeSlice[i];
+          const id = eventIdOf(candidate);
+          if (id !== undefined && !shouldOmit(candidate)) {
+            fallback = id;
+            break;
+          }
+        }
+      }
+      effectiveReadPos = fallback;
+    }
+  }
+
+  const beforeIds = new Set(
+    beforeSlice.map(eventIdOf).filter((id): id is string => id !== undefined),
+  );
+  const afterIds = new Set(
+    afterSlice.map(eventIdOf).filter((id): id is string => id !== undefined),
+  );
+  const overlappedBefore =
+    beforeHasConfirmed &&
+    incomingChronological.some((ev) => {
+      const id = eventIdOf(ev);
+      return id !== undefined && beforeIds.has(id);
+    });
+
+  const filteredBefore = beforeSlice.filter((ev) => !shouldOmit(ev)).map(cloneObject);
+  const filteredAfter = afterSlice.filter((ev) => !shouldOmit(ev)).map(cloneObject);
+
+  const seenIncomingIds = new Set<string>();
+  const dedupedIncoming: RawMatrixEvent[] = [];
+  for (const rawEvent of incomingChronological) {
+    if (shouldOmit(rawEvent)) {
+      continue;
+    }
+    const id = eventIdOf(rawEvent);
+    if (id !== undefined) {
+      if (beforeIds.has(id) || afterIds.has(id) || seenIncomingIds.has(id)) {
+        continue;
+      }
+      seenIncomingIds.add(id);
+    }
+    dedupedIncoming.push(cloneObject(rawEvent));
+  }
+
+  const mergedTimeline = [...filteredBefore, ...dedupedIncoming, ...filteredAfter];
+  const mergedIds = new Set(
+    mergedTimeline.map(eventIdOf).filter((id): id is string => id !== undefined),
+  );
+  if (effectiveReadPos !== undefined && !mergedIds.has(effectiveReadPos)) {
+    const oldReadIdx = timelineIndexOf(room.timelineEvents, effectiveReadPos);
+    if (oldReadIdx !== -1) {
+      let fallback: string | undefined;
+      for (let i = oldReadIdx - 1; i >= 0; i -= 1) {
+        const candidate = eventIdOf(room.timelineEvents[i]);
+        if (candidate !== undefined && mergedIds.has(candidate)) {
+          fallback = candidate;
+          break;
+        }
+      }
+      effectiveReadPos = fallback;
+    }
+  }
+
+  let nextGaps: StoredTimelineGap[] = [];
+  for (let i = 0; i < gaps.length; i += 1) {
+    const gap = gaps[i];
+    if (i === resolvedGapIndex) {
+      if (beforeHasConfirmed) {
+        if (!overlappedBefore && !atEnd) {
+          const firstInsertedId = dedupedIncoming
+            .map(eventIdOf)
+            .find((id): id is string => id !== undefined);
+          const fallbackAnchor =
+            gap.gapBeforeEventId && mergedIds.has(gap.gapBeforeEventId)
+              ? gap.gapBeforeEventId
+              : filteredAfter.map(eventIdOf).find((id): id is string => id !== undefined);
+          const nextAnchor = firstInsertedId ?? fallbackAnchor;
+          nextGaps.push({
+            limited: true,
+            ...(endToken ? { prevBatch: endToken } : {}),
+            ...(nextAnchor ? { gapBeforeEventId: nextAnchor } : { pendingGapAtEnd: true as const }),
+          });
+        }
+      } else {
+        if (!atEnd) {
+          const earliestId = mergedTimeline
+            .map(eventIdOf)
+            .find((id): id is string => id !== undefined);
+          nextGaps.push({
+            limited: true,
+            ...(endToken ? { prevBatch: endToken } : {}),
+            ...(earliestId ? { gapBeforeEventId: earliestId } : { pendingGapAtEnd: true as const }),
+          });
+        }
+      }
+      continue;
+    }
+    nextGaps.push({ ...gap });
+  }
+  nextGaps = reconcileGapsAfterTimelineChange(
+    nextGaps,
+    room.timelineEvents,
+    mergedIds,
+    undefined,
+  );
+  nextGaps = normalizeGaps(nextGaps, mergedTimeline);
+
+  let nextBackwardToken = room.backwardToken;
+  let nextReachedStart = Boolean(room.reachedStart);
+  if (!beforeHasConfirmed) {
+    if (atEnd) {
+      nextBackwardToken = undefined;
+      nextReachedStart = true;
+    } else {
+      nextBackwardToken = endToken;
+    }
+  }
+
+  const effectiveFullyReadId =
+    room.fullyReadEventId && !redactedIds.has(room.fullyReadEventId)
+      ? room.fullyReadEventId
+      : undefined;
+  const effectivePrivateReadId =
+    room.privateReadEventId && !redactedIds.has(room.privateReadEventId)
+      ? room.privateReadEventId
+      : undefined;
+
+  const nextReadPositionEventId = resolveNextReadPosition(
+    mergedTimeline,
+    nextGaps,
+    effectiveReadPos,
+    effectiveFullyReadId,
+    effectivePrivateReadId ? [effectivePrivateReadId] : [],
+  );
+
+  const chunkStateEvents = incomingChronological.filter(
+    (event) => typeof event.state_key === "string",
+  );
+  const nextStateEvents = mergeStateEvents(
+    [...rawState, ...chunkStateEvents],
+    room.stateEvents,
+  );
+
+  const nextRoom: StoredRoomEvents = {
+    stateEvents: nextStateEvents,
+    timelineEvents: mergedTimeline,
+    ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
+    ...(nextBackwardToken && !nextReachedStart ? { backwardToken: nextBackwardToken } : {}),
+    ...(nextReachedStart ? { reachedStart: true } : {}),
+    ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
+    ...(room.fullyReadEventId ? { fullyReadEventId: room.fullyReadEventId } : {}),
+    ...(room.privateReadEventId ? { privateReadEventId: room.privateReadEventId } : {}),
+    ...(isPlainObject(room.tags) && Object.keys(room.tags).length > 0
+      ? { tags: cloneValue(room.tags) as Record<string, unknown> }
+      : {}),
+  };
+
+  return {
+    changed: true,
+    room: nextRoom,
+    prependedCount: dedupedIncoming.length,
+  };
 }
 
 function extractFullyReadEventId(roomSync: Record<string, unknown>): string | undefined {
@@ -1353,7 +1847,7 @@ function resolveFurthestInTimeline(
 
 function resolveNextReadPosition(
   timeline: RawMatrixEvent[],
-  timelineGap: StoredTimelineGap | undefined,
+  timelineGaps: StoredTimelineGap[],
   prevReadPos: string | undefined,
   syncFullyReadId: string | undefined,
   syncPrivateReadIds: string[],
@@ -1374,12 +1868,18 @@ function resolveNextReadPosition(
   const bestKnown = resolveFurthestInTimeline(timeline, candidates);
   if (bestKnown !== undefined) {
     const bestKnownIdx = timelineIndexOf(timeline, bestKnown);
-    const gapIdx = timelineGap?.gapBeforeEventId
-      ? timelineIndexOf(timeline, timelineGap.gapBeforeEventId)
-      : -1;
-    const hasGapAfterBestKnown =
-      Boolean(timelineGap?.limited) &&
-      ((gapIdx > bestKnownIdx) || Boolean(timelineGap?.pendingGapAtEnd));
+    const hasGapAfterBestKnown = timelineGaps.some((gap) => {
+      if (!gap.limited) {
+        return false;
+      }
+      if (gap.pendingGapAtEnd) {
+        return true;
+      }
+      const gapIdx = gap.gapBeforeEventId
+        ? timelineIndexOf(timeline, gap.gapBeforeEventId)
+        : -1;
+      return gapIdx > bestKnownIdx;
+    });
     if (hasGapAfterBestKnown) {
       const unknownIncoming = [syncFullyReadId, ...syncPrivateReadIds].find(
         (id): id is string =>
@@ -1389,6 +1889,9 @@ function resolveNextReadPosition(
       );
       if (unknownIncoming !== undefined) {
         return unknownIncoming;
+      }
+      if (prevReadPos !== undefined && timelineIndexOf(timeline, prevReadPos) === -1) {
+        return prevReadPos;
       }
     }
     return bestKnown;

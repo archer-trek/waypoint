@@ -1,5 +1,5 @@
 import type { TransportResult } from "../adapters/types";
-import { localPlaceholderOf, type MatrixClient } from "./matrix-client";
+import { localPlaceholderOf, roomTimelineGaps, type MatrixClient } from "./matrix-client";
 import {
   disconnectedMessage,
   formatMatrixActionFailure,
@@ -1322,10 +1322,13 @@ export function computeTargetReadPosition(
   const latestEdits = collectLatestEdits(events, redactedIds);
   let limitIndex = events.length - 1;
 
-  if (room.timelineGap?.limited) {
-    if (room.timelineGap.gapBeforeEventId) {
+  for (const gap of roomTimelineGaps(room)) {
+    if (!gap.limited) {
+      continue;
+    }
+    if (gap.gapBeforeEventId) {
       const gapIdx = events.findIndex(
-        (event) => !localPlaceholderOf(event) && event.event_id === room.timelineGap?.gapBeforeEventId,
+        (event) => !localPlaceholderOf(event) && event.event_id === gap.gapBeforeEventId,
       );
       if (gapIdx > startIndex && !(startIndex === -1 && gapIdx === 0)) {
         limitIndex = Math.min(limitIndex, gapIdx - 1);

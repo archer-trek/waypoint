@@ -14334,3 +14334,877 @@ test("重新验证密码错误只清密码并提示重试，网络/5xx异常保�
   expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("保留草稿");
   narrowView.unmount();
 });
+
+test("已读位置不在本地时打开Topic才按每页50条向后补页，找到就停并停在第一条未读且仅标可见消息为已读，启动与未打开Topic不预拉", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const messagesRequests: string[] = [];
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  function makeMsgs(from: number, to: number, baseTs = 1000) {
+    const out = [];
+    for (let n = from; n <= to; n += 1) {
+      out.push({
+        type: "m.room.message",
+        event_id: `$m${n}`,
+        sender: "@bot:example.com",
+        origin_server_ts: baseTs + n * 100,
+        content: { msgtype: "m.text", body: `消息-${n}` },
+      });
+    }
+    return out;
+  }
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!backfill-read:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "补页定位未读" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$m3" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-1",
+                  events: makeMsgs(101, 120),
+                },
+              },
+              "!unopened-gap:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 500, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "未打开的缺口话题" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$u1" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-unopened",
+                  events: makeMsgs(50, 60).map((ev) => ({ ...ev, event_id: `$u${ev.event_id.slice(2)}` })),
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesRequests.push(input.url);
+      const u = new URL(input.url);
+      expect(u.searchParams.get("dir")).toBe("b");
+      expect(u.searchParams.get("limit")).toBe("50");
+      const from = u.searchParams.get("from");
+      if (from === "pb-1") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-1",
+            end: "pb-2",
+            chunk: makeMsgs(51, 100).reverse(),
+          },
+        };
+      }
+      if (from === "pb-2") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-2",
+            end: "pb-3",
+            chunk: makeMsgs(1, 50).reverse(),
+          },
+        };
+      }
+      throw new Error(`不应请求更多分页：${input.url}`);
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "补页定位未读" });
+    expect(screen.getByRole("button", { name: "未打开的缺口话题" })).toBeInTheDocument();
+
+    // 启动及后台同步几轮，不为任何 Topic 预拉历史
+    await act(async () => { clock.advance(3000); });
+    expect(messagesRequests).toEqual([]);
+
+    // 打开补页定位未读：按 limit=50 翻两页找到 $m3 即停（不请求 pb-3）
+    await user.click(row);
+    await waitFor(() => {
+      expect(messagesRequests).toEqual([
+        "https://matrix.example.com/_matrix/client/v3/rooms/!backfill-read%3Aexample.com/messages?dir=b&limit=50&from=pb-1",
+        "https://matrix.example.com/_matrix/client/v3/rooms/!backfill-read%3Aexample.com/messages?dir=b&limit=50&from=pb-2",
+      ]);
+    });
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(120);
+    });
+    const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+    expect(bubbles[0]).toBe("消息-1");
+    expect(bubbles[119]).toBe("消息-120");
+
+    // 停在第一条未读 $m4（index=3 -> scrollTop=300），视口 300..500 只看见 $m4 和 $m5
+    expect(timeline.scrollTop).toBe(300);
+    await waitFor(() => {
+      expect(readMarkerPosts).toEqual([
+        {
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!backfill-read%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$m5", "m.read.private": "$m5" },
+        },
+      ]);
+    });
+    // 后面还有 $m6..$m120 未读，不能整段标成已读
+    expect(row).toHaveAttribute("data-unread", "true");
+    // 未打开的 Topic 从未拉取 /messages
+    expect(messagesRequests.some((url) => url.includes("unopened-gap"))).toBe(false);
+  });
+});
+
+test("无未解决缺口（已读在本地或无已读位置）打开时不向后翻页；翻到房间开头（空chunk或无end）即停且不再重复拉取也不假装读完", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const messagesRequests: string[] = [];
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!no-gap-known:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 4000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "已读在本地" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$k2" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-known",
+                  events: [1, 2, 3].map((n) => ({
+                    type: "m.room.message",
+                    event_id: `$k${n}`,
+                    sender: "@bot:example.com",
+                    origin_server_ts: 4000 + n * 100,
+                    content: { msgtype: "m.text", body: `本地-${n}` },
+                  })),
+                },
+              },
+              "!no-readpos:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "无已读位置" } },
+                  ],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-noread",
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$n1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3100,
+                      content: { msgtype: "m.text", body: "无已读-1" },
+                    },
+                  ],
+                },
+              },
+              "!reach-start-empty:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "翻到空chunk开头" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$c-gone" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-c1",
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$c10",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2100,
+                      content: { msgtype: "m.text", body: "空chunk-10" },
+                    },
+                  ],
+                },
+              },
+              "!reach-start-noend:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "翻到无end开头" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$d-gone" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-d1",
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$d10",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1100,
+                      content: { msgtype: "m.text", body: "无end-10" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesRequests.push(input.url);
+      const u = new URL(input.url);
+      const from = u.searchParams.get("from");
+      if (from === "pb-c1") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-c1",
+            end: "pb-c2",
+            chunk: [
+              {
+                type: "m.room.message",
+                event_id: "$c9",
+                sender: "@bot:example.com",
+                origin_server_ts: 2050,
+                content: { msgtype: "m.text", body: "空chunk-9" },
+              },
+            ],
+          },
+        };
+      }
+      if (from === "pb-c2") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-c2",
+            end: "pb-c2",
+            chunk: [],
+          },
+        };
+      }
+      if (from === "pb-d1") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-d1",
+            chunk: [
+              {
+                type: "m.room.message",
+                event_id: "$d9",
+                sender: "@bot:example.com",
+                origin_server_ts: 1050,
+                content: { msgtype: "m.text", body: "无end-9" },
+              },
+            ],
+          },
+        };
+      }
+      throw new Error(`不应请求：${input.url}`);
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  // 1. 打开已读在本地的 Topic & 无已读位置的 Topic：都不触发 /messages
+  await user.click(await screen.findByRole("button", { name: "已读在本地" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("本地-3");
+  await user.click(screen.getByRole("button", { name: "无已读位置" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("无已读-1");
+  expect(messagesRequests).toEqual([]);
+
+  // 2. 打开翻到空chunk开头：请求 pb-c1 -> pb-c2，停住且不标 read_markers
+  await user.click(screen.getByRole("button", { name: "翻到空chunk开头" }));
+  await waitFor(() => {
+    expect(messagesRequests).toHaveLength(2);
+  });
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("空chunk-9");
+  expect(readMarkerPosts.some((p) => p.url.includes("reach-start-empty"))).toBe(false);
+
+  // 3. 打开翻到无end开头：只请求 pb-d1，停住且不标 read_markers
+  await user.click(screen.getByRole("button", { name: "翻到无end开头" }));
+  await waitFor(() => {
+    expect(messagesRequests).toHaveLength(3);
+  });
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("无end-9");
+  expect(readMarkerPosts.some((p) => p.url.includes("reach-start-noend"))).toBe(false);
+
+  // 4. 切回重开这两个已翻到开头的 Topic，不再重复发 /messages
+  await user.click(screen.getByRole("button", { name: "翻到空chunk开头" }));
+  await user.click(screen.getByRole("button", { name: "翻到无end开头" }));
+  expect(messagesRequests).toHaveLength(3);
+});
+
+test("Owner 向上滚到顶部时按每页50条再要一页，反序前置并保持滚动位置不变，翻到房间开头后不再继续请求", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const messagesRequests: string[] = [];
+
+  function makeMsgs(from: number, to: number, baseTs = 1000) {
+    const out = [];
+    for (let n = from; n <= to; n += 1) {
+      out.push({
+        type: "m.room.message",
+        event_id: `$s${n}`,
+        sender: "@bot:example.com",
+        origin_server_ts: baseTs + n * 100,
+        content: { msgtype: "m.text", body: `历史-${n}` },
+      });
+    }
+    return out;
+  }
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!scroll-backfill:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "上滚翻页话题" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$s120" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-scroll-1",
+                  events: makeMsgs(101, 120),
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesRequests.push(input.url);
+      const u = new URL(input.url);
+      expect(u.searchParams.get("dir")).toBe("b");
+      expect(u.searchParams.get("limit")).toBe("50");
+      const from = u.searchParams.get("from");
+      if (from === "pb-scroll-1") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-scroll-1",
+            end: "pb-scroll-2",
+            chunk: makeMsgs(51, 100).reverse(),
+          },
+        };
+      }
+      if (from === "pb-scroll-2") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-scroll-2",
+            chunk: makeMsgs(1, 50).reverse(),
+          },
+        };
+      }
+      throw new Error(`不应请求更多分页：${input.url}`);
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "上滚翻页话题" });
+    await user.click(row);
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    // 已读到最后一条 $s120 -> 打开停在底部，不触发 /messages
+    expect(timeline.scrollTop).toBe(1800);
+    expect(messagesRequests).toEqual([]);
+
+    // Owner 向上滚到顶部 -> 只拉一页 pb-scroll-1
+    await act(async () => {
+      timeline.scrollTop = 0;
+      fireEvent.scroll(timeline);
+    });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(70);
+    });
+    expect(messagesRequests).toEqual([
+      "https://matrix.example.com/_matrix/client/v3/rooms/!scroll-backfill%3Aexample.com/messages?dir=b&limit=50&from=pb-scroll-1",
+    ]);
+    // 保持滚动位置：前置 50 条 * 100px = 5000px，原先顶部的 历史-101 仍在原位
+    expect(timeline.scrollTop).toBe(5000);
+    const bubbles1 = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+    expect(bubbles1[0]).toBe("历史-51");
+    expect(bubbles1[50]).toBe("历史-101");
+
+    // 没有再滚到顶部时，不会自动连拉第二页
+    expect(messagesRequests).toHaveLength(1);
+
+    // Owner 再次向上滚到顶部 -> 再拉一页 pb-scroll-2（无 end -> 到房间开头）
+    await act(async () => {
+      timeline.scrollTop = 0;
+      fireEvent.scroll(timeline);
+    });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(120);
+    });
+    expect(messagesRequests).toHaveLength(2);
+    expect(timeline.scrollTop).toBe(5000);
+    const bubbles2 = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+    expect(bubbles2[0]).toBe("历史-1");
+
+    // 已经到房间开头，再次滚动到顶部不再发请求
+    await act(async () => {
+      timeline.scrollTop = 0;
+      fireEvent.scroll(timeline);
+    });
+    expect(messagesRequests).toHaveLength(2);
+  });
+});
+
+test("多个中间limited缺口均不在后台补完且绝不越过缺口标为已读；已读位置落在中间缺口里时打开才补该缺口、插在正确位置并停在第一条未读", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const messagesRequests: string[] = [];
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  function makeRange(prefix: string, from: number, to: number, baseTs = 1000) {
+    const out = [];
+    for (let n = from; n <= to; n += 1) {
+      out.push({
+        type: "m.room.message",
+        event_id: `$${prefix}${n}`,
+        sender: "@bot:example.com",
+        origin_server_ts: baseTs + n * 100,
+        content: { msgtype: "m.text", body: `${prefix}-${n}` },
+      });
+    }
+    return out;
+  }
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!multi-gap:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "多缺口不可越过" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$g1" } }],
+                  },
+                  timeline: {
+                    events: makeRange("g", 1, 2),
+                  },
+                },
+                "!mid-gap-read:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "已读在中间缺口" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  timeline: {
+                    events: makeRange("m", 1, 2, 2000),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!multi-gap:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-g-mid-1",
+                    events: makeRange("g", 10, 11, 5000),
+                  },
+                },
+                "!mid-gap-read:example.com": {
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m6" } }],
+                  },
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-m-mid",
+                    events: makeRange("m", 10, 13, 6000),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!multi-gap:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-g-mid-2",
+                    events: makeRange("g", 20, 21, 9000),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesRequests.push(input.url);
+      const u = new URL(input.url);
+      const from = u.searchParams.get("from");
+      if (from === "pb-m-mid") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-m-mid",
+            end: "pb-m-bridge",
+            chunk: makeRange("m", 3, 9, 2000).reverse(),
+          },
+        };
+      }
+      if (from === "pb-m-bridge") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-m-bridge",
+            chunk: makeRange("m", 1, 2, 2000).reverse(),
+          },
+        };
+      }
+      throw new Error(`不应请求：${input.url}`);
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const multiGapRow = await screen.findByRole("button", { name: "多缺口不可越过" });
+    await act(async () => { clock.advance(1000); });
+    await waitFor(() => expect(syncRound).toBe(2));
+    await act(async () => { clock.advance(1000); });
+    await waitFor(() => expect(syncRound).toBe(3));
+
+    // 同步里记下的 limited 缺口不在后台补完
+    expect(messagesRequests).toEqual([]);
+
+    // 1. 打开多缺口话题：$g1 在本地 -> 不请求 /messages；滚动到底部时也只能推进到 $g2，不能越过第一处缺口到 $g11 或 $g21
+
+    await user.click(multiGapRow);
+    expect(messagesRequests).toEqual([]);
+    const tl1 = screen.getByRole("log", { name: "对话时间线" });
+    await act(async () => {
+      tl1.scrollTop = 400;
+      fireEvent.scroll(tl1);
+    });
+    await waitFor(() => {
+      expect(readMarkerPosts).toContainEqual({
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!multi-gap%3Aexample.com/read_markers",
+        body: { "m.fully_read": "$g2", "m.read.private": "$g2" },
+      });
+    });
+    expect(
+      readMarkerPosts.some(
+        (p) =>
+          p.url.includes("multi-gap") &&
+          ((p.body as Record<string, string>)["m.fully_read"] === "$g10" ||
+            (p.body as Record<string, string>)["m.fully_read"] === "$g11" ||
+            (p.body as Record<string, string>)["m.fully_read"] === "$g20" ||
+            (p.body as Record<string, string>)["m.fully_read"] === "$g21"),
+      ),
+    ).toBe(false);
+    expect(multiGapRow).toHaveAttribute("data-unread", "true");
+
+    // 2. 打开已读在中间缺口的话题：向后补页 pb-m-mid，把 m-3..m-9 插在 m-2 和 m-10 之间，停在 $m7，只标可见的 $m7,$m8
+    const midGapRow = screen.getByRole("button", { name: "已读在中间缺口" });
+    await user.click(midGapRow);
+    await waitFor(() => {
+      expect(messagesRequests).toEqual([
+        "https://matrix.example.com/_matrix/client/v3/rooms/!mid-gap-read%3Aexample.com/messages?dir=b&limit=50&from=pb-m-mid",
+      ]);
+    });
+    const tl2 = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(tl2.querySelectorAll("[data-side]")).toHaveLength(13);
+    });
+    const bubbles = Array.from(tl2.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+    expect(bubbles).toEqual([
+      "m-1", "m-2", "m-3", "m-4", "m-5", "m-6", "m-7", "m-8", "m-9", "m-10", "m-11", "m-12", "m-13",
+    ]);
+    // 停在 $m7 (index 6 -> scrollTop = 600), 视口 600..800 只可见 $m7 和 $m8
+    expect(tl2.scrollTop).toBe(600);
+    await waitFor(() => {
+      expect(readMarkerPosts).toContainEqual({
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!mid-gap-read%3Aexample.com/read_markers",
+        body: { "m.fully_read": "$m8", "m.read.private": "$m8" },
+      });
+    });
+    expect(midGapRow).toHaveAttribute("data-unread", "true");
+
+    // 3. 上滚到顶部触发补齐剩余桥接重叠（m-1, m-2 不重复）
+    await act(async () => {
+      tl2.scrollTop = 0;
+      fireEvent.scroll(tl2);
+    });
+    await waitFor(() => {
+      expect(messagesRequests).toHaveLength(2);
+    });
+    expect(tl2.querySelectorAll("[data-side]")).toHaveLength(13);
+  });
+});
+
+test("补页里的编辑、撤回及已读位置本身被撤回都能正确处理；补页遇网络失败不死循环并在重开或再次上滚时可重试成功", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let allowMessages = false;
+  let messagesCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!edit-redact-backfill:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "补页编辑撤回" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$er2" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-er-1",
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$er5",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 5000,
+                      content: { msgtype: "m.text", body: "最新消息5" },
+                    },
+                  ],
+                },
+              },
+              "!other:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 500, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "对照话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesCount += 1;
+      if (!allowMessages) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          start: "pb-er-1",
+          chunk: [
+            {
+              type: "m.room.redaction",
+              event_id: "$red-er2",
+              sender: "@bot:example.com",
+              origin_server_ts: 4200,
+              redacts: "$er2",
+              content: {},
+            },
+            {
+              type: "m.room.message",
+              event_id: "$er3-edit",
+              sender: "@bot:example.com",
+              origin_server_ts: 4100,
+              content: {
+                msgtype: "m.text",
+                body: "* 补页改后3",
+                "m.new_content": { msgtype: "m.text", body: "补页改后3" },
+                "m.relates_to": { rel_type: "m.replace", event_id: "$er3" },
+              },
+            },
+            {
+              type: "m.room.message",
+              event_id: "$er3",
+              sender: "@bot:example.com",
+              origin_server_ts: 3000,
+              content: { msgtype: "m.text", body: "补页原3" },
+            },
+            {
+              type: "m.room.message",
+              event_id: "$er2",
+              sender: "@bot:example.com",
+              origin_server_ts: 2500,
+              content: { msgtype: "m.text", body: "将被撤回的已读2" },
+            },
+            {
+              type: "m.room.message",
+              event_id: "$er1",
+              sender: "@bot:example.com",
+              origin_server_ts: 2000,
+              content: { msgtype: "m.text", body: "最早消息1" },
+            },
+          ],
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "补页编辑撤回" });
+    // 1. 网络失败时打开：只尝试 1 次，不死循环
+    await user.click(row);
+    await waitFor(() => expect(messagesCount).toBe(1));
+    await act(async () => { clock.advance(3000); });
+    expect(messagesCount).toBe(1);
+
+    // 2. 切走再重开，网络恢复：重试成功
+    await user.click(screen.getByRole("button", { name: "对照话题" }));
+    allowMessages = true;
+    await user.click(row);
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(3);
+    });
+    const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
+    expect(bubbles).toEqual(["最早消息1", "补页改后3", "最新消息5"]);
+    // $er2 被撤回回退到 $er1，第一条未读是 $er3 (index=1 -> scrollTop=100)
+    expect(timeline.scrollTop).toBe(100);
+  });
+});

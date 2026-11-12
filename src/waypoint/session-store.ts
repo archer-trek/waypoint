@@ -11,6 +11,9 @@ export type StoredRoomEvents = {
   stateEvents: RawMatrixEvent[];
   timelineEvents: RawMatrixEvent[];
   timelineGap?: StoredTimelineGap;
+  timelineGaps?: StoredTimelineGap[];
+  backwardToken?: string;
+  reachedStart?: boolean;
   readPositionEventId?: string;
   fullyReadEventId?: string;
   privateReadEventId?: string;
