@@ -35,6 +35,8 @@ export function WaypointApp({
   }
   const retryTimer = useRef<number | undefined>(undefined);
   const backoffStep = useRef(0);
+  const syncGeneration = useRef(0);
+  const epoch = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,8 +64,10 @@ export function WaypointApp({
     })();
     return () => {
       cancelled = true;
+      epoch.current += 1;
       if (retryTimer.current !== undefined) {
         clock.clearTimeout(retryTimer.current);
+        retryTimer.current = undefined;
       }
     };
   }, [clock]);
@@ -85,18 +89,31 @@ export function WaypointApp({
     }, delay);
   }
 
+  function syncIsCurrent(myEpoch: number, generation: number): boolean {
+    return epoch.current === myEpoch && syncGeneration.current === generation;
+  }
+
   async function syncNow() {
     const matrix = client();
     if (!matrix.hasToken) {
       return;
     }
-    const sync = await matrix.sync();
+    const myEpoch = epoch.current;
+    const generation = ++syncGeneration.current;
+    clearRetry();
+    const attempt = await matrix.sync();
+    if (!syncIsCurrent(myEpoch, generation)) {
+      return;
+    }
+    const sync = attempt.result;
     if (isCredentialRejected(sync)) {
-      clearRetry();
       backoffStep.current = 0;
       const address = matrix.address;
       const userId = matrix.ownerId;
       await matrix.forgetCredential();
+      if (!syncIsCurrent(myEpoch, generation)) {
+        return;
+      }
       setPhase({
         name: "password",
         address,
@@ -110,13 +127,16 @@ export function WaypointApp({
       return;
     }
     if (sync.type === "response" && sync.status === 200) {
-      clearRetry();
       backoffStep.current = 0;
-      const cursor = nextBatch(sync.body);
-      if (cursor) {
-        await matrix.rememberCursor(cursor);
+      await matrix.retainSync(attempt);
+      if (!syncIsCurrent(myEpoch, generation)) {
+        return;
       }
-      setPhase(hasValidAgent(sync.body, matrix.ownerId) ? { name: "topics" } : { name: "holding" });
+      setPhase(
+        hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
+          ? { name: "topics" }
+          : { name: "holding" },
+      );
       return;
     }
     setPhase({
@@ -276,7 +296,7 @@ export function WaypointApp({
           <button type="submit">用密码登录</button>
         </form>
       ) : phase.name === "syncing" ? (
-        <button type="button" onClick={() => { clearRetry(); void syncNow(); }}>立刻再试</button>
+        <button type="button" onClick={() => { void syncNow(); }}>立刻再试</button>
       ) : null}
       {"message" in phase && phase.message ? <p role="alert">{phase.message}</p> : null}
     </main>
@@ -468,13 +488,6 @@ function isInteractive(body: Record<string, unknown>): boolean {
   return typeof body.session === "string" && Array.isArray(body.flows);
 }
 
-function nextBatch(body: unknown): string | undefined {
-  if (!isRecord(body)) {
-    return undefined;
-  }
-  return textField(body, "next_batch");
-}
-
 function textField(body: Record<string, unknown>, key: string): string | undefined {
   const value = body[key];
   return typeof value === "string" && value.trim() ? value : undefined;
@@ -484,9 +497,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function hasValidAgent(body: unknown, ownerUserId: string): boolean {
-  const content = accountDataContent(body, "im.waypoint.agents");
-  if (!content || !Array.isArray(content.agents)) {
+function hasValidAgent(content: unknown, ownerUserId: string): boolean {
+  if (!isRecord(content) || !Array.isArray(content.agents)) {
     return false;
   }
   const ownerServer = serverName(ownerUserId);
@@ -503,19 +515,6 @@ function hasValidAgent(body: unknown, ownerUserId: string): boolean {
     }
     return serverName(userId) === ownerServer;
   });
-}
-
-function accountDataContent(body: unknown, type: string): Record<string, unknown> | undefined {
-  if (!isRecord(body) || !isRecord(body.account_data) || !Array.isArray(body.account_data.events)) {
-    return undefined;
-  }
-  const event = body.account_data.events.find(
-    (item) => isRecord(item) && item.type === type,
-  );
-  if (!isRecord(event) || !isRecord(event.content)) {
-    return undefined;
-  }
-  return event.content;
 }
 
 function serverName(userId: string): string | undefined {

@@ -4,6 +4,7 @@ export type SessionRecord = {
   accessToken?: string;
   deviceId?: string;
   syncCursor?: string;
+  accountData?: Record<string, unknown>;
 };
 
 const DB_NAME = "waypoint";
@@ -36,6 +37,9 @@ export async function dropCredential(): Promise<void> {
   const next: SessionRecord = { baseUrl: current.baseUrl, userId: current.userId };
   if (current.syncCursor) {
     next.syncCursor = current.syncCursor;
+  }
+  if (current.accountData && Object.keys(current.accountData).length > 0) {
+    next.accountData = current.accountData;
   }
   await saveSession(next);
 }

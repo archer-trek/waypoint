@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -1136,12 +1136,7 @@ test("已经同步过再打开时，继续用同步游标，不改去 well_known
     return {
       type: "response",
       status: 200,
-      body: {
-        next_batch: "batch-kept",
-        account_data: {
-          events: [{ type: "im.waypoint.agents", content: { agents: [{ user_id: "@bot:example.com" }] } }],
-        },
-      },
+      body: { next_batch: "batch-next" },
     };
   });
   const first = renderApp(homeserver);
@@ -1161,5 +1156,208 @@ test("已经同步过再打开时，继续用同步游标，不改去 well_known
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
   expect(continued.at(-1)?.url).toBe("https://matrix.example.com/_matrix/client/v3/sync?since=batch-kept");
+  expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+  expect(homeserver.requests.some((request) => request.url.includes("/account_data"))).toBe(false);
+  expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
+});
+
+async function login(user: ReturnType<typeof userEvent.setup>) {
+  await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
+  await user.click(screen.getByRole("button", { name: "继续" }));
+  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "用密码登录" }));
+}
+
+function deferred<T>() {
+  let resolve: (value: T) => void = () => {};
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const validAgents = {
+  events: [{ type: "im.waypoint.agents", content: { agents: [{ user_id: "@bot:example.com" }] } }],
+};
+
+test("增量同步只有别的 account data 时，仍留在 Topic 列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    syncs += 1;
+    if (syncs === 1) {
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: "batch-kept", account_data: validAgents },
+      };
+    }
+    if (!input.url.includes("since=batch-kept")) {
+      throw new Error(input.url);
+    }
+    return {
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-direct",
+        account_data: { events: [{ type: "m.direct", content: { "@bot:example.com": ["!room:example.com"] } }] },
+      },
+    };
+  });
+  const first = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  first.unmount();
+
+  renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+});
+
+test("快照没有合法 Agent 时，再打开的增量同步仍不进入列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    syncs += 1;
+    if (syncs === 1) {
+      return { type: "response", status: 200, body: { next_batch: "batch-empty" } };
+    }
+    if (!input.url.includes("since=batch-empty")) {
+      throw new Error(input.url);
+    }
+    return { type: "response", status: 200, body: { next_batch: "batch-empty-2" } };
+  });
+  const first = renderApp(homeserver);
+  await login(user);
+  await waitFor(() => {
+    expect(homeserver.requests.some((request) => request.url.includes("/sync"))).toBe(true);
+  });
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+  first.unmount();
+
+  renderApp(homeserver);
+  await waitFor(() => {
+    expect(homeserver.requests.some((request) => request.url.includes("since=batch-empty"))).toBe(true);
+  });
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+  expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+});
+
+test("增量同步带来合法 Agent 时进入列表，换成不合法条目时离开", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    syncs += 1;
+    if (syncs === 1) {
+      return { type: "response", status: 200, body: { next_batch: "batch-hold" } };
+    }
+    if (syncs === 2) {
+      if (!input.url.includes("since=batch-hold")) {
+        throw new Error(input.url);
+      }
+      return { type: "response", status: 200, body: { next_batch: "batch-joined", account_data: validAgents } };
+    }
+    if (!input.url.includes("since=batch-joined")) {
+      throw new Error(input.url);
+    }
+    return {
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-cleared",
+        account_data: { events: [{ type: "im.waypoint.agents", content: { agents: [{ user_id: "@alice:example.com" }] } }] },
+      },
+    };
+  });
+  const first = renderApp(homeserver);
+  await login(user);
+  await waitFor(() => {
+    expect(homeserver.requests.some((request) => request.url.includes("/sync"))).toBe(true);
+  });
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  first.unmount();
+
+  const second = renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  second.unmount();
+
+  renderApp(homeserver);
+  await waitFor(() => {
+    expect(homeserver.requests.some((request) => request.url.includes("since=batch-joined"))).toBe(true);
+  });
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+  expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+});
+
+test("立刻再试作废还在路上的失败，迟到的失败不能离开 Topic 列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const firstSync = deferred<TransportResult>();
+  let syncs = 0;
+  homeserver.handler = passwordLoginHandler(async () => {
+    syncs += 1;
+    if (syncs === 1) {
+      return firstSync.promise;
+    }
+    return { type: "response", status: 200, body: { next_batch: "batch-retry", account_data: validAgents } };
+  });
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "立刻再试" }));
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+
+  await act(async () => {
+    firstSync.resolve({ type: "failure", failure: { type: "network" } });
+  });
+  expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.queryByText("同步失败，因为到达不了。")).not.toBeInTheDocument();
+  const syncCount = homeserver.requests.filter((request) => request.url.includes("/sync")).length;
+  clock.advance(60_000);
+  expect(homeserver.requests.filter((request) => request.url.includes("/sync"))).toHaveLength(syncCount);
+});
+
+test("迟到的未知 token 不能清掉更新一次同步已经留下的登录", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const firstSync = deferred<TransportResult>();
+  let syncs = 0;
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    syncs += 1;
+    if (syncs === 1) {
+      return firstSync.promise;
+    }
+    if (input.url.includes("since=")) {
+      return { type: "response", status: 200, body: { next_batch: "batch-ok-2" } };
+    }
+    return { type: "response", status: 200, body: { next_batch: "batch-ok", account_data: validAgents } };
+  });
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "立刻再试" }));
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+
+  await act(async () => {
+    firstSync.resolve({
+      type: "response",
+      status: 401,
+      body: { errcode: "M_UNKNOWN_TOKEN", error: "Unrecognised access token" },
+    });
+  });
+  expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  first.unmount();
+
+  renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
+  expect(continued.at(-1)?.url).toContain("since=batch-ok");
   expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
 });
