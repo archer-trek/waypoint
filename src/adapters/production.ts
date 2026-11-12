@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
@@ -13,6 +14,64 @@ export const systemClock: Clock = {
   clearTimeout: (id) => window.clearTimeout(id),
   currentTimeMs: () => Date.now(),
 };
+
+function currentAppVisible(): boolean {
+  if (typeof document === "undefined") {
+    return true;
+  }
+  return document.visibilityState !== "hidden";
+}
+
+function subscribeAppVisibility(onChange: (visible: boolean) => void): () => void {
+  if (typeof document === "undefined" && typeof window === "undefined") {
+    return () => undefined;
+  }
+  let lastVisible = currentAppVisible();
+  const notify = (nextVisible: boolean) => {
+    if (nextVisible !== lastVisible) {
+      lastVisible = nextVisible;
+      onChange(nextVisible);
+    }
+  };
+  const handleVisibilityChange = () => {
+    notify(currentAppVisible());
+  };
+  const handlePageHide = () => {
+    notify(false);
+  };
+  const handlePageShow = () => {
+    notify(currentAppVisible());
+  };
+  document?.addEventListener("visibilitychange", handleVisibilityChange);
+  window?.addEventListener("pagehide", handlePageHide);
+  window?.addEventListener("pageshow", handlePageShow);
+  return () => {
+    document?.removeEventListener("visibilitychange", handleVisibilityChange);
+    window?.removeEventListener("pagehide", handlePageHide);
+    window?.removeEventListener("pageshow", handlePageShow);
+  };
+}
+
+function subscribeNetworkResume(onResume: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  const handleOnline = () => {
+    onResume();
+  };
+  window.addEventListener("online", handleOnline);
+  return () => {
+    window.removeEventListener("online", handleOnline);
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
 
 function currentViewportMode(): ViewportMode {
   if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
@@ -77,9 +136,8 @@ function parseKeyboardInsetEvent(event: Event): number | undefined {
 }
 
 export function detectPlatform(): PlatformAdapter {
-  const deviceDisplayName = /Android/i.test(navigator.userAgent)
-    ? "Waypoint Android"
-    : "Waypoint macOS";
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const deviceDisplayName = isAndroid ? "Waypoint Android" : "Waypoint macOS";
   let navDepth = 0;
   let suppressedPopCount = 0;
   let backInFlight = false;
@@ -142,6 +200,8 @@ export function detectPlatform(): PlatformAdapter {
 
   return {
     deviceDisplayName,
+    suspendSyncInBackground: isAndroid,
+    supportsFileDropAndPaste: !isAndroid,
     viewportMode: currentViewportMode,
     subscribeViewportMode,
     keyboardInsetBottom: measureKeyboardInsetBottom,
@@ -228,6 +288,63 @@ export function detectPlatform(): PlatformAdapter {
         window.focus();
       }
     },
+    isAppVisible: currentAppVisible,
+    subscribeAppVisibility,
+    subscribeNetworkResume,
+    async openExternalUrl(url: string) {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "mailto:") {
+        return;
+      }
+      if (isTauri()) {
+        await invoke("plugin:opener|open_url", { url });
+        return;
+      }
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    },
+    async openMediaFile({ data, mimeType, filename }) {
+      const bytes = new Uint8Array(data);
+      if (isTauri()) {
+        await invoke("open_media_file", {
+          bytes: Array.from(bytes),
+          filename,
+        });
+        return;
+      }
+      if (typeof document === "undefined") {
+        return;
+      }
+      const safeMime = mimeType || "application/octet-stream";
+      if (typeof URL.createObjectURL === "function") {
+        const blob = new Blob([bytes], { type: safeMime });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.click();
+        window.setTimeout(() => {
+          URL.revokeObjectURL(objectUrl);
+        }, 60_000);
+        return;
+      }
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 1) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        const dataUrl = `data:${safeMime};base64,${btoa(binary)}`;
+        window.open(dataUrl, "_blank", "noopener,noreferrer");
+      }
+    },
   };
 }
 
@@ -235,17 +352,32 @@ export function createFetchTransport(): HomeserverTransport {
   return {
     async request(input) {
       try {
+        let requestBody: BodyInit | undefined;
+        if (input.body !== undefined) {
+          if (input.body instanceof Uint8Array) {
+            requestBody = new Uint8Array(input.body);
+          } else if (input.body instanceof ArrayBuffer) {
+            requestBody = new Uint8Array(input.body);
+          } else {
+            requestBody = JSON.stringify(input.body);
+          }
+        }
         const response = await fetch(input.url, {
           method: input.method,
           headers: input.headers,
-          body: input.body === undefined ? undefined : JSON.stringify(input.body),
+          body: requestBody,
           redirect: "manual",
+          ...(input.signal ? { signal: input.signal } : {}),
         });
         if (
           response.type === "opaqueredirect" ||
           (response.status >= 300 && response.status < 400)
         ) {
           return { type: "response", status: response.status || 302, body: null };
+        }
+        if (input.responseType === "bytes" && response.status >= 200 && response.status < 300) {
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          return { type: "response", status: response.status, body: bytes };
         }
         const text = await response.text();
         if (!text) {
@@ -256,7 +388,10 @@ export function createFetchTransport(): HomeserverTransport {
         } catch {
           return { type: "response", status: response.status, body: text };
         }
-      } catch {
+      } catch (error) {
+        if (input.signal?.aborted || isAbortError(error)) {
+          return { type: "failure", failure: { type: "aborted" } };
+        }
         return { type: "failure", failure: { type: "network" } };
       }
     },

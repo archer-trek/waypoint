@@ -1,8 +1,30 @@
 export type RawMatrixEvent = Record<string, unknown>;
 
+export type StoredTimelineGap = {
+  limited: true;
+  prevBatch?: string;
+  gapBeforeEventId?: string;
+  pendingGapAtEnd?: true;
+};
+
 export type StoredRoomEvents = {
   stateEvents: RawMatrixEvent[];
   timelineEvents: RawMatrixEvent[];
+  timelineGap?: StoredTimelineGap;
+  timelineGaps?: StoredTimelineGap[];
+  backwardToken?: string;
+  reachedStart?: boolean;
+  readPositionEventId?: string;
+  fullyReadEventId?: string;
+  privateReadEventId?: string;
+  tags?: Record<string, unknown>;
+  encryptedIrreversible?: true;
+  inviteFailed?: true;
+};
+
+export type PendingReadMarker = {
+  roomId: string;
+  eventId: string;
 };
 
 export type PendingRoomEvent = {
@@ -11,6 +33,19 @@ export type PendingRoomEvent = {
   type: string;
   sender: string;
   content: Record<string, unknown>;
+  attachment?: DraftAttachment;
+};
+
+export type DraftAttachment = {
+  name: string;
+  mimeType: string;
+  size: number;
+  data: Uint8Array;
+};
+
+export type DraftRecord = {
+  text?: string;
+  attachment?: DraftAttachment;
 };
 
 export type SessionRecord = {
@@ -22,6 +57,8 @@ export type SessionRecord = {
   accountData?: Record<string, unknown>;
   rooms?: Record<string, StoredRoomEvents>;
   pendingEvents?: PendingRoomEvent[];
+  pendingReadMarkers?: PendingReadMarker[];
+  drafts?: Record<string, DraftRecord>;
 };
 
 const DB_NAME = "waypoint";
@@ -63,6 +100,12 @@ export async function dropCredential(): Promise<void> {
   }
   if (current.pendingEvents && current.pendingEvents.length > 0) {
     next.pendingEvents = current.pendingEvents;
+  }
+  if (current.pendingReadMarkers && current.pendingReadMarkers.length > 0) {
+    next.pendingReadMarkers = current.pendingReadMarkers;
+  }
+  if (current.drafts && Object.keys(current.drafts).length > 0) {
+    next.drafts = current.drafts;
   }
   await saveSession(next);
 }
