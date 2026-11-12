@@ -26,8 +26,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          # Vitest 5 requires Node ^22.12, ^24, or >=26.
-          node-version: 22
+          # Current LTS. Vitest 5 accepts ^22.12, ^24, or >=26.
+          node-version: 26
           cache: npm
 
       - name: Install
