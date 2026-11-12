@@ -39,7 +39,7 @@ type Phase =
       submitting: boolean;
       message?: string;
     }
-  | { name: "topics" };
+  | { name: "topics"; initialReauthRequired?: boolean };
 
 export function WaypointApp({
   homeserver,
@@ -127,11 +127,20 @@ export function WaypointApp({
       const matrix = client();
       if (restored === "sync") {
         setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
-        if (
-          hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId) &&
-          (matrix.pendingRoomEvents().length > 0 || matrix.pendingReadMarkers().length > 0)
-        ) {
-          void retryQueue().flush();
+        if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
+          retryQueue().setCallbacks({
+            onCredentialRejected: () => {
+              if (!cancelled) {
+                syncGeneration.current += 1;
+                clearRetry();
+                backoffStep.current = 0;
+                setPhase({ name: "topics", initialReauthRequired: true });
+              }
+            },
+          });
+          if (matrix.pendingRoomEvents().length > 0 || matrix.pendingReadMarkers().length > 0) {
+            void retryQueue().flush();
+          }
         }
         void syncNow();
         return;
@@ -278,6 +287,11 @@ export function WaypointApp({
     const sync = attempt.result;
     if (isCredentialRejected(sync)) {
       backoffStep.current = 0;
+      if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
+        retryQueue().pause();
+        setPhase({ name: "topics", initialReauthRequired: true });
+        return;
+      }
       const address = matrix.address;
       const userId = matrix.ownerId;
       await matrix.forgetCredential();
@@ -537,6 +551,7 @@ export function WaypointApp({
         platform={platform}
         viewportMode={viewportMode}
         keyboardInsetBottom={keyboardInsetBottom}
+        initialReauthRequired={phase.initialReauthRequired}
         onExitDevice={exitDevice}
       />
     );

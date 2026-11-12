@@ -1,4 +1,5 @@
 import type { HomeserverTransport, TransportResult } from "../adapters/types";
+import { isCredentialRejected } from "./matrix-errors";
 import {
   dropCredential,
   dropPreListSession,
@@ -44,6 +45,8 @@ export class MatrixClient {
   private storedDrafts: Record<string, DraftRecord> = {};
   private txnCounter = 0;
   private leaveGeneration = 0;
+  private tokenGeneration = 0;
+  private credentialRejectedHandler?: (result: TransportResult) => void;
   private leftAtGeneration = new Map<string, number>();
   private tagGeneration = 0;
   private tagUpdatedAtGeneration = new Map<string, number>();
@@ -61,6 +64,14 @@ export class MatrixClient {
 
   get hasToken(): boolean {
     return Boolean(this.accessToken);
+  }
+
+  get currentDeviceId(): string | undefined {
+    return this.deviceId;
+  }
+
+  setCredentialRejectedHandler(handler?: (result: TransportResult) => void): void {
+    this.credentialRejectedHandler = handler;
   }
 
   accountData(type: string): unknown {
@@ -159,7 +170,12 @@ export class MatrixClient {
     });
   }
 
-  passwordLogin(user: string, password: string, displayName: string): Promise<TransportResult> {
+  passwordLogin(
+    user: string,
+    password: string,
+    displayName: string,
+    deviceId?: string,
+  ): Promise<TransportResult> {
     return this.transport.request({
       method: "POST",
       url: matrixUrl(this.baseUrl, "/_matrix/client/v3/login"),
@@ -169,11 +185,24 @@ export class MatrixClient {
         identifier: { type: "m.id.user", user },
         password,
         initial_device_display_name: displayName,
+        ...(deviceId ? { device_id: deviceId } : {}),
       },
     });
   }
 
+  async completeReauth(accessToken: string, deviceId?: string): Promise<void> {
+    this.tokenGeneration += 1;
+    await this.enqueuePersist(() => {
+      this.accessToken = accessToken;
+      if (deviceId) {
+        this.deviceId = deviceId;
+      }
+      return saveSession(this.sessionRecord());
+    });
+  }
+
   async rememberLogin(userId: string, accessToken: string, deviceId: string): Promise<void> {
+    this.tokenGeneration += 1;
     await this.enqueuePersist(() => {
       this.userId = userId;
       this.accessToken = accessToken;
@@ -197,6 +226,42 @@ export class MatrixClient {
     });
   }
 
+  private authedRequest(input: {
+    method: "GET" | "POST" | "PUT" | "DELETE";
+    url: string;
+    body?: unknown;
+    json?: boolean;
+  }): Promise<TransportResult> {
+    const requestToken = this.accessToken;
+    if (!requestToken) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    const generation = this.tokenGeneration;
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${requestToken}`,
+    };
+    if (input.json) {
+      headers["Content-Type"] = "application/json";
+    }
+    return this.transport
+      .request({
+        method: input.method,
+        url: input.url,
+        headers,
+        ...(input.body !== undefined ? { body: input.body } : {}),
+      })
+      .then((result) => {
+        if (
+          isCredentialRejected(result) &&
+          this.tokenGeneration === generation &&
+          this.accessToken === requestToken
+        ) {
+          this.credentialRejectedHandler?.(result);
+        }
+        return result;
+      });
+  }
+
   sync(): Promise<SyncAttempt> {
     if (!this.accessToken) {
       return Promise.reject(new Error("没有 access token"));
@@ -207,13 +272,12 @@ export class MatrixClient {
     const url = cursor
       ? `${matrixUrl(this.baseUrl, "/_matrix/client/v3/sync")}?since=${encodeURIComponent(cursor)}`
       : matrixUrl(this.baseUrl, "/_matrix/client/v3/sync");
-    return this.transport
-      .request({
-        method: "GET",
-        url,
-        headers: { Authorization: `Bearer ${this.accessToken}` },
-      })
-      .then((result) => ({ result, incremental: Boolean(cursor), leaveGeneration: generation, tagGeneration: tagGen }));
+    return this.authedRequest({ method: "GET", url }).then((result) => ({
+      result,
+      incremental: Boolean(cursor),
+      leaveGeneration: generation,
+      tagGeneration: tagGen,
+    }));
   }
 
   async dropSyncCursor(): Promise<void> {
@@ -264,13 +328,12 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId) {
       return Promise.reject(new Error("没有 access token"));
     }
-    return this.transport.request({
+    return this.authedRequest({
       method: "GET",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/account_data/${encodeURIComponent(type)}`,
       ),
-      headers: { Authorization: `Bearer ${this.accessToken}` },
     });
   }
 
@@ -278,16 +341,13 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId) {
       return Promise.reject(new Error("没有 access token"));
     }
-    return this.transport.request({
+    return this.authedRequest({
       method: "PUT",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/account_data/${encodeURIComponent(type)}`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: content,
     });
   }
@@ -303,16 +363,10 @@ export class MatrixClient {
   }
 
   createRoom(body: Record<string, unknown>): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
-    return this.transport.request({
+    return this.authedRequest({
       method: "POST",
       url: matrixUrl(this.baseUrl, "/_matrix/client/v3/createRoom"),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body,
     });
   }
@@ -322,15 +376,11 @@ export class MatrixClient {
     eventType: string,
     stateKey = "",
   ): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
     const basePath = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(eventType)}`;
     const path = stateKey === "" ? basePath : `${basePath}/${encodeURIComponent(stateKey)}`;
-    return this.transport.request({
+    return this.authedRequest({
       method: "GET",
       url: matrixUrl(this.baseUrl, path),
-      headers: { Authorization: `Bearer ${this.accessToken}` },
     });
   }
 
@@ -342,16 +392,13 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId) {
       return Promise.reject(new Error("没有 access token"));
     }
-    return this.transport.request({
+    return this.authedRequest({
       method: "PUT",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/rooms/${encodeURIComponent(roomId)}/tags/${encodeURIComponent(tag)}`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: content,
     });
   }
@@ -360,15 +407,12 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId) {
       return Promise.reject(new Error("没有 access token"));
     }
-    return this.transport.request({
+    return this.authedRequest({
       method: "DELETE",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/rooms/${encodeURIComponent(roomId)}/tags/${encodeURIComponent(tag)}`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-      },
     });
   }
 
@@ -411,36 +455,24 @@ export class MatrixClient {
     content: Record<string, unknown>,
     stateKey = "",
   ): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
     const basePath = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(eventType)}`;
     const path = stateKey === "" ? basePath : `${basePath}/${encodeURIComponent(stateKey)}`;
-    return this.transport.request({
+    return this.authedRequest({
       method: "PUT",
       url: matrixUrl(this.baseUrl, path),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: content,
     });
   }
 
   leaveRoom(roomId: string): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
-    return this.transport.request({
+    return this.authedRequest({
       method: "POST",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: {},
     });
   }
@@ -476,19 +508,13 @@ export class MatrixClient {
   }
 
   forgetRoom(roomId: string): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
-    return this.transport.request({
+    return this.authedRequest({
       method: "POST",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/forget`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: {},
     });
   }
@@ -549,19 +575,13 @@ export class MatrixClient {
     txnId: string,
     content: Record<string, unknown>,
   ): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
-    return this.transport.request({
+    return this.authedRequest({
       method: "PUT",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/${encodeURIComponent(txnId)}`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: content,
     });
   }
@@ -612,19 +632,13 @@ export class MatrixClient {
   }
 
   sendReadMarkers(roomId: string, eventId: string): Promise<TransportResult> {
-    if (!this.accessToken) {
-      return Promise.reject(new Error("没有 access token"));
-    }
-    return this.transport.request({
+    return this.authedRequest({
       method: "POST",
       url: matrixUrl(
         this.baseUrl,
         `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/read_markers`,
       ),
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/json",
-      },
+      json: true,
       body: {
         "m.fully_read": eventId,
         "m.read.private": eventId,
@@ -897,6 +911,7 @@ export class MatrixClient {
   async exitDevice(): Promise<void> {
     const base = this.baseUrl;
     const token = this.accessToken;
+    this.tokenGeneration += 1;
     this.accessToken = undefined;
     this.deviceId = undefined;
     if (base && token) {
@@ -937,6 +952,7 @@ export class MatrixClient {
   }
 
   async forgetCredential(): Promise<void> {
+    this.tokenGeneration += 1;
     await this.enqueuePersist(() => {
       this.accessToken = undefined;
       this.deviceId = undefined;

@@ -13465,3 +13465,872 @@ test("未确认和失败消息不提前修改列表行时刻也不重排，确�
   });
   expect(getTitles()).toEqual(["置顶旧", "置顶新", "普通话题"]);
 });
+
+test("已连接后服务器不认 token 时顶栏显示静默提示（不弹窗不踢回全屏登录），仍可只读浏览时间线和草稿，禁用新建与输入发送", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCalls = 0;
+  let rejectToken = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "草稿话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-t1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "话题一的本地消息" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1500, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "队列话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-t2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        content: { msgtype: "m.text", body: "话题二的本地消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (rejectToken) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Unrecognised access token" },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      return {
+        type: "response",
+        status: 401,
+        body: { errcode: "M_UNKNOWN_TOKEN", error: "Unrecognised access token" },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock, container } = renderApp(homeserver);
+  await login(user);
+
+  // 在话题一保留草稿与附件
+  await user.click(await screen.findByRole("button", { name: "草稿话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未发出的草稿");
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File(["hello"], "draft.txt", { type: "text/plain" }),
+  );
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("draft.txt");
+
+  // 切到话题二并发送消息，触发服务器返回 M_UNKNOWN_TOKEN
+  await user.click(screen.getByRole("button", { name: "队列话题" }));
+  rejectToken = true;
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未确认消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBe(1));
+
+  // 1) 不弹窗、不切回全屏登录，仍算已连接
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+
+  // 2) 顶栏显示静默提示，贴在钉住的标题栏下方，包含「重新验证」与「退出这台设备」
+  const banner = await screen.findByRole("status", { name: "重新验证提示" });
+  const stickyHeader = container.querySelector(".waypoint-topic-header");
+  expect(stickyHeader).not.toBeNull();
+  expect(stickyHeader?.nextElementSibling).toBe(banner);
+  expect(within(banner).getByRole("button", { name: "重新验证" })).toBeInTheDocument();
+  expect(within(banner).getByRole("button", { name: "退出这台设备" })).toBeInTheDocument();
+
+  // 3) 禁用新建 Topic、输入与发送；未确认消息仍在时间线中
+  expect(screen.getByRole("button", { name: "新建 Topic" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toBeDisabled();
+  expect(screen.getByLabelText("选择附件")).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认消息");
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  // 4) 仍可只读切换并浏览本地时间线和已有草稿
+  await user.click(screen.getByRole("button", { name: "草稿话题" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("话题一的本地消息");
+  const draftBox = screen.getByRole("textbox", { name: "输入消息" });
+  expect(draftBox).toHaveValue("未发出的草稿");
+  expect(draftBox).toBeDisabled();
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("draft.txt");
+  expect(screen.getByRole("button", { name: "移除附件" })).toBeDisabled();
+
+  // 5) 同步与重试队列暂停，不再发网络请求
+  const requestsAtPause = homeserver.requests.length;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    clock.advance(60_000);
+  });
+  expect(homeserver.requests.length).toBe(requestsAtPause);
+});
+
+test("在顶栏提示点击退出这台设备，复用相同的确认弹窗与清空流程，取消保留状态，确认后清空并回到空密码步", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let logoutCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "保留或退出话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "本地已有消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 401,
+        body: { errcode: "M_UNKNOWN_TOKEN", error: "Unknown token" },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return {
+        type: "response",
+        status: 401,
+        body: { errcode: "M_UNKNOWN_TOKEN", error: "Unknown token" },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      logoutCalls += 1;
+      return { type: "response", status: 401, body: { errcode: "M_UNKNOWN_TOKEN" } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  // 打开话题写一段草稿，再通过「新建 Topic」触发 M_UNKNOWN_TOKEN
+  await user.click(await screen.findByRole("button", { name: "保留或退出话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "草稿保留文字");
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "触发失效的新Topic");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const banner = await screen.findByRole("status", { name: "重新验证提示" });
+  expect(screen.getByRole("button", { name: "创建 Topic" })).toBeDisabled();
+
+  // 点击顶栏提示上的「退出这台设备」，弹出同一个确认弹窗
+  await user.click(within(banner).getByRole("button", { name: "退出这台设备" }));
+  const confirmDialog = screen.getByRole("alertdialog", { name: "确认退出这台设备" });
+  expect(confirmDialog).toHaveTextContent("本地时间线");
+  expect(confirmDialog).toHaveTextContent("未发送草稿");
+  expect(confirmDialog).toHaveTextContent("重试队列");
+  expect(logoutCalls).toBe(0);
+
+  // 取消退出：仍算已连接，提示条还在
+  await user.click(within(confirmDialog).getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("alertdialog", { name: "确认退出这台设备" })).not.toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "重新验证提示" })).toBeInTheDocument();
+
+  // 再次点击并确认退出：走完整退出清理流程
+  await user.click(within(banner).getByRole("button", { name: "退出这台设备" }));
+  await user.click(screen.getByRole("button", { name: "确认退出" }));
+
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+  expect(logoutCalls).toBe(1);
+  first.unmount();
+
+  // 重启后仍留在密码步，不带旧游标，本地时间线与草稿已清空
+  let secondSyncCalls = 0;
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      secondSyncCalls += 1;
+      expect(input.url).not.toContain("since=");
+      return { type: "response", status: 200, body: { next_batch: "batch-fresh", account_data: validAgents } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+  renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "用密码登录" }));
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(secondSyncCalls).toBe(1);
+});
+
+test("点击重新验证仅输入密码并携带原 device id，成功后保留本地时间线与草稿，按序恢复重试队列，并沿用旧同步游标（游标被拒时降级合并不清库）", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let tokenRevoked = false;
+  let loginReauthCalls = 0;
+  const sentBodies: Array<{ body: string; auth: string }> = [];
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      const reqBody = input.body as Record<string, unknown>;
+      if (tokenRevoked || reqBody.device_id) {
+        loginReauthCalls += 1;
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: "tok-2", device_id: "DEV1" },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "草稿留存话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-old-draft",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "草稿话题的本地消息" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1500, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "恢复重放话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-hist",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        content: { msgtype: "m.text", body: "已有本地消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.headers?.Authorization === "Bearer tok-1") {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      if (input.url.includes("since=batch-1")) {
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_UNKNOWN", error: "Invalid since token" },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-merged",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1500, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "恢复重放话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ev-new-after-reauth",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3000,
+                      content: { msgtype: "m.text", body: "同步补回的新消息" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      if (input.headers?.Authorization === "Bearer tok-1") {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      const msg = (input.body as { body: string }).body;
+      sentBodies.push({ body: msg, auth: input.headers?.Authorization ?? "" });
+      return { type: "response", status: 200, body: { event_id: `$ev-sent-${sentBodies.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  };
+
+  renderApp(homeserver);
+  await login(user);
+
+  // 在话题一保留草稿
+  await user.click(await screen.findByRole("button", { name: "草稿留存话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未发出的草稿");
+
+  // 切到话题二，先让发送入队两项：先触发 401 暂停，第一条和第二条都在队列里
+  await user.click(screen.getByRole("button", { name: "恢复重放话题" }));
+  const firstSend = deferred<TransportResult>();
+  const origHandler = homeserver.handler;
+  let holdFirstSend = true;
+  homeserver.handler = async (input) => {
+    if (holdFirstSend && input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      holdFirstSend = false;
+      return firstSend.promise;
+    }
+    return origHandler(input);
+  };
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列第一条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列第二条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  tokenRevoked = true;
+  await act(async () => {
+    firstSend.resolve({
+      type: "response",
+      status: 401,
+      body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+    });
+  });
+
+  const banner = await screen.findByRole("status", { name: "重新验证提示" });
+  await user.click(within(banner).getByRole("button", { name: "重新验证" }));
+
+  const reauthForm = screen.getByRole("form", { name: "重新验证" });
+  const addressInput = within(reauthForm).getByLabelText("Homeserver 地址");
+  const userIdInput = within(reauthForm).getByLabelText("用户 ID");
+  expect(addressInput).toHaveValue("https://matrix.example.com");
+  expect(addressInput).toBeDisabled();
+  expect(userIdInput).toHaveValue("@alice:example.com");
+  expect(userIdInput).toBeDisabled();
+  expect(within(reauthForm).queryByRole("button", { name: "更改地址" })).not.toBeInTheDocument();
+
+  const passwordInput = within(reauthForm).getByLabelText("密码");
+  expect(passwordInput).toHaveValue("");
+  await user.type(passwordInput, "secret");
+  await user.click(within(reauthForm).getByRole("button", { name: "确认验证" }));
+
+  // 提示消失，禁用解除
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("button", { name: "新建 Topic" })).not.toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).not.toBeDisabled();
+
+  // 检查 /login 请求体携带原 device_id，不申请 refresh_token
+  expect(loginReauthCalls).toBe(1);
+  const reauthLoginReq = homeserver.requests.filter(
+    (r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"),
+  ).at(-1);
+  expect(reauthLoginReq?.body).toMatchObject({
+    type: "m.login.password",
+    identifier: { type: "m.id.user", user: "@alice:example.com" },
+    password: "secret",
+    device_id: "DEV1",
+  });
+  expect(reauthLoginReq?.body).not.toHaveProperty("refresh_token");
+
+  // 重试队列按交出顺序用新 token 恢复重放
+  await waitFor(() => expect(sentBodies).toHaveLength(2));
+  expect(sentBodies).toEqual([
+    { body: "队列第一条", auth: "Bearer tok-2" },
+    { body: "队列第二条", auth: "Bearer tok-2" },
+  ]);
+
+  // 同步先用原游标 since=batch-1，被 400 拒绝后降级无游标合并且不清库
+  await waitFor(() => {
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("同步补回的新消息");
+  });
+  const postReauthSyncs = homeserver.requests.filter(
+    (r) => r.url.includes("/sync") && r.headers.Authorization === "Bearer tok-2",
+  );
+  expect(postReauthSyncs[0]?.url).toContain("since=batch-1");
+  expect(postReauthSyncs[1]?.url).not.toContain("since=");
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("已有本地消息");
+  expect(timeline).toHaveTextContent("队列第一条");
+  expect(timeline).toHaveTextContent("队列第二条");
+  expect(timeline).toHaveTextContent("同步补回的新消息");
+
+  // 话题一的草稿与本地时间线原样保留
+  await user.click(screen.getByRole("button", { name: "草稿留存话题" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("草稿话题的本地消息");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("未发出的草稿");
+});
+
+test("重新验证只有在服务器明确拒绝原 device id 时才接受新分配并更新本地保存，未明确拒绝时不换掉原 device id", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let activeToken = "tok-1";
+  let rejectDeviceId = false;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      const body = input.body as Record<string, unknown>;
+      if (!body.device_id && !rejectDeviceId) {
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+        };
+      }
+      if (body.device_id === "DEV1" && !rejectDeviceId) {
+        // 服务器没有明确拒绝 DEV1，却在 200 里带了另一个 device_id：不能替换本地 DEV1
+        activeToken = "tok-2";
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: "tok-2", device_id: "DEV-IGNORED" },
+        };
+      }
+      if (body.device_id === "DEV1" && rejectDeviceId) {
+        // 明确拒绝原 device_id
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_INVALID_PARAM", error: "Unknown device_id DEV1" },
+        };
+      }
+      if (!body.device_id && rejectDeviceId) {
+        activeToken = "tok-3";
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: "tok-3", device_id: "DEV2" },
+        };
+      }
+      activeToken = "tok-4";
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-4", device_id: String(body.device_id) },
+      };
+    }
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (input.headers?.Authorization !== `Bearer ${activeToken}`) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Unknown token" },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+        },
+      };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  };
+
+  const first = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+
+  // 1) 让当前 token 失效并重新验证（服务器未明确拒绝 DEV1，只返回 DEV-IGNORED）
+  activeToken = "expired";
+  await act(async () => {
+    // trigger next sync tick via online
+    window.dispatchEvent(new Event("online"));
+  });
+  const banner1 = await screen.findByRole("status", { name: "重新验证提示" });
+  await user.click(within(banner1).getByRole("button", { name: "重新验证" }));
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+
+  // 2) 再次失效并重启后重新验证，验证本地保存的仍是 DEV1（没有被 DEV-IGNORED 覆盖），这次服务器明确拒绝 DEV1
+  rejectDeviceId = true;
+  activeToken = "expired-2";
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+  });
+  const banner2 = await screen.findByRole("status", { name: "重新验证提示" });
+  await user.click(within(banner2).getByRole("button", { name: "重新验证" }));
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+
+  const loginPosts = homeserver.requests.filter(
+    (r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"),
+  );
+  expect(loginPosts).toHaveLength(4);
+  expect(loginPosts[1].body).toMatchObject({ device_id: "DEV1" });
+  expect(loginPosts[2].body).toMatchObject({ device_id: "DEV1" });
+  expect(loginPosts[3].body).not.toHaveProperty("device_id");
+  first.unmount();
+
+  // 3) 重启后 token 再失效，重验证请求应携带更新后的新 device_id: DEV2
+  activeToken = "expired-3";
+  renderApp(homeserver);
+  const banner3 = await screen.findByRole("status", { name: "重新验证提示" });
+  await user.click(within(banner3).getByRole("button", { name: "重新验证" }));
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+
+  const finalLoginPost = homeserver.requests
+    .filter((r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"))
+    .at(-1);
+  expect(finalLoginPost?.body).toMatchObject({ device_id: "DEV2" });
+});
+
+test("重新验证密码错误只清密码并提示重试，网络/5xx异常保留密码并提示重试，任何失败不清耐久状态，且窄视口与迟到旧token均正确处理", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let loginStep = 0;
+  let activeToken = "tok-1";
+  const lateOldSync = deferred<TransportResult>();
+  let holdOldSync = false;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      const body = input.body as Record<string, unknown>;
+      if (!body.device_id) {
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+        };
+      }
+      loginStep += 1;
+      if (loginStep === 1) {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Invalid password" },
+        };
+      }
+      if (loginStep === 2) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (loginStep === 3) {
+        return {
+          type: "response",
+          status: 503,
+          body: { errcode: "M_UNKNOWN", error: "Service unavailable" },
+        };
+      }
+      activeToken = "tok-2";
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-2", device_id: "DEV1" },
+      };
+    }
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "窄屏失败重试话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "本地历史消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (holdOldSync) {
+        holdOldSync = false;
+        return lateOldSync.promise;
+      }
+      if (input.headers?.Authorization !== `Bearer ${activeToken}`) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      if (input.headers?.Authorization !== `Bearer ${activeToken}`) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      return { type: "response", status: 200, body: { event_id: "$ev-queued" } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  };
+
+  const clock = new ManualClock();
+  const narrowView = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint iOS", viewportMode: () => "narrow" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  // 打开话题留一份草稿，再在窄屏返回列表，等后台同步和队列失效
+  await user.click(await screen.findByRole("button", { name: "窄屏失败重试话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "草稿内容");
+  await user.click(screen.getByRole("button", { name: "返回" }));
+
+  // 触发一个挂起的旧 sync（用来验证重验证后迟到的旧 401 不能重新拉起提示）
+  await user.click(screen.getByRole("button", { name: "窄屏失败重试话题" }));
+  holdOldSync = true;
+  await act(async () => { clock.advance(1000); });
+
+  const heldSend = deferred<TransportResult>();
+  const baseHandler = homeserver.handler;
+  let holdSend = true;
+  homeserver.handler = async (input) => {
+    if (holdSend && input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      holdSend = false;
+      return heldSend.promise;
+    }
+    return baseHandler(input);
+  };
+
+  await user.clear(screen.getByRole("textbox", { name: "输入消息" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "保留草稿");
+  activeToken = "expired";
+  await act(async () => {
+    heldSend.resolve({
+      type: "response",
+      status: 401,
+      body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+    });
+  });
+  await user.click(screen.getByRole("button", { name: "返回" }));
+
+  // 窄视口列表页上只有唯一一条顶栏静默提示
+  const banners = await screen.findAllByRole("status", { name: "重新验证提示" });
+  expect(banners).toHaveLength(1);
+  await user.click(within(banners[0]).getByRole("button", { name: "重新验证" }));
+
+  // 1) 密码错误（M_FORBIDDEN）：只清密码，提示重试
+  const passwordInput = screen.getByLabelText("密码");
+  await user.type(passwordInput, "wrong-pass");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+
+  const alert1 = await screen.findByRole("alert");
+  expect(alert1).toHaveTextContent("密码被拒绝");
+  expect(alert1).toHaveTextContent("重试");
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+
+  // 2) 网络异常：保留已输入的密码，提示重试
+  await user.type(screen.getByLabelText("密码"), "right-pass");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  const alert2 = await screen.findByRole("alert");
+  expect(alert2).toHaveTextContent("到达不了");
+  expect(alert2).toHaveTextContent("重试");
+  expect(screen.getByLabelText("密码")).toHaveValue("right-pass");
+
+  // 3) 5xx 异常：保留已输入的密码，提示重试
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  const alert3 = await screen.findByRole("alert");
+  expect(alert3).toHaveTextContent("Service unavailable");
+  expect(alert3).toHaveTextContent("请重试");
+  expect(screen.getByLabelText("密码")).toHaveValue("right-pass");
+
+  // 4) 再次提交成功：不需重输密码，直接通过；随后迟到的旧 token 401 sync 响应不能再拉起提示
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+
+  await act(async () => {
+    lateOldSync.resolve({
+      type: "response",
+      status: 401,
+      body: { errcode: "M_UNKNOWN_TOKEN", error: "Stale token rejected" },
+    });
+  });
+  expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+
+  // 进入话题验证本地历史、队列已确认消息、草稿都在
+  await user.click(screen.getByRole("button", { name: "窄屏失败重试话题" }));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("本地历史消息");
+  expect(timeline).toHaveTextContent("队列消息");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("保留草稿");
+  narrowView.unmount();
+});

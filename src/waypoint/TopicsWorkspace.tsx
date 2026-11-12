@@ -12,7 +12,13 @@ import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import type { DraftAttachment, DraftRecord } from "./session-store";
-import { isCredentialRejected, isSyncCursorRejected } from "./matrix-errors";
+import {
+  classifyLoginFailure,
+  extractLoginSession,
+  isCredentialRejected,
+  isDeviceIdRejected,
+  isSyncCursorRejected,
+} from "./matrix-errors";
 import { RETRY_BACKOFF_MS, RetryQueue } from "./retry-queue";
 import {
   appendDirectRoom,
@@ -61,6 +67,7 @@ export function TopicsWorkspace({
   platform,
   viewportMode = "wide",
   keyboardInsetBottom = 0,
+  initialReauthRequired = false,
   onExitDevice,
 }: {
   client: MatrixClient;
@@ -69,6 +76,7 @@ export function TopicsWorkspace({
   platform?: PlatformAdapter;
   viewportMode?: ViewportMode;
   keyboardInsetBottom?: number;
+  initialReauthRequired?: boolean;
   onExitDevice?: () => Promise<void>;
 }) {
   const retryQueue = useMemo(
@@ -126,7 +134,18 @@ export function TopicsWorkspace({
   const lastLandedRoomRef = useRef<string | null>(null);
   const lastRequestedReadRef = useRef<Record<string, string>>({});
   const mountedRef = useRef(true);
-  const pausedRef = useRef(false);
+  const [reauthRequired, setReauthRequired] = useState(
+    () => initialReauthRequired || retryQueue.isPaused,
+  );
+  const reauthRequiredRef = useRef(reauthRequired);
+  reauthRequiredRef.current = reauthRequired;
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState("");
+  const [reauthSubmitting, setReauthSubmitting] = useState(false);
+  const reauthSubmittingRef = useRef(false);
+  const [reauthError, setReauthError] = useState<string | undefined>(undefined);
+  const pausedRef = useRef(initialReauthRequired || retryQueue.isPaused);
+  const syncEpochRef = useRef(0);
   const syncTimerRef = useRef<number | undefined>(undefined);
   const syncBackoffRef = useRef(0);
   const syncInFlightRef = useRef(false);
@@ -229,7 +248,7 @@ export function TopicsWorkspace({
     setEditPendingFields({ name: true, description: true });
   }
 
-  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting;
+  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting || reauthSubmitting;
 
   backHandlerRef.current = () => {
     if (viewportMode !== "narrow") {
@@ -488,7 +507,7 @@ export function TopicsWorkspace({
   }
 
   function openCreateForm() {
-    if (anyFormSubmitting) {
+    if (anyFormSubmitting || reauthRequiredRef.current) {
       return;
     }
     setSettingsOpen(false);
@@ -628,7 +647,7 @@ export function TopicsWorkspace({
   }
 
   async function handleTogglePin(roomId: string, currentPinned: boolean) {
-    if (pinPendingRef.current.has(roomId) || anyFormSubmitting || exiting) {
+    if (pinPendingRef.current.has(roomId) || anyFormSubmitting || exiting || reauthRequiredRef.current) {
       return;
     }
     pinPendingRef.current.add(roomId);
@@ -732,10 +751,14 @@ export function TopicsWorkspace({
   }
 
   function pauseForCredentialRejection() {
+    syncEpochRef.current += 1;
     pausedRef.current = true;
     syncWakePendingRef.current = false;
     clearSyncTimer();
     retryQueue.pause();
+    if (mountedRef.current) {
+      setReauthRequired(true);
+    }
   }
 
   function scheduleForegroundSync(delayMs: number) {
@@ -753,6 +776,7 @@ export function TopicsWorkspace({
     if (syncInFlightRef.current || !mountedRef.current || pausedRef.current || !client.hasToken) {
       return;
     }
+    const mySyncEpoch = syncEpochRef.current;
     syncInFlightRef.current = true;
     clearSyncTimer();
     let syncSucceeded = false;
@@ -761,7 +785,7 @@ export function TopicsWorkspace({
       try {
         attempt = await client.sync();
       } catch {
-        if (!mountedRef.current || pausedRef.current) {
+        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
         const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
@@ -769,18 +793,18 @@ export function TopicsWorkspace({
         scheduleForegroundSync(delay);
         return;
       }
-      if (!mountedRef.current || pausedRef.current) {
+      if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
         return;
       }
       if (isSyncCursorRejected(attempt.incremental, attempt.result)) {
         await client.dropSyncCursor();
-        if (!mountedRef.current || pausedRef.current) {
+        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
         try {
           attempt = await client.sync();
         } catch {
-          if (!mountedRef.current || pausedRef.current) {
+          if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
             return;
           }
           const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
@@ -788,7 +812,7 @@ export function TopicsWorkspace({
           scheduleForegroundSync(delay);
           return;
         }
-        if (!mountedRef.current || pausedRef.current) {
+        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
       }
@@ -917,7 +941,17 @@ export function TopicsWorkspace({
 
   useEffect(() => {
     mountedRef.current = true;
-    pausedRef.current = retryQueue.isPaused;
+    const isReauth = initialReauthRequired || retryQueue.isPaused;
+    pausedRef.current = isReauth;
+    if (isReauth) {
+      retryQueue.pause();
+      setReauthRequired(true);
+    }
+    client.setCredentialRejectedHandler(() => {
+      if (mountedRef.current) {
+        pauseForCredentialRejection();
+      }
+    });
     retryQueue.setCallbacks({
       onConfirmed: () => {
         if (mountedRef.current) {
@@ -968,6 +1002,7 @@ export function TopicsWorkspace({
         pinNoticeTimerRef.current = undefined;
       }
       window.removeEventListener("online", handleOnline);
+      client.setCredentialRejectedHandler(undefined);
       retryQueue.setCallbacks({});
       if (!providedRetryQueue) {
         retryQueue.dispose();
@@ -1047,7 +1082,7 @@ export function TopicsWorkspace({
   }
 
   function evaluateVisibleReadPosition(roomId: string) {
-    if (!client.hasToken || exiting) {
+    if (!client.hasToken || exiting || reauthRequiredRef.current) {
       return;
     }
     const container = timelineRef.current;
@@ -1146,6 +1181,9 @@ export function TopicsWorkspace({
   }
 
   async function handleSelectAttachment(roomId: string, file: File) {
+    if (reauthRequiredRef.current) {
+      return;
+    }
     const seq = bumpDraftSeq(roomId);
     let data: Uint8Array;
     try {
@@ -1175,6 +1213,9 @@ export function TopicsWorkspace({
   }
 
   function handleRemoveAttachment(roomId: string) {
+    if (reauthRequiredRef.current) {
+      return;
+    }
     bumpDraftSeq(roomId);
     const existingText = draftsByRoomRef.current[roomId]?.text;
     const hasText = typeof existingText === "string" && existingText !== "";
@@ -1195,6 +1236,9 @@ export function TopicsWorkspace({
   }
 
   function updateDraftText(roomId: string, text: string) {
+    if (reauthRequiredRef.current) {
+      return;
+    }
     bumpDraftSeq(roomId);
     const existingAttachment = draftsByRoomRef.current[roomId]?.attachment;
     const nextDraft: DraftRecord = {
@@ -1251,7 +1295,7 @@ export function TopicsWorkspace({
 
   async function handleSendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!activeTopic || persistingSendRef.current) {
+    if (!activeTopic || persistingSendRef.current || reauthRequiredRef.current) {
       return;
     }
     const roomId = activeTopic.roomId;
@@ -1294,7 +1338,7 @@ export function TopicsWorkspace({
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (submitting || quickSubmitting) {
+    if (submitting || quickSubmitting || reauthRequiredRef.current) {
       return;
     }
     const trimmedName = nameInput.trim();
@@ -1389,6 +1433,214 @@ export function TopicsWorkspace({
     resetEditForm();
   }
 
+  function openReauthForm() {
+    if (exiting || reauthSubmittingRef.current) {
+      return;
+    }
+    setExitConfirmOpen(false);
+    setReauthError(undefined);
+    setReauthOpen(true);
+  }
+
+  function closeReauthForm() {
+    if (reauthSubmittingRef.current) {
+      return;
+    }
+    setReauthOpen(false);
+    setReauthError(undefined);
+  }
+
+  async function handleReauthSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (reauthSubmittingRef.current || exiting || !reauthRequiredRef.current) {
+      return;
+    }
+    reauthSubmittingRef.current = true;
+    setReauthSubmitting(true);
+    setReauthError(undefined);
+    try {
+      const storedDeviceId = client.currentDeviceId;
+      const displayName = platform?.deviceDisplayName ?? "Waypoint";
+      const expectedUserId = client.ownerId;
+      const password = reauthPassword;
+
+      let loginResult;
+      try {
+        loginResult = await client.passwordLogin(
+          expectedUserId,
+          password,
+          displayName,
+          storedDeviceId,
+        );
+      } catch {
+        loginResult = { type: "failure" as const, failure: { type: "network" as const } };
+      }
+      if (!mountedRef.current || exiting) {
+        return;
+      }
+
+      let deviceIdWasRejected = false;
+      if (storedDeviceId && isDeviceIdRejected(loginResult)) {
+        deviceIdWasRejected = true;
+        try {
+          loginResult = await client.passwordLogin(expectedUserId, password, displayName);
+        } catch {
+          loginResult = { type: "failure" as const, failure: { type: "network" as const } };
+        }
+        if (!mountedRef.current || exiting) {
+          return;
+        }
+      }
+
+      const session = extractLoginSession(loginResult);
+      const validDevice = deviceIdWasRejected
+        ? Boolean(session?.deviceId)
+        : Boolean(storedDeviceId || session?.deviceId);
+      if (!session || !validDevice) {
+        const failure = classifyLoginFailure(loginResult, "重新验证", "密码被拒绝");
+        if (failure.clearPassword) {
+          setReauthPassword("");
+        }
+        setReauthError(`${failure.message}请重试。`);
+        return;
+      }
+      if (session.userId !== expectedUserId) {
+        setReauthError("重新验证失败，因为返回的用户 ID 与当前设备不一致。");
+        return;
+      }
+
+      const nextDeviceId = deviceIdWasRejected
+        ? session.deviceId
+        : storedDeviceId
+          ? undefined
+          : session.deviceId;
+      await client.completeReauth(session.accessToken, nextDeviceId);
+      if (!mountedRef.current || exiting) {
+        return;
+      }
+
+      syncEpochRef.current += 1;
+      pausedRef.current = false;
+      syncBackoffRef.current = 0;
+      setReauthRequired(false);
+      setReauthOpen(false);
+      setReauthPassword("");
+      setReauthError(undefined);
+      retryQueue.resume();
+      retryQueue.wake();
+      void runForegroundSync();
+      setRevision((value) => value + 1);
+    } finally {
+      reauthSubmittingRef.current = false;
+      if (mountedRef.current) {
+        setReauthSubmitting(false);
+      }
+    }
+  }
+
+  function renderExitConfirmDialog() {
+    return (
+      <div
+        role="alertdialog"
+        aria-label="确认退出这台设备"
+        className="waypoint-agents-form"
+      >
+        <h4>确认退出这台设备</h4>
+        <p>
+          退出将清空这台设备上的本地时间线、未发送草稿和重试队列。
+        </p>
+        <div className="waypoint-form-actions">
+          <button
+            type="button"
+            disabled={exiting}
+            onClick={() => void confirmExitDevice()}
+          >
+            {exiting ? "正在退出…" : "确认退出"}
+          </button>
+          <button
+            type="button"
+            disabled={exiting}
+            onClick={cancelExitConfirm}
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  function renderReauthBanner() {
+    return (
+      <section
+        role="status"
+        aria-label="重新验证提示"
+        className="waypoint-reauth-banner"
+      >
+        <div className="waypoint-reauth-banner-row">
+          <p className="waypoint-reauth-banner-text">
+            服务器不认这台设备的登录，已暂停同步与发送，本地时间线、草稿和重试队列仍保留。
+          </p>
+          <div className="waypoint-reauth-banner-actions">
+            <button
+              type="button"
+              disabled={exiting || reauthSubmitting}
+              onClick={openReauthForm}
+            >
+              重新验证
+            </button>
+            <button
+              type="button"
+              disabled={exiting || reauthSubmitting}
+              onClick={openExitConfirm}
+            >
+              退出这台设备
+            </button>
+          </div>
+        </div>
+        {reauthOpen ? (
+          <form
+            aria-label="重新验证"
+            className="waypoint-reauth-form"
+            onSubmit={handleReauthSubmit}
+          >
+            <label>
+              Homeserver 地址
+              <input name="reauth-address" value={client.address} readOnly disabled />
+            </label>
+            <label>
+              用户 ID
+              <input name="reauth-user-id" value={client.ownerId} readOnly disabled />
+            </label>
+            <label>
+              密码
+              <input
+                name="reauth-password"
+                type="password"
+                value={reauthPassword}
+                disabled={reauthSubmitting || exiting}
+                onChange={(event) => setReauthPassword(event.target.value)}
+              />
+            </label>
+            {reauthError ? <p role="alert">{reauthError}</p> : null}
+            <div className="waypoint-form-actions">
+              <button type="submit" disabled={reauthSubmitting || exiting}>
+                {reauthSubmitting ? "正在验证…" : "确认验证"}
+              </button>
+              <button
+                type="button"
+                disabled={reauthSubmitting || exiting}
+                onClick={closeReauthForm}
+              >
+                取消
+              </button>
+            </div>
+          </form>
+        ) : null}
+        {!settingsOpen && exitConfirmOpen ? renderExitConfirmDialog() : null}
+      </section>
+    );
+  }
+
   const isNarrow = viewportMode === "narrow";
   const isNarrowPushed = isNarrow && (settingsOpen || creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
@@ -1407,7 +1659,7 @@ export function TopicsWorkspace({
           <div className="waypoint-sidebar-header">
             <h1>Topic</h1>
             <div className="waypoint-sidebar-actions">
-              <button type="button" onClick={openCreateForm}>
+              <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
                 新建 Topic
               </button>
               <button type="button" onClick={openSettings}>
@@ -1415,6 +1667,7 @@ export function TopicsWorkspace({
               </button>
             </div>
           </div>
+          {reauthRequired && !showDetail ? renderReauthBanner() : null}
           {topics.length === 0 ? (
             <p>暂无 Topic</p>
           ) : (
@@ -1509,6 +1762,7 @@ export function TopicsWorkspace({
                   </div>
                 </div>
               ) : null}
+              {reauthRequired ? renderReauthBanner() : null}
               <div
                 className="waypoint-dialog-body"
                 style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
@@ -1679,34 +1933,7 @@ export function TopicsWorkspace({
                   >
                     退出这台设备
                   </button>
-                  {exitConfirmOpen ? (
-                    <div
-                      role="alertdialog"
-                      aria-label="确认退出这台设备"
-                      className="waypoint-agents-form"
-                    >
-                      <h4>确认退出这台设备</h4>
-                      <p>
-                        退出将清空这台设备上的本地时间线、未发送草稿和重试队列。
-                      </p>
-                      <div className="waypoint-form-actions">
-                        <button
-                          type="button"
-                          disabled={exiting}
-                          onClick={() => void confirmExitDevice()}
-                        >
-                          {exiting ? "正在退出…" : "确认退出"}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={exiting}
-                          onClick={cancelExitConfirm}
-                        >
-                          取消
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
+                  {exitConfirmOpen ? renderExitConfirmDialog() : null}
                 </section>
               </div>
             </section>
@@ -1729,6 +1956,7 @@ export function TopicsWorkspace({
                   </div>
                 </div>
               ) : null}
+              {reauthRequired ? renderReauthBanner() : null}
               <div
                 className="waypoint-dialog-body"
                 style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
@@ -1824,7 +2052,7 @@ export function TopicsWorkspace({
                   )}
                   {formError ? <p role="alert">{formError}</p> : null}
                   <div className="waypoint-form-actions">
-                    <button type="submit" disabled={submitting || quickSubmitting}>
+                    <button type="submit" disabled={submitting || quickSubmitting || reauthRequired}>
                       {submitting ? "正在创建…" : "创建 Topic"}
                     </button>
                     <button
@@ -1865,6 +2093,7 @@ export function TopicsWorkspace({
                       editing ||
                       deleteConfirmOpen ||
                       deleting ||
+                      reauthRequired ||
                       Boolean(pinPendingByRoom[activeTopic.roomId])
                     }
                     aria-pressed={activeTopic.pinned}
@@ -1904,6 +2133,7 @@ export function TopicsWorkspace({
                   </button>
                 ) : null}
               </header>
+              {reauthRequired ? renderReauthBanner() : null}
               {deleteConfirmOpen ? (
                 <div
                   role="alertdialog"
@@ -2099,7 +2329,7 @@ export function TopicsWorkspace({
                         </span>
                         <button
                           type="button"
-                          disabled={persistingSend}
+                          disabled={persistingSend || reauthRequired}
                           onClick={() => handleRemoveAttachment(activeTopic.roomId)}
                         >
                           移除附件
@@ -2113,7 +2343,7 @@ export function TopicsWorkspace({
                           type="file"
                           aria-label="选择附件"
                           className="waypoint-sr-only"
-                          disabled={persistingSend}
+                          disabled={persistingSend || reauthRequired}
                           onChange={(event) => {
                             const file = event.target.files?.[0];
                             event.target.value = "";
@@ -2126,10 +2356,11 @@ export function TopicsWorkspace({
                       <textarea
                         aria-label="输入消息"
                         name="message"
+                        disabled={reauthRequired}
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                       />
-                      <button type="submit" disabled={persistingSend}>
+                      <button type="submit" disabled={persistingSend || reauthRequired}>
                         发送
                       </button>
                     </form>
@@ -2138,16 +2369,19 @@ export function TopicsWorkspace({
               )}
             </div>
           ) : (
-            <section aria-label="Topic 引导" className="waypoint-empty-detail">
-              <p>
-                {topics.length === 0
-                  ? "还没有 Topic，新建一条 Topic 开始交流。"
-                  : "选择一条 Topic，或新建一条 Topic 开始交流。"}
-              </p>
-              <button type="button" onClick={openCreateForm}>
-                新建一条 Topic
-              </button>
-            </section>
+            <>
+              {reauthRequired ? renderReauthBanner() : null}
+              <section aria-label="Topic 引导" className="waypoint-empty-detail">
+                <p>
+                  {topics.length === 0
+                    ? "还没有 Topic，新建一条 Topic 开始交流。"
+                    : "选择一条 Topic，或新建一条 Topic 开始交流。"}
+                </p>
+                <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
+                  新建一条 Topic
+                </button>
+              </section>
+            </>
           )}
         </div>
       ) : null}

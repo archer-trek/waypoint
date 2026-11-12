@@ -19,6 +19,7 @@ export class RetryQueue {
   private backoffStep = 0;
   private readMarkerBackoffStep = 0;
   private disposed = false;
+  private runEpoch = 0;
   private wakePending = false;
   private readMarkersWakePending = false;
   private callbacks: RetryQueueCallbacks = {};
@@ -46,6 +47,7 @@ export class RetryQueue {
   }
 
   pause(): void {
+    this.runEpoch += 1;
     this.paused = true;
     this.wakePending = false;
     this.readMarkersWakePending = false;
@@ -54,6 +56,7 @@ export class RetryQueue {
   }
 
   resume(): void {
+    this.runEpoch += 1;
     this.paused = false;
   }
 
@@ -158,16 +161,17 @@ export class RetryQueue {
           break;
         }
         const head = pending[0];
+        const myEpoch = this.runEpoch;
         let result;
         try {
           result = await this.client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);
         } catch {
-          if (!this.disposed && !this.paused) {
+          if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
             this.scheduleRetry();
           }
           break;
         }
-        if (this.disposed || this.paused) {
+        if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
           break;
         }
         if (isCredentialRejected(result)) {
@@ -235,16 +239,17 @@ export class RetryQueue {
           break;
         }
         const head = pending[0];
+        const myEpoch = this.runEpoch;
         let result;
         try {
           result = await this.client.sendReadMarkers(head.roomId, head.eventId);
         } catch {
-          if (!this.disposed && !this.paused) {
+          if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
             this.scheduleReadMarkerRetry();
           }
           break;
         }
-        if (this.disposed || this.paused) {
+        if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
           break;
         }
         if (isCredentialRejected(result)) {
