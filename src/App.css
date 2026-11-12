@@ -248,3 +248,75 @@ button {
 p[role="alert"] {
   color: #8a1f1f;
 }
+
+.waypoint-sidebar-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.waypoint-sidebar-actions button,
+.waypoint-settings-header button,
+.waypoint-roster-header button,
+.waypoint-bot-actions button,
+.waypoint-form-actions button {
+  margin-top: 0;
+}
+
+.waypoint-settings-header,
+.waypoint-roster-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.waypoint-bot-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0 0;
+}
+
+.waypoint-bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 0.0625rem solid #ddd9d0;
+}
+
+.waypoint-bot-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waypoint-bot-name {
+  font-weight: 600;
+}
+
+.waypoint-bot-id {
+  font-size: 0.875rem;
+  color: #555;
+  word-break: break-all;
+}
+
+.waypoint-bot-actions,
+.waypoint-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.waypoint-bot-actions {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
+.waypoint-roster-form,
+.waypoint-inline-register {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem;
+  border: 0.0625rem solid #ddd9d0;
+  background: #efede7;
+}

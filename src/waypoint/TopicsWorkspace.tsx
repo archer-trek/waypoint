@@ -4,12 +4,33 @@ import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import {
   appendDirectRoom,
+  buildAddAgentContent,
+  buildRemoveAgentContent,
+  buildRenameAgentContent,
   createTopicRoom,
   deriveTopics,
   parseRegisteredAgents,
   resolveBotName,
   resolvePreselectedBotId,
+  saveAgentsRoster,
+  validateAgentUserId,
 } from "./topics";
+
+type RosterFormState =
+  | {
+      mode: "add";
+      userId: string;
+      handwrittenName: string;
+    }
+  | {
+      mode: "edit";
+      userId: string;
+      handwrittenName: string;
+    }
+  | {
+      mode: "remove";
+      userId: string;
+    };
 
 export function TopicsWorkspace({
   client,
@@ -26,11 +47,20 @@ export function TopicsWorkspace({
 }) {
   const [, setRevision] = useState(0);
   const [creating, setCreating] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rosterForm, setRosterForm] = useState<RosterFormState | null>(null);
+  const [rosterSubmitting, setRosterSubmitting] = useState(false);
+  const [rosterError, setRosterError] = useState<string | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [descriptionInput, setDescriptionInput] = useState("");
   const [selectedBotId, setSelectedBotId] = useState("");
   const [formError, setFormError] = useState<string | undefined>(undefined);
+  const [quickRegisterOpen, setQuickRegisterOpen] = useState(false);
+  const [quickUserId, setQuickUserId] = useState("");
+  const [quickHandwrittenName, setQuickHandwrittenName] = useState("");
+  const [quickSubmitting, setQuickSubmitting] = useState(false);
+  const [quickError, setQuickError] = useState<string | undefined>(undefined);
   const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
 
@@ -53,7 +83,10 @@ export function TopicsWorkspace({
   }, [activeTopicId, topics]);
 
   const navDepthRef = useRef(0);
-  const targetDepth = viewportMode === "narrow" ? (creating ? 1 : 0) + (activeTopic ? 1 : 0) : 0;
+  const targetDepth =
+    viewportMode === "narrow"
+      ? (settingsOpen ? 1 : 0) + (creating ? 1 : 0) + (activeTopic ? 1 : 0)
+      : 0;
 
   function syncNavigationDepth(desiredDepth: number) {
     while (navDepthRef.current < desiredDepth) {
@@ -75,14 +108,29 @@ export function TopicsWorkspace({
     if (viewportMode !== "narrow") {
       return false;
     }
+    if (settingsOpen) {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      if (rosterSubmitting) {
+        syncNavigationDepth(targetDepth);
+        return true;
+      }
+      setSettingsOpen(false);
+      setRosterForm(null);
+      setRosterError(undefined);
+      return true;
+    }
     if (creating) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (submitting) {
+      if (submitting || quickSubmitting) {
         syncNavigationDepth(targetDepth);
         return true;
       }
       setCreating(false);
       setFormError(undefined);
+      setQuickRegisterOpen(false);
+      setQuickUserId("");
+      setQuickHandwrittenName("");
+      setQuickError(undefined);
       return true;
     }
     if (activeTopic) {
@@ -107,10 +155,153 @@ export function TopicsWorkspace({
     };
   }, [platform]);
 
-  function openCreateForm() {
-    if (submitting) {
+  function openSettings() {
+    if (submitting || quickSubmitting || rosterSubmitting) {
       return;
     }
+    setCreating(false);
+    setFormError(undefined);
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+    setRosterForm(null);
+    setRosterError(undefined);
+    setSettingsOpen(true);
+  }
+
+  function closeSettings() {
+    if (rosterSubmitting) {
+      return;
+    }
+    setSettingsOpen(false);
+    setRosterForm(null);
+    setRosterError(undefined);
+  }
+
+  function openAddRosterForm() {
+    if (rosterSubmitting) {
+      return;
+    }
+    setRosterForm({ mode: "add", userId: "", handwrittenName: "" });
+    setRosterError(undefined);
+  }
+
+  function openEditRosterForm(userId: string, currentName?: string) {
+    if (rosterSubmitting) {
+      return;
+    }
+    setRosterForm({
+      mode: "edit",
+      userId,
+      handwrittenName: currentName ?? "",
+    });
+    setRosterError(undefined);
+  }
+
+  async function handleEditRosterSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (rosterSubmitting || rosterForm?.mode !== "edit") {
+      return;
+    }
+    const nextContent = buildRenameAgentContent(
+      client.accountData("im.waypoint.agents"),
+      rosterForm.userId,
+      rosterForm.handwrittenName,
+    );
+    setRosterSubmitting(true);
+    setRosterError(undefined);
+    const result = await saveAgentsRoster(client, "修改 Bot 名字", nextContent);
+    setRosterSubmitting(false);
+    if (!result.ok) {
+      setRosterError(result.message);
+      return;
+    }
+    setRosterForm(null);
+    setRosterError(undefined);
+    setRevision((value) => value + 1);
+  }
+
+  function openRemoveRosterConfirm(userId: string) {
+    if (rosterSubmitting || registeredAgents.length <= 1) {
+      return;
+    }
+    setRosterForm({ mode: "remove", userId });
+    setRosterError(undefined);
+  }
+
+  async function confirmRemoveBot() {
+    if (rosterSubmitting || rosterForm?.mode !== "remove") {
+      return;
+    }
+    if (registeredAgents.length <= 1) {
+      setRosterError("移除 Bot 失败，因为名册里至少要保留一个 Bot。");
+      return;
+    }
+    const nextContent = buildRemoveAgentContent(
+      client.accountData("im.waypoint.agents"),
+      rosterForm.userId,
+    );
+    setRosterSubmitting(true);
+    setRosterError(undefined);
+    const result = await saveAgentsRoster(client, "移除 Bot", nextContent);
+    setRosterSubmitting(false);
+    if (!result.ok) {
+      setRosterError(result.message);
+      return;
+    }
+    setRosterForm(null);
+    setRosterError(undefined);
+    setRevision((value) => value + 1);
+  }
+
+  function cancelRosterAction() {
+    if (rosterSubmitting) {
+      return;
+    }
+    setRosterForm(null);
+    setRosterError(undefined);
+  }
+
+  async function handleAddRosterSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (rosterSubmitting || rosterForm?.mode !== "add") {
+      return;
+    }
+    const validation = validateAgentUserId(
+      rosterForm.userId,
+      client.ownerId,
+      registeredAgents,
+    );
+    if (!validation.ok) {
+      setRosterForm({ ...rosterForm, userId: validation.trimmed });
+      setRosterError(validation.message);
+      return;
+    }
+    const nextContent = buildAddAgentContent(
+      client.accountData("im.waypoint.agents"),
+      validation.userId,
+      rosterForm.handwrittenName,
+    );
+    setRosterForm({ ...rosterForm, userId: validation.userId });
+    setRosterSubmitting(true);
+    setRosterError(undefined);
+    const result = await saveAgentsRoster(client, "登记 Bot", nextContent);
+    setRosterSubmitting(false);
+    if (!result.ok) {
+      setRosterError(result.message);
+      return;
+    }
+    setRosterForm(null);
+    setRosterError(undefined);
+    setRevision((value) => value + 1);
+  }
+
+  function openCreateForm() {
+    if (submitting || quickSubmitting || rosterSubmitting) {
+      return;
+    }
+    setSettingsOpen(false);
     setCreating(true);
     setSubmitting(false);
     setNameInput("");
@@ -121,27 +312,96 @@ export function TopicsWorkspace({
         : resolvePreselectedBotId(topics, registeredAgents),
     );
     setFormError(undefined);
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
   }
 
   function closeCreateForm() {
-    if (submitting) {
+    if (submitting || quickSubmitting) {
       return;
     }
     setCreating(false);
     setFormError(undefined);
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+  }
+
+  function openQuickRegister() {
+    if (submitting || quickSubmitting) {
+      return;
+    }
+    setQuickRegisterOpen(true);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+  }
+
+  function closeQuickRegister() {
+    if (quickSubmitting) {
+      return;
+    }
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+  }
+
+  async function handleQuickRegister() {
+    if (quickSubmitting || submitting) {
+      return;
+    }
+    const validation = validateAgentUserId(quickUserId, client.ownerId, registeredAgents);
+    if (!validation.ok) {
+      setQuickUserId(validation.trimmed);
+      setQuickError(validation.message);
+      return;
+    }
+    const nextContent = buildAddAgentContent(
+      client.accountData("im.waypoint.agents"),
+      validation.userId,
+      quickHandwrittenName,
+    );
+    setQuickUserId(validation.userId);
+    setQuickSubmitting(true);
+    setQuickError(undefined);
+    const result = await saveAgentsRoster(client, "登记 Bot", nextContent);
+    setQuickSubmitting(false);
+    if (!result.ok) {
+      setQuickError(result.message);
+      return;
+    }
+    setSelectedBotId(validation.userId);
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
+    setRevision((value) => value + 1);
   }
 
   function openTopic(roomId: string) {
-    if (submitting) {
+    if (submitting || quickSubmitting || rosterSubmitting) {
       return;
     }
+    setSettingsOpen(false);
     setCreating(false);
     setFormError(undefined);
+    setQuickRegisterOpen(false);
+    setQuickUserId("");
+    setQuickHandwrittenName("");
+    setQuickError(undefined);
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
   }
 
   function goBack() {
+    if (settingsOpen) {
+      closeSettings();
+      return;
+    }
     if (creating) {
       closeCreateForm();
       return;
@@ -158,7 +418,7 @@ export function TopicsWorkspace({
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (submitting) {
+    if (submitting || quickSubmitting) {
       return;
     }
     const trimmedName = nameInput.trim();
@@ -198,7 +458,7 @@ export function TopicsWorkspace({
   }
 
   const isNarrow = viewportMode === "narrow";
-  const isNarrowPushed = isNarrow && (creating || Boolean(activeTopic));
+  const isNarrowPushed = isNarrow && (settingsOpen || creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
   const showDetail = !isNarrow || isNarrowPushed;
   const safeInset = normalizeInset(keyboardInsetBottom);
@@ -214,9 +474,14 @@ export function TopicsWorkspace({
           <p>已连接</p>
           <div className="waypoint-sidebar-header">
             <h1>Topic</h1>
-            <button type="button" onClick={openCreateForm}>
-              新建 Topic
-            </button>
+            <div className="waypoint-sidebar-actions">
+              <button type="button" onClick={openCreateForm}>
+                新建 Topic
+              </button>
+              <button type="button" onClick={openSettings}>
+                设置
+              </button>
+            </div>
           </div>
           {topics.length === 0 ? (
             <p>暂无 Topic</p>
@@ -249,7 +514,189 @@ export function TopicsWorkspace({
 
       {showDetail ? (
         <div className="waypoint-detail">
-          {creating ? (
+          {settingsOpen ? (
+            <section aria-label="设置" className="waypoint-dialog">
+              {isNarrow ? (
+                <div className="waypoint-topic-header">
+                  <div className="waypoint-topic-header-bar">
+                    <button
+                      type="button"
+                      className="waypoint-back-button"
+                      disabled={rosterSubmitting}
+                      onClick={goBack}
+                    >
+                      返回
+                    </button>
+                    <div className="waypoint-topic-header-main">
+                      <h2>设置</h2>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+              <div
+                className="waypoint-dialog-body"
+                style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
+              >
+                {!isNarrow ? (
+                  <div className="waypoint-settings-header">
+                    <h2>设置</h2>
+                    <button type="button" disabled={rosterSubmitting} onClick={closeSettings}>
+                      关闭
+                    </button>
+                  </div>
+                ) : null}
+                <section aria-label="Bot 名册" className="waypoint-roster-section">
+                  <div className="waypoint-roster-header">
+                    <h3>Bot 名册</h3>
+                    <button
+                      type="button"
+                      disabled={rosterSubmitting}
+                      onClick={openAddRosterForm}
+                    >
+                      登记新 Bot
+                    </button>
+                  </div>
+                  <ul className="waypoint-bot-list">
+                    {registeredAgents.map((bot) => (
+                      <li key={bot.userId} className="waypoint-bot-row">
+                        <div className="waypoint-bot-info">
+                          <span className="waypoint-bot-name">
+                            {resolveBotName(bot.userId, registeredAgents, roomList)}
+                          </span>
+                          <span className="waypoint-bot-id">{bot.userId}</span>
+                        </div>
+                        <div className="waypoint-bot-actions">
+                          <button
+                            type="button"
+                            disabled={rosterSubmitting}
+                            onClick={() => openEditRosterForm(bot.userId, bot.handwrittenName)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            disabled={registeredAgents.length <= 1 || rosterSubmitting}
+                            onClick={() => openRemoveRosterConfirm(bot.userId)}
+                          >
+                            移除
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  {rosterForm?.mode === "add" ? (
+                    <form onSubmit={handleAddRosterSubmit} className="waypoint-roster-form">
+                      <h4>登记新 Bot</h4>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="roster-bot-user-id"
+                          value={rosterForm.userId}
+                          disabled={rosterSubmitting}
+                          onChange={(event) =>
+                            setRosterForm({ ...rosterForm, userId: event.target.value })
+                          }
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="roster-bot-name"
+                          value={rosterForm.handwrittenName}
+                          disabled={rosterSubmitting}
+                          onChange={(event) =>
+                            setRosterForm({ ...rosterForm, handwrittenName: event.target.value })
+                          }
+                        />
+                      </label>
+                      {rosterError ? <p role="alert">{rosterError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={rosterSubmitting}>
+                          {rosterSubmitting ? "正在保存…" : "登记 Bot"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rosterSubmitting}
+                          onClick={cancelRosterAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  ) : rosterForm?.mode === "edit" ? (
+                    <form onSubmit={handleEditRosterSubmit} className="waypoint-roster-form">
+                      <h4>编辑 Bot</h4>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="roster-edit-user-id"
+                          value={rosterForm.userId}
+                          disabled
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="roster-edit-name"
+                          value={rosterForm.handwrittenName}
+                          disabled={rosterSubmitting}
+                          onChange={(event) =>
+                            setRosterForm({ ...rosterForm, handwrittenName: event.target.value })
+                          }
+                        />
+                      </label>
+                      {rosterError ? <p role="alert">{rosterError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={rosterSubmitting}>
+                          {rosterSubmitting ? "正在保存…" : "保存"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rosterSubmitting}
+                          onClick={cancelRosterAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  ) : rosterForm?.mode === "remove" ? (
+                    <div
+                      role="alertdialog"
+                      aria-label="确认移除 Bot"
+                      className="waypoint-roster-form"
+                    >
+                      <h4>确认移除 Bot</h4>
+                      <p>
+                        确定要从 Bot 名册移除{" "}
+                        {resolveBotName(rosterForm.userId, registeredAgents, roomList)}（
+                        {rosterForm.userId}）吗？
+                      </p>
+                      <p>
+                        移除不会删除已有 Topic，已有交流不受影响，也不会离开这些房间。
+                      </p>
+                      {rosterError ? <p role="alert">{rosterError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button
+                          type="button"
+                          disabled={rosterSubmitting}
+                          onClick={() => void confirmRemoveBot()}
+                        >
+                          {rosterSubmitting ? "正在移除…" : "确认移除"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={rosterSubmitting}
+                          onClick={cancelRosterAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              </div>
+            </section>
+          ) : creating ? (
             <section aria-label="新建 Topic" className="waypoint-dialog">
               {isNarrow ? (
                 <div className="waypoint-topic-header">
@@ -257,7 +704,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
-                      disabled={submitting}
+                      disabled={submitting || quickSubmitting}
                       onClick={goBack}
                     >
                       返回
@@ -299,6 +746,7 @@ export function TopicsWorkspace({
                       <select
                         name="bot-user-id"
                         value={selectedBotId}
+                        disabled={submitting || quickSubmitting}
                         onChange={(event) => setSelectedBotId(event.target.value)}
                       >
                         <option value="">请选择 Bot</option>
@@ -310,12 +758,78 @@ export function TopicsWorkspace({
                       </select>
                     </label>
                   ) : null}
+                  {!quickRegisterOpen ? (
+                    <button
+                      type="button"
+                      disabled={submitting || quickSubmitting}
+                      onClick={openQuickRegister}
+                    >
+                      登记新 Bot
+                    </button>
+                  ) : (
+                    <section aria-label="登记新 Bot" className="waypoint-inline-register">
+                      <h3>登记新 Bot</h3>
+                      <label>
+                        Matrix 用户 ID
+                        <input
+                          name="quick-bot-user-id"
+                          value={quickUserId}
+                          disabled={quickSubmitting}
+                          onChange={(event) => setQuickUserId(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void handleQuickRegister();
+                            }
+                          }}
+                        />
+                      </label>
+                      <label>
+                        手写名字（可选）
+                        <input
+                          name="quick-bot-name"
+                          value={quickHandwrittenName}
+                          disabled={quickSubmitting}
+                          onChange={(event) => setQuickHandwrittenName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              void handleQuickRegister();
+                            }
+                          }}
+                        />
+                      </label>
+                      {quickError ? <p role="alert">{quickError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button
+                          type="button"
+                          disabled={quickSubmitting || submitting}
+                          onClick={() => void handleQuickRegister()}
+                        >
+                          {quickSubmitting ? "正在保存…" : "登记 Bot"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={quickSubmitting || submitting}
+                          onClick={closeQuickRegister}
+                        >
+                          取消登记
+                        </button>
+                      </div>
+                    </section>
+                  )}
                   {formError ? <p role="alert">{formError}</p> : null}
                   <div className="waypoint-form-actions">
-                    <button type="submit" disabled={submitting}>
+                    <button type="submit" disabled={submitting || quickSubmitting}>
                       {submitting ? "正在创建…" : "创建 Topic"}
                     </button>
-                    <button type="button" disabled={submitting} onClick={closeCreateForm}>
+                    <button
+                      type="button"
+                      disabled={submitting || quickSubmitting}
+                      onClick={closeCreateForm}
+                    >
                       取消
                     </button>
                   </div>

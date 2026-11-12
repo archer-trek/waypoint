@@ -851,8 +851,8 @@ test("还要验证码或其他交互式验证时停住，不打开网页，不�
   open.mockRestore();
 });
 
-function passwordLoginHandler(sync: (input: { method: string; url: string }) => Promise<import("../adapters/types").TransportResult>) {
-  return async (input: { method: string; url: string }) => {
+function passwordLoginHandler(sync: (input: HomeserverRequest) => Promise<TransportResult>) {
+  return async (input: HomeserverRequest) => {
     if (input.url.endsWith("/versions")) {
       return { type: "response" as const, status: 200, body: { versions: ["v1.11"] } };
     }
@@ -4444,4 +4444,771 @@ test("生产平台适配器支持 virtualKeyboard、waypoint:keyboard-inset 事�
       delete (navigator as unknown as { virtualKeyboard?: unknown }).virtualKeyboard;
     }
   }
+});
+
+test("进入 Topic 列表后可在设置里查看 Bot 名册（展示名字优先级与用户 ID），并适配宽窄视口与返回", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "手写大管家" },
+                    { user_id: "@bot2:example.com" },
+                    { user_id: "@bot3:example.com" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "话题一" } },
+                    { type: "m.room.member", state_key: "@bot1:example.com", origin_server_ts: 1000, content: { membership: "join", displayname: "不应覆盖手写名" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "话题二" } },
+                    { type: "m.room.member", state_key: "@bot2:example.com", origin_server_ts: 2000, content: { membership: "join", displayname: "矩阵显示名" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  let viewportMode: "wide" | "narrow" = "wide";
+  const listeners = new Set<(mode: "wide" | "narrow") => void>();
+  let backHandler: (() => boolean) | undefined;
+  let pushCount = 0;
+  let popCount = 0;
+
+  const view = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint macOS",
+        viewportMode: () => viewportMode,
+        subscribeViewportMode: (listener) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        pushNavigationEntry: () => {
+          pushCount += 1;
+        },
+        popNavigationEntry: () => {
+          popCount += 1;
+        },
+        onSystemBack: (handler) => {
+          backHandler = handler;
+          return () => {
+            backHandler = undefined;
+          };
+        },
+      }}
+      clock={new ManualClock()}
+    />,
+  );
+  await login(user);
+
+  const settingsButton = await screen.findByRole("button", { name: "设置" });
+  await user.click(settingsButton);
+
+  const settingsRegion = screen.getByRole("region", { name: "设置" });
+  expect(settingsRegion).toBeInTheDocument();
+  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(rosterSection).toBeInTheDocument();
+
+  // 展示手写名 -> 显示名 -> localpart，以及各自的 Matrix 用户 ID
+  expect(rosterSection).toHaveTextContent("手写大管家");
+  expect(rosterSection).toHaveTextContent("@bot1:example.com");
+  expect(rosterSection).not.toHaveTextContent("不应覆盖手写名");
+
+  expect(rosterSection).toHaveTextContent("矩阵显示名");
+  expect(rosterSection).toHaveTextContent("@bot2:example.com");
+
+  expect(rosterSection).toHaveTextContent("bot3");
+  expect(rosterSection).toHaveTextContent("@bot3:example.com");
+
+  // 宽视口不显示返回按钮，左侧栏仍可见
+  expect(screen.queryByRole("button", { name: "返回" })).not.toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+
+  // 切到窄视口后，设置全屏显示并推入导航栈，顶栏有返回按钮
+  act(() => {
+    viewportMode = "narrow";
+    for (const listener of listeners) {
+      listener("narrow");
+    }
+  });
+  expect(pushCount).toBe(1);
+  expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "返回" })).toBeVisible();
+
+  // 系统返回退出设置并回到 Topic 列表
+  let consumed = false;
+  act(() => {
+    consumed = backHandler?.() ?? false;
+  });
+  expect(consumed).toBe(true);
+  expect(screen.queryByRole("region", { name: "设置" })).not.toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+
+  // 再次从窄视口进入设置并用顶栏返回按钮返回列表
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  expect(pushCount).toBe(2);
+  expect(screen.getByRole("region", { name: "设置" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  expect(popCount).toBe(1);
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+
+  view.unmount();
+});
+
+test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁定且不做乐观更新、失败保留输入并报错、成功后写入名册", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let putAttempt = 0;
+  let storedAgentsContent: unknown = {
+    agents: [{ user_id: "@bot1:example.com", name: "一号" }],
+  };
+  const firstPutDeferred = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [{ type: "im.waypoint.agents", content: storedAgentsContent }],
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return firstPutDeferred.promise;
+      }
+      storedAgentsContent = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "登记新 Bot" }));
+
+  const userIdInput = screen.getByLabelText("Matrix 用户 ID");
+  const nameInput = screen.getByLabelText("手写名字（可选）");
+  const submitButton = screen.getByRole("button", { name: "登记 Bot" });
+
+  // 1. 空用户 ID
+  await user.click(submitButton);
+  expect(await screen.findByRole("alert")).toHaveTextContent("用户 ID 是空的");
+  expect(putAttempt).toBe(0);
+
+  // 2. 不完整用户 ID（缺 @ 或 server）
+  await user.type(userIdInput, "bot2");
+  await user.click(submitButton);
+  expect(await screen.findByRole("alert")).toHaveTextContent("完整的 Matrix 用户 ID");
+  expect(putAttempt).toBe(0);
+
+  // 3. 跨 server name
+  await user.clear(userIdInput);
+  await user.type(userIdInput, "@bot2:other.org");
+  await user.click(submitButton);
+  expect(await screen.findByRole("alert")).toHaveTextContent("server name 必须与当前账号完全一致");
+  expect(putAttempt).toBe(0);
+
+  // 4. Owner 自身
+  await user.clear(userIdInput);
+  await user.type(userIdInput, "@alice:example.com");
+  await user.click(submitButton);
+  expect(await screen.findByRole("alert")).toHaveTextContent("不能把自己登记成 Bot");
+  expect(putAttempt).toBe(0);
+
+  // 5. 名册内重复
+  await user.clear(userIdInput);
+  await user.type(userIdInput, "  @bot1:example.com  ");
+  await user.click(submitButton);
+  expect(await screen.findByRole("alert")).toHaveTextContent("已经在名册里");
+  expect(userIdInput).toHaveValue("@bot1:example.com");
+  expect(putAttempt).toBe(0);
+
+  // 6. 合法新 Bot（去前后空白、保留大小写、带手写名字），提交期间锁定且不做乐观更新
+  await user.clear(userIdInput);
+  await user.type(userIdInput, "  @BotTwo:example.com  ");
+  await user.type(nameInput, "  二号助理  ");
+  await user.click(submitButton);
+
+  expect(putAttempt).toBe(1);
+  expect(submitButton).toBeDisabled();
+  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(rosterSection).not.toHaveTextContent("@BotTwo:example.com");
+
+  // 7. 第一次写入失败：留在表单保留已填内容并报错，不进重试队列
+  firstPutDeferred.resolve({ type: "failure", failure: { type: "network" } });
+  expect(await screen.findByRole("alert")).toHaveTextContent("登记 Bot 失败，因为到达不了。");
+  expect(userIdInput).toHaveValue("@BotTwo:example.com");
+  expect(nameInput).toHaveValue("  二号助理  ");
+  expect(submitButton).not.toBeDisabled();
+  expect(rosterSection).not.toHaveTextContent("@BotTwo:example.com");
+
+  // 8. 重试成功
+  await user.click(submitButton);
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("二号助理");
+    expect(rosterSection).toHaveTextContent("@BotTwo:example.com");
+  });
+
+  const putRequests = homeserver.requests.filter(
+    (req) =>
+      req.method === "PUT" &&
+      req.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents"),
+  );
+  expect(putRequests).toHaveLength(2);
+  expect(putRequests[1].body).toEqual({
+    agents: [
+      { user_id: "@bot1:example.com", name: "一号" },
+      { user_id: "@BotTwo:example.com", name: "二号助理" },
+    ],
+  });
+
+  // 9. 重启后持久生效
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  const reloadedRoster = screen.getByRole("region", { name: "Bot 名册" });
+  expect(reloadedRoster).toHaveTextContent("二号助理");
+  expect(reloadedRoster).toHaveTextContent("@BotTwo:example.com");
+});
+
+test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名字并按显示名/localpart回退，且同步更新显示名时自动跟随", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let putAttempt = 0;
+  let storedAgentsContent: unknown = {
+    agents: [
+      { user_id: "@bot1:example.com", name: "初始手写名" },
+      { user_id: "@bot2:example.com" },
+    ],
+  };
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [{ type: "im.waypoint.agents", content: storedAgentsContent }],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题一" } },
+                      { type: "m.room.member", state_key: "@bot1:example.com", origin_server_ts: 1000, content: { membership: "join", displayname: "Bot1矩阵名" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题二" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.member",
+                      event_id: "$mem1",
+                      state_key: "@bot1:example.com",
+                      origin_server_ts: 5000,
+                      content: { membership: "join", displayname: "Bot1同步新显示名" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "database busy" },
+        };
+      }
+      storedAgentsContent = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+
+  const editButtons = screen.getAllByRole("button", { name: "编辑" });
+  expect(editButtons).toHaveLength(2);
+  await user.click(editButtons[0]);
+
+  const userIdField = screen.getByLabelText("Matrix 用户 ID");
+  expect(userIdField).toHaveValue("@bot1:example.com");
+  expect(userIdField).toBeDisabled();
+
+  const nameField = screen.getByLabelText("手写名字（可选）");
+  expect(nameField).toHaveValue("初始手写名");
+
+  // 1. 改名失败时留在编辑表单保留输入、报错，且列表不做乐观更新
+  await user.clear(nameField);
+  await user.type(nameField, "改后名字");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("database busy");
+  expect(screen.getByLabelText("手写名字（可选）")).toHaveValue("改后名字");
+  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(rosterSection).toHaveTextContent("初始手写名");
+
+  // 2. 重试保存成功，列表更新为新手写名
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("改后名字");
+  });
+  expect(rosterSection).not.toHaveTextContent("初始手写名");
+
+  // 3. 再次编辑并清空手写名字 -> 写入移除 name 字段，回退到 Matrix 显示名
+  await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+  await user.clear(screen.getByLabelText("手写名字（可选）"));
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("Bot1矩阵名");
+  });
+  expect(rosterSection).not.toHaveTextContent("改后名字");
+  expect(storedAgentsContent).toEqual({
+    agents: [
+      { user_id: "@bot1:example.com" },
+      { user_id: "@bot2:example.com" },
+    ],
+  });
+
+  // 4. 给原本只有 localpart 的 bot2 设置名字再清空 -> 回退到 localpart
+  await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+  await user.type(screen.getByLabelText("手写名字（可选）"), "临时名字");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("临时名字");
+  });
+
+  await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+  await user.clear(screen.getByLabelText("手写名字（可选）"));
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("bot2");
+  });
+  expect(rosterSection).not.toHaveTextContent("临时名字");
+
+  // 5. 没有手写名时，增量同步带来 Matrix 显示名变更，名册展示自动跟着变
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  const syncedRoster = screen.getByRole("region", { name: "Bot 名册" });
+  expect(syncedRoster).toHaveTextContent("Bot1同步新显示名");
+  expect(syncedRoster).not.toHaveTextContent("Bot1矩阵名");
+});
+
+test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅剩一个时禁止移除，移除后不删 Topic 不退房且标题不显示完整用户 ID", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let putAttempt = 0;
+  let storedAgentsContent: unknown = {
+    agents: [
+      { user_id: "@bot1:example.com", name: "一号手写" },
+      { user_id: "@bot2:example.com", name: "二号手写" },
+      { user_id: "@bot3:example.com", name: "三号手写" },
+    ],
+  };
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [{ type: "im.waypoint.agents", content: storedAgentsContent }],
+          },
+          rooms: {
+            join: {
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "二号的话题" } },
+                    { type: "m.room.member", state_key: "@bot2:example.com", origin_server_ts: 2000, content: { membership: "join", displayname: "二号矩阵显示名" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t3:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot3:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "三号的话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return { type: "failure", failure: { type: "timeout" } };
+      }
+      storedAgentsContent = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+
+  // 有 3 个 Bot 时均可点击移除
+  let removeButtons = screen.getAllByRole("button", { name: "移除" });
+  expect(removeButtons).toHaveLength(3);
+  for (const btn of removeButtons) {
+    expect(btn).not.toBeDisabled();
+  }
+
+  // 点击移除 @bot2：先二次确认，不立即发请求
+  await user.click(removeButtons[1]);
+  const confirmDialog = screen.getByRole("alertdialog", { name: "确认移除 Bot" });
+  expect(confirmDialog).toHaveTextContent("不会删除已有 Topic");
+  expect(confirmDialog).toHaveTextContent("已有交流不受影响");
+  expect(putAttempt).toBe(0);
+
+  // 取消确认不发送请求
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(putAttempt).toBe(0);
+
+  // 再次点移除 @bot2 并确认：第一次超时失败，留在确认框并报错，列表不做乐观更新
+  await user.click(screen.getAllByRole("button", { name: "移除" })[1]);
+  await user.click(screen.getByRole("button", { name: "确认移除" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("移除 Bot 失败，因为超时。");
+  expect(screen.getByRole("alertdialog", { name: "确认移除 Bot" })).toBeInTheDocument();
+  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(rosterSection).toHaveTextContent("@bot2:example.com");
+
+  // 重试确认成功移除 @bot2
+  await user.click(screen.getByRole("button", { name: "确认移除" }));
+  await waitFor(() => {
+    expect(rosterSection).not.toHaveTextContent("@bot2:example.com");
+  });
+
+  // 移除 @bot3，使名册只剩 @bot1（1 个 Bot）
+  await user.click(screen.getAllByRole("button", { name: "移除" })[1]);
+  await user.click(screen.getByRole("button", { name: "确认移除" }));
+  await waitFor(() => {
+    expect(rosterSection).not.toHaveTextContent("@bot3:example.com");
+  });
+
+  // 名册只剩一个 Bot 时，移除按钮禁用
+  removeButtons = screen.getAllByRole("button", { name: "移除" });
+  expect(removeButtons).toHaveLength(1);
+  expect(removeButtons[0]).toBeDisabled();
+
+  // 不调用 leave 或 forget，已有 Topic 仍留在列表
+  expect(homeserver.requests.some((req) => req.url.includes("/leave") || req.url.includes("/forget"))).toBe(false);
+  expect(screen.getByRole("button", { name: /二号的话题/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /三号的话题/ })).toBeInTheDocument();
+
+  // 打开已移除 Bot 的 Topic：按显示名或 localpart 显示，不显示完整用户 ID
+  await user.click(screen.getByRole("button", { name: /二号的话题/ }));
+  const banner2 = screen.getByRole("banner");
+  expect(banner2).toHaveTextContent("二号矩阵显示名");
+  expect(banner2).not.toHaveTextContent("二号手写");
+  expect(banner2).not.toHaveTextContent("@bot2:example.com");
+
+  await user.click(screen.getByRole("button", { name: /三号的话题/ }));
+  const banner3 = screen.getByRole("banner");
+  expect(banner3).toHaveTextContent("bot3");
+  expect(banner3).not.toHaveTextContent("三号手写");
+  expect(banner3).not.toHaveTextContent("@bot3:example.com");
+});
+
+test("新建 Topic 内可直接登记新 Bot：单 Bot 时不显示选择器，失败保留表单输入，成功后自动选中并可用于创建 Topic", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let putAttempt = 0;
+  let storedAgentsContent: unknown = {
+    agents: [{ user_id: "@bot1:example.com", name: "一号" }],
+  };
+  let createdBody: unknown;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [{ type: "im.waypoint.agents", content: storedAgentsContent }],
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "temporary failure" },
+        };
+      }
+      storedAgentsContent = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      createdBody = input.body;
+      return { type: "response", status: 200, body: { room_id: "!newroom:example.com" } };
+    }
+    if (input.method === "GET" && input.url.includes("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+
+  await user.type(screen.getByLabelText("Topic 名字"), "跨项目协作");
+  await user.type(screen.getByLabelText(/Description/), "需要二号 Bot 协助");
+
+  // 点击新建 Topic 表单内的快捷登记入口
+  await user.click(screen.getByRole("button", { name: "登记新 Bot" }));
+  const quickRegion = screen.getByRole("region", { name: "登记新 Bot" });
+  expect(quickRegion).toBeInTheDocument();
+
+  // Topic 名字和 Description 仍留在表单里
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("跨项目协作");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("需要二号 Bot 协助");
+
+  // 重复校验
+  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot1:example.com");
+  await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("已经在名册里");
+  expect(putAttempt).toBe(0);
+
+  // 填写新 Bot，第一次 PUT 失败保留输入并报错
+  await user.clear(screen.getByLabelText("Matrix 用户 ID"));
+  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot2:example.com");
+  await user.type(screen.getByLabelText("手写名字（可选）"), "协作二号");
+  await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("temporary failure");
+  expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@bot2:example.com");
+  expect(screen.getByLabelText("手写名字（可选）")).toHaveValue("协作二号");
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+
+  // 重试登记成功：显示绑定 Bot 下拉框并自动选中刚登记的 @bot2:example.com
+  await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+  const select = (await screen.findByLabelText("绑定 Bot")) as HTMLSelectElement;
+  expect(select.value).toBe("@bot2:example.com");
+  expect(screen.queryByRole("region", { name: "登记新 Bot" })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("跨项目协作");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("需要二号 Bot 协助");
+
+  // 提交创建 Topic，确认绑定的是新登记的 @bot2:example.com
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  await waitFor(() => {
+    expect(screen.getByRole("banner")).toHaveTextContent("跨项目协作");
+  });
+  expect(screen.getByRole("banner")).toHaveTextContent("协作二号");
+  expect(createdBody).toMatchObject({
+    name: "跨项目协作",
+    topic: "需要二号 Bot 协助",
+    invite: ["@bot2:example.com"],
+    initial_state: expect.arrayContaining([
+      {
+        type: "im.waypoint.topic",
+        state_key: "",
+        content: { v: 1, agent_user_id: "@bot2:example.com" },
+      },
+    ]),
+  });
+});
+
+test("名册写入失败不进重试队列；两台设备同时改名册时直接 PUT 以最后写入为准", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let putAttempt = 0;
+  let serverAgents: unknown = {
+    agents: [{ user_id: "@bot1:example.com" }],
+  };
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: {
+            events: [{ type: "im.waypoint.agents", content: serverAgents }],
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      serverAgents = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock, unmount } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "登记新 Bot" }));
+
+  // 第一次提交失败后推进时钟，不会自动重试 PUT
+  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot3:example.com");
+  await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("到达不了");
+  expect(putAttempt).toBe(1);
+
+  act(() => {
+    clock.advance(60000);
+  });
+  expect(putAttempt).toBe(1);
+
+  // 模拟另一台设备在服务端先写入了 @bot2:example.com
+  serverAgents = {
+    agents: [{ user_id: "@bot1:example.com" }, { user_id: "@bot2:example.com", name: "设备A" }],
+  };
+
+  // 本机再点提交：不先 GET，直接 PUT，后写入的本机结果覆盖为准
+  const requestsBeforeRetry = homeserver.requests.length;
+  await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  await waitFor(() => {
+    expect(rosterSection).toHaveTextContent("@bot3:example.com");
+  });
+
+  const retryRequests = homeserver.requests.slice(requestsBeforeRetry);
+  expect(retryRequests.some((req) => req.method === "GET" && req.url.includes("account_data"))).toBe(false);
+  expect(serverAgents).toEqual({
+    agents: [{ user_id: "@bot1:example.com" }, { user_id: "@bot3:example.com" }],
+  });
+
+  // 重启同步以服务端后写入的结果为准
+  unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  const syncedRoster = screen.getByRole("region", { name: "Bot 名册" });
+  expect(syncedRoster).toHaveTextContent("@bot3:example.com");
+  expect(syncedRoster).not.toHaveTextContent("@bot2:example.com");
 });
