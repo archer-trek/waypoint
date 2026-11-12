@@ -27,8 +27,12 @@ export function sentence(reason: string, serverError?: string): string {
   return `${reason}。`;
 }
 
-function actionFailedPrefix(action: string): string {
+export function actionFailedPrefix(action: string): string {
   return /[A-Za-z0-9]$/.test(action) ? `${action} 失败` : `${action}失败`;
+}
+
+export function disconnectedMessage(action: string): string {
+  return `${actionFailedPrefix(action)}，因为尚未连接。`;
 }
 
 function becauseReason(reason: string): string {

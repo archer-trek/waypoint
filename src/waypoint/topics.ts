@@ -1,6 +1,11 @@
 import type { TransportResult } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
-import { formatMatrixActionFailure, isRecord, transportFailureMessage } from "./matrix-errors";
+import {
+  disconnectedMessage,
+  formatMatrixActionFailure,
+  isRecord,
+  transportFailureMessage,
+} from "./matrix-errors";
 import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
@@ -110,82 +115,94 @@ export function validateAgentUserId(
   return { ok: true, userId: trimmed };
 }
 
+function updateAgentsAccountData(
+  existingContent: unknown,
+  transform: (prevAgents: unknown[]) => unknown[],
+): Record<string, unknown> {
+  const base = isRecord(existingContent) ? { ...existingContent } : {};
+  const prevAgents = Array.isArray(base.agents) ? base.agents : [];
+  return {
+    ...base,
+    agents: transform(prevAgents),
+  };
+}
+
+function makeAgentEntry(
+  agentUserId: string,
+  handwrittenName?: string,
+  existing?: Record<string, unknown>,
+): Record<string, unknown> {
+  const trimmedName = handwrittenName?.trim();
+  const entry: Record<string, unknown> = existing
+    ? { ...existing }
+    : { user_id: agentUserId };
+  if (trimmedName) {
+    entry.name = trimmedName;
+  } else {
+    delete entry.name;
+  }
+  return entry;
+}
+
 export function buildAddAgentContent(
   existingContent: unknown,
   agentUserId: string,
   handwrittenName?: string,
 ): Record<string, unknown> {
-  const base = isRecord(existingContent) ? { ...existingContent } : {};
-  const prevAgents = Array.isArray(base.agents) ? [...base.agents] : [];
-  const trimmedName = handwrittenName?.trim();
-  const entry: Record<string, unknown> = trimmedName
-    ? { user_id: agentUserId, name: trimmedName }
-    : { user_id: agentUserId };
-  return {
-    ...base,
-    agents: [...prevAgents, entry],
-  };
+  return updateAgentsAccountData(existingContent, (prevAgents) => [
+    ...prevAgents,
+    makeAgentEntry(agentUserId, handwrittenName),
+  ]);
 }
-
 
 export function buildRenameAgentContent(
   existingContent: unknown,
   agentUserId: string,
   handwrittenName?: string,
 ): Record<string, unknown> {
-  const base = isRecord(existingContent) ? { ...existingContent } : {};
-  const prevAgents = Array.isArray(base.agents) ? base.agents : [];
-  const trimmedName = handwrittenName?.trim();
-  const nextAgents = prevAgents.map((item) => {
-    if (!isRecord(item) || item.user_id !== agentUserId) {
-      return item;
+  return updateAgentsAccountData(existingContent, (prevAgents) => {
+    let found = false;
+    const nextAgents = prevAgents.map((item) => {
+      if (!isRecord(item) || item.user_id !== agentUserId) {
+        return item;
+      }
+      found = true;
+      return makeAgentEntry(agentUserId, handwrittenName, item);
+    });
+    if (!found) {
+      nextAgents.push(makeAgentEntry(agentUserId, handwrittenName));
     }
-    const updated: Record<string, unknown> = { ...item };
-    if (trimmedName) {
-      updated.name = trimmedName;
-    } else {
-      delete updated.name;
-    }
-    return updated;
+    return nextAgents;
   });
-  return {
-    ...base,
-    agents: nextAgents,
-  };
 }
-
 
 export function buildRemoveAgentContent(
   existingContent: unknown,
   agentUserId: string,
 ): Record<string, unknown> {
-  const base = isRecord(existingContent) ? { ...existingContent } : {};
-  const prevAgents = Array.isArray(base.agents) ? base.agents : [];
-  const nextAgents = prevAgents.filter(
-    (item) => !(isRecord(item) && item.user_id === agentUserId),
+  return updateAgentsAccountData(existingContent, (prevAgents) =>
+    prevAgents.filter((item) => !(isRecord(item) && item.user_id === agentUserId)),
   );
-  return {
-    ...base,
-    agents: nextAgents,
-  };
 }
 
-export type RosterWriteResult = { ok: true } | { ok: false; message: string };
+export type AgentsWriteResult = { ok: true } | { ok: false; message: string };
 
-export async function saveAgentsRoster(
+export async function saveRegisteredAgents(
   client: MatrixClient,
   action: string,
   nextContent: Record<string, unknown>,
-): Promise<RosterWriteResult> {
-  const prefix = /[A-Za-z0-9]$/.test(action) ? `${action} 失败` : `${action}失败`;
+): Promise<AgentsWriteResult> {
   if (!client.hasToken || !client.ownerId) {
-    return { ok: false, message: `${prefix}，因为尚未连接。` };
+    return { ok: false, message: disconnectedMessage(action) };
   }
   let result: TransportResult;
   try {
     result = await client.putAccountData("im.waypoint.agents", nextContent);
   } catch {
-    return { ok: false, message: `${prefix}，因为到达不了。` };
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(action, { type: "failure", failure: { type: "network" } }),
+    };
   }
   if (result.type === "response" && result.status >= 200 && result.status < 300) {
     await client.retainAccountData("im.waypoint.agents", nextContent);
@@ -234,23 +251,21 @@ export function resolveBotName(
     return registeredAgent.handwrittenName;
   }
   const rooms = Array.isArray(roomScope) ? roomScope : roomScope ? [roomScope] : [];
-  let bestDisplayName: string | undefined;
-  let bestTs: number | undefined;
+  let best: { displayname: string; ts?: number } | undefined;
   for (const room of rooms) {
     const found = findMemberDisplayNameEvent(room.stateEvents, agentUserId);
     if (!found) {
       continue;
     }
-    if (bestDisplayName === undefined) {
-      bestDisplayName = found.displayname;
-      bestTs = found.ts;
-    } else if (found.ts !== undefined && (bestTs === undefined || found.ts > bestTs)) {
-      bestDisplayName = found.displayname;
-      bestTs = found.ts;
+    if (
+      best === undefined ||
+      (found.ts !== undefined && (best.ts === undefined || found.ts > best.ts))
+    ) {
+      best = found;
     }
   }
-  if (bestDisplayName) {
-    return bestDisplayName;
+  if (best?.displayname) {
+    return best.displayname;
   }
   return localpartOf(agentUserId);
 }
@@ -262,10 +277,16 @@ function findMemberDisplayNameEvent(
   for (let i = stateEvents.length - 1; i >= 0; i -= 1) {
     const event = stateEvents[i];
     if (event.type === "m.room.member" && event.state_key === userId && isRecord(event.content)) {
-      const displayname = event.content.displayname;
-      if (typeof displayname === "string" && displayname.trim() !== "") {
+      const rawDisplayName = event.content.displayname;
+      if (typeof rawDisplayName === "string") {
         return {
-          displayname: displayname.trim(),
+          displayname: rawDisplayName.trim(),
+          ts: validTimestamp(event.origin_server_ts),
+        };
+      }
+      if ("displayname" in event.content || event.content.membership === "join") {
+        return {
+          displayname: "",
           ts: validTimestamp(event.origin_server_ts),
         };
       }
@@ -281,6 +302,7 @@ export function deriveTopics(
   ownerUserId: string,
 ): TopicSummary[] {
   const topics: TopicSummary[] = [];
+  const allRooms = Object.values(rooms);
 
   for (const [roomId, room] of Object.entries(rooms)) {
     let hasTopicMarker = false;
@@ -342,7 +364,10 @@ export function deriveTopics(
     const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
     const agentUserId = marker.valid ? marker.agentUserId : undefined;
     const botDisplayName = agentUserId
-      ? resolveBotName(agentUserId, registeredAgents, room)
+      ? resolveBotName(agentUserId, registeredAgents, [
+          room,
+          ...allRooms.filter((candidate) => candidate !== room),
+        ])
       : undefined;
     const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
 
@@ -499,7 +524,7 @@ export async function createTopicRoom(
     },
   ];
 
-  await client.rememberCreatedRoom(roomId, initialStateEvents);
+  await client.rememberRoomStateEvents(roomId, initialStateEvents);
   return { ok: true, roomId };
 }
 

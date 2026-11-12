@@ -4545,19 +4545,19 @@ test("进入 Topic 列表后可在设置里查看 Bot 名册（展示名字优�
 
   const settingsRegion = screen.getByRole("region", { name: "设置" });
   expect(settingsRegion).toBeInTheDocument();
-  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
-  expect(rosterSection).toBeInTheDocument();
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(agentsSection).toBeInTheDocument();
 
   // 展示手写名 -> 显示名 -> localpart，以及各自的 Matrix 用户 ID
-  expect(rosterSection).toHaveTextContent("手写大管家");
-  expect(rosterSection).toHaveTextContent("@bot1:example.com");
-  expect(rosterSection).not.toHaveTextContent("不应覆盖手写名");
+  expect(agentsSection).toHaveTextContent("手写大管家");
+  expect(agentsSection).toHaveTextContent("@bot1:example.com");
+  expect(agentsSection).not.toHaveTextContent("不应覆盖手写名");
 
-  expect(rosterSection).toHaveTextContent("矩阵显示名");
-  expect(rosterSection).toHaveTextContent("@bot2:example.com");
+  expect(agentsSection).toHaveTextContent("矩阵显示名");
+  expect(agentsSection).toHaveTextContent("@bot2:example.com");
 
-  expect(rosterSection).toHaveTextContent("bot3");
-  expect(rosterSection).toHaveTextContent("@bot3:example.com");
+  expect(agentsSection).toHaveTextContent("bot3");
+  expect(agentsSection).toHaveTextContent("@bot3:example.com");
 
   // 宽视口不显示返回按钮，左侧栏仍可见
   expect(screen.queryByRole("button", { name: "返回" })).not.toBeInTheDocument();
@@ -4680,8 +4680,8 @@ test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁
 
   expect(putAttempt).toBe(1);
   expect(submitButton).toBeDisabled();
-  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
-  expect(rosterSection).not.toHaveTextContent("@BotTwo:example.com");
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(agentsSection).not.toHaveTextContent("@BotTwo:example.com");
 
   // 7. 第一次写入失败：留在表单保留已填内容并报错，不进重试队列
   firstPutDeferred.resolve({ type: "failure", failure: { type: "network" } });
@@ -4689,13 +4689,13 @@ test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁
   expect(userIdInput).toHaveValue("@BotTwo:example.com");
   expect(nameInput).toHaveValue("  二号助理  ");
   expect(submitButton).not.toBeDisabled();
-  expect(rosterSection).not.toHaveTextContent("@BotTwo:example.com");
+  expect(agentsSection).not.toHaveTextContent("@BotTwo:example.com");
 
   // 8. 重试成功
   await user.click(submitButton);
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("二号助理");
-    expect(rosterSection).toHaveTextContent("@BotTwo:example.com");
+    expect(agentsSection).toHaveTextContent("二号助理");
+    expect(agentsSection).toHaveTextContent("@BotTwo:example.com");
   });
 
   const putRequests = homeserver.requests.filter(
@@ -4715,9 +4715,9 @@ test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁
   first.unmount();
   renderApp(homeserver);
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  const reloadedRoster = screen.getByRole("region", { name: "Bot 名册" });
-  expect(reloadedRoster).toHaveTextContent("二号助理");
-  expect(reloadedRoster).toHaveTextContent("@BotTwo:example.com");
+  const reloadedAgents = screen.getByRole("region", { name: "Bot 名册" });
+  expect(reloadedAgents).toHaveTextContent("二号助理");
+  expect(reloadedAgents).toHaveTextContent("@BotTwo:example.com");
 });
 
 test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名字并按显示名/localpart回退，且同步更新显示名时自动跟随", async () => {
@@ -4837,15 +4837,15 @@ test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名�
 
   expect(await screen.findByRole("alert")).toHaveTextContent("database busy");
   expect(screen.getByLabelText("手写名字（可选）")).toHaveValue("改后名字");
-  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
-  expect(rosterSection).toHaveTextContent("初始手写名");
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(agentsSection).toHaveTextContent("初始手写名");
 
   // 2. 重试保存成功，列表更新为新手写名
   await user.click(screen.getByRole("button", { name: "保存" }));
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("改后名字");
+    expect(agentsSection).toHaveTextContent("改后名字");
   });
-  expect(rosterSection).not.toHaveTextContent("初始手写名");
+  expect(agentsSection).not.toHaveTextContent("初始手写名");
 
   // 3. 再次编辑并清空手写名字 -> 写入移除 name 字段，回退到 Matrix 显示名
   await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
@@ -4853,9 +4853,9 @@ test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名�
   await user.click(screen.getByRole("button", { name: "保存" }));
 
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("Bot1矩阵名");
+    expect(agentsSection).toHaveTextContent("Bot1矩阵名");
   });
-  expect(rosterSection).not.toHaveTextContent("改后名字");
+  expect(agentsSection).not.toHaveTextContent("改后名字");
   expect(storedAgentsContent).toEqual({
     agents: [
       { user_id: "@bot1:example.com" },
@@ -4868,24 +4868,24 @@ test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名�
   await user.type(screen.getByLabelText("手写名字（可选）"), "临时名字");
   await user.click(screen.getByRole("button", { name: "保存" }));
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("临时名字");
+    expect(agentsSection).toHaveTextContent("临时名字");
   });
 
   await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
   await user.clear(screen.getByLabelText("手写名字（可选）"));
   await user.click(screen.getByRole("button", { name: "保存" }));
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("bot2");
+    expect(agentsSection).toHaveTextContent("bot2");
   });
-  expect(rosterSection).not.toHaveTextContent("临时名字");
+  expect(agentsSection).not.toHaveTextContent("临时名字");
 
   // 5. 没有手写名时，增量同步带来 Matrix 显示名变更，名册展示自动跟着变
   first.unmount();
   renderApp(homeserver);
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  const syncedRoster = screen.getByRole("region", { name: "Bot 名册" });
-  expect(syncedRoster).toHaveTextContent("Bot1同步新显示名");
-  expect(syncedRoster).not.toHaveTextContent("Bot1矩阵名");
+  const syncedAgents = screen.getByRole("region", { name: "Bot 名册" });
+  expect(syncedAgents).toHaveTextContent("Bot1同步新显示名");
+  expect(syncedAgents).not.toHaveTextContent("Bot1矩阵名");
 });
 
 test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅剩一个时禁止移除，移除后不删 Topic 不退房且标题不显示完整用户 ID", async () => {
@@ -4980,20 +4980,20 @@ test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅�
   await user.click(screen.getByRole("button", { name: "确认移除" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("移除 Bot 失败，因为超时。");
   expect(screen.getByRole("alertdialog", { name: "确认移除 Bot" })).toBeInTheDocument();
-  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
-  expect(rosterSection).toHaveTextContent("@bot2:example.com");
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(agentsSection).toHaveTextContent("@bot2:example.com");
 
   // 重试确认成功移除 @bot2
   await user.click(screen.getByRole("button", { name: "确认移除" }));
   await waitFor(() => {
-    expect(rosterSection).not.toHaveTextContent("@bot2:example.com");
+    expect(agentsSection).not.toHaveTextContent("@bot2:example.com");
   });
 
   // 移除 @bot3，使名册只剩 @bot1（1 个 Bot）
   await user.click(screen.getAllByRole("button", { name: "移除" })[1]);
   await user.click(screen.getByRole("button", { name: "确认移除" }));
   await waitFor(() => {
-    expect(rosterSection).not.toHaveTextContent("@bot3:example.com");
+    expect(agentsSection).not.toHaveTextContent("@bot3:example.com");
   });
 
   // 名册只剩一个 Bot 时，移除按钮禁用
@@ -5197,9 +5197,9 @@ test("名册写入失败不进重试队列；两台设备同时改名册时直�
   // 本机再点提交：不先 GET，直接 PUT，后写入的本机结果覆盖为准
   const requestsBeforeRetry = homeserver.requests.length;
   await user.click(screen.getByRole("button", { name: "登记 Bot" }));
-  const rosterSection = screen.getByRole("region", { name: "Bot 名册" });
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
   await waitFor(() => {
-    expect(rosterSection).toHaveTextContent("@bot3:example.com");
+    expect(agentsSection).toHaveTextContent("@bot3:example.com");
   });
 
   const retryRequests = homeserver.requests.slice(requestsBeforeRetry);
@@ -5212,9 +5212,9 @@ test("名册写入失败不进重试队列；两台设备同时改名册时直�
   unmount();
   renderApp(homeserver);
   await user.click(await screen.findByRole("button", { name: "设置" }));
-  const syncedRoster = screen.getByRole("region", { name: "Bot 名册" });
-  expect(syncedRoster).toHaveTextContent("@bot3:example.com");
-  expect(syncedRoster).not.toHaveTextContent("@bot2:example.com");
+  const syncedAgents = screen.getByRole("region", { name: "Bot 名册" });
+  expect(syncedAgents).toHaveTextContent("@bot3:example.com");
+  expect(syncedAgents).not.toHaveTextContent("@bot2:example.com");
 });
 
 test("在 Topic 固定顶栏可编辑名字和 Description：提交期间锁定且不做乐观更新，确认后写入房间状态并持久化（不写 account data、列表不显示 Description）", async () => {
@@ -5289,10 +5289,12 @@ test("在 Topic 固定顶栏可编辑名字和 Description：提交期间锁定�
   const saveButton = screen.getByRole("button", { name: "保存" });
   await user.click(saveButton);
 
-  // 提交期间锁定提交按钮，确认前不做乐观更新
+  // 提交期间锁定输入与提交按钮，确认前不做乐观更新
   await waitFor(() => {
     expect(saveButton).toBeDisabled();
   });
+  expect(nameField).toBeDisabled();
+  expect(descField).toBeDisabled();
   await user.click(saveButton);
 
   const namePuts = homeserver.requests.filter(
@@ -5584,6 +5586,7 @@ test("同时修改名字和 Description 且只有一项成功时，成功的立�
   expect(alertA).toHaveTextContent("Description");
   expect(alertA).toHaveTextContent("Topic write failed");
   expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+  expect(screen.queryByLabelText("Topic 名字")).not.toBeInTheDocument();
   expect(screen.getByLabelText(/Description/)).toHaveValue("未成新说明");
   // 成功项立即在列表与顶栏生效
   expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("已成新名");
@@ -5616,6 +5619,7 @@ test("同时修改名字和 Description 且只有一项成功时，成功的立�
   const alertB = await screen.findByRole("alert");
   expect(alertB).toHaveTextContent("Topic 名字");
   expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+  expect(screen.queryByLabelText(/Description/)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("未成新名二");
   // 清空 Description 已立即生效，名字仍保持上一步的已成新名
   expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
@@ -6504,4 +6508,219 @@ test("未确认的消息不撑开新的一天也不重排 Topic 列表，收到�
   const separators = timeline.querySelectorAll('[role="separator"]');
   expect(separators).toHaveLength(1);
   expect(separators[0]).toHaveTextContent("今天");
+});
+
+test("新建尚未加入的 Topic 顶栏可从其他房间解析 Bot 的 Matrix 显示名，并在更新的 m.room.member 清空显示名后回退到 localpart", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let shouldClearDisplayName = false;
+  let sentClearDisplayName = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [
+                      { user_id: "@bot1:example.com", name: "一号" },
+                      { user_id: "@bot2:example.com" },
+                    ],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t-old:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "旧话题" } },
+                      {
+                        type: "m.room.member",
+                        state_key: "@bot2:example.com",
+                        origin_server_ts: 1000,
+                        content: { membership: "join", displayname: "二号矩阵显示名" },
+                      },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (shouldClearDisplayName && !sentClearDisplayName) {
+        sentClearDisplayName = true;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: `batch-${syncCalls}`,
+            rooms: {
+              join: {
+                "!t-old:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.member",
+                        event_id: "$clear-name",
+                        state_key: "@bot2:example.com",
+                        origin_server_ts: 8000,
+                        content: { membership: "join", displayname: "" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: `batch-${syncCalls}` },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return { type: "response", status: 200, body: { room_id: "!t-new:example.com" } };
+    }
+    if (input.method === "GET" && input.url.includes("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await screen.findByRole("button", { name: /旧话题/ });
+
+  // 让新建房间的时间戳大于旧房间的 1000，确保 invite 不会覆盖已知 displayname
+  act(() => {
+    clock.advance(5000);
+  });
+
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "新主题");
+  await user.selectOptions(screen.getByLabelText("绑定 Bot"), "@bot2:example.com");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  await waitFor(() => {
+    expect(screen.getByRole("banner")).toHaveTextContent("新主题");
+  });
+  expect(screen.getByRole("banner")).toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("button", { name: /新主题/ })).toHaveTextContent("二号矩阵显示名");
+
+  // 同步带来更新时间戳的 m.room.member 清空 displayname：覆盖旧房间显示名，回退为 localpart
+  shouldClearDisplayName = true;
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("banner")).toHaveTextContent("bot2");
+  });
+  expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("button", { name: /新主题/ })).toHaveTextContent("bot2");
+
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  expect(agentsSection).toHaveTextContent("bot2");
+  expect(agentsSection).not.toHaveTextContent("二号矩阵显示名");
+});
+
+test("跨设备同时编辑与移除 Bot 时，另一设备同步移除后重试保存仍写回被编辑的 Bot（最后写入为准）", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let putAttempt = 0;
+  let serverAgents: unknown = {
+    agents: [
+      { user_id: "@bot1:example.com", name: "一号" },
+      { user_id: "@bot2:example.com", name: "二号旧名" },
+    ],
+  };
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: {
+            events: [{ type: "im.waypoint.agents", content: serverAgents }],
+          },
+        },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      putAttempt += 1;
+      if (putAttempt === 1) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      serverAgents = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+
+  // 编辑 @bot2:example.com，首次保存失败
+  await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+  const nameField = screen.getByLabelText("手写名字（可选）");
+  await user.clear(nameField);
+  await user.type(nameField, "二号新名");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("到达不了");
+
+  // 另一台设备在此期间移除了 @bot2:example.com，且本机同步到了该变更
+  serverAgents = {
+    agents: [{ user_id: "@bot1:example.com", name: "一号" }],
+  };
+  await act(async () => {
+    clock.advance(1000);
+  });
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  await waitFor(() => {
+    expect(agentsSection).not.toHaveTextContent("@bot2:example.com");
+  });
+
+  // 本机重试保存编辑结果：仍 upsert 写回 @bot2:example.com 及其新名字
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => {
+    expect(agentsSection).toHaveTextContent("二号新名");
+  });
+  expect(agentsSection).toHaveTextContent("@bot2:example.com");
+  expect(serverAgents).toEqual({
+    agents: [
+      { user_id: "@bot1:example.com", name: "一号" },
+      { user_id: "@bot2:example.com", name: "二号新名" },
+    ],
+  });
 });

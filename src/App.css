@@ -261,14 +261,14 @@ p[role="alert"] {
 
 .waypoint-sidebar-actions button,
 .waypoint-settings-header button,
-.waypoint-roster-header button,
+.waypoint-agents-header button,
 .waypoint-bot-actions button,
 .waypoint-form-actions button {
   margin-top: 0;
 }
 
 .waypoint-settings-header,
-.waypoint-roster-header {
+.waypoint-agents-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -318,7 +318,7 @@ p[role="alert"] {
   flex-shrink: 0;
 }
 
-.waypoint-roster-form,
+.waypoint-agents-form,
 .waypoint-inline-register {
   margin-top: 1rem;
   padding: 0.75rem 1rem;

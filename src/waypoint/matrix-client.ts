@@ -369,13 +369,6 @@ export class MatrixClient {
     });
   }
 
-  async rememberCreatedRoom(
-    roomId: string,
-    initialStateEvents: RawMatrixEvent[],
-  ): Promise<void> {
-    await this.rememberRoomStateEvents(roomId, initialStateEvents);
-  }
-
   async rememberRoomStateEvents(
     roomId: string,
     stateEvents: RawMatrixEvent[],
