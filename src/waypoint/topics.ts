@@ -25,6 +25,8 @@ export type TopicSummary = {
   firstUnreadEventId?: string;
   readPositionUnknown: boolean;
   sendStatus?: "unconfirmed" | "failed";
+  unavailable: boolean;
+  unavailableReason?: string;
 };
 
 export type CreateTopicResult =
@@ -434,8 +436,8 @@ export function deriveTopics(
         ? "unconfirmed"
         : undefined;
 
-    const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
-    const agentUserId = marker.valid ? marker.agentUserId : undefined;
+    const availability = deriveTopicAvailability(topicMarkerContent, room, ownerUserId);
+    const agentUserId = availability.agentUserId;
     const botDisplayName = agentUserId
       ? resolveBotName(agentUserId, registeredAgents, [
           room,
@@ -458,6 +460,8 @@ export function deriveTopics(
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
       ...(sendStatus ? { sendStatus } : {}),
+      unavailable: availability.unavailable,
+      ...(availability.reason ? { unavailableReason: availability.reason } : {}),
     });
   }
 
@@ -558,6 +562,31 @@ export async function createTopicRoom(
     return { ok: false, message: createTopicFailureMessage(encryptionResult) };
   }
 
+  const createAgentMember = extractAgentMemberFromCreateResponse(
+    createResult.body,
+    input.agentUserId,
+  );
+  const inviteFailed = hasExplicitInviteFailureInCreateResponse(
+    createResult.body,
+    input.agentUserId,
+  );
+  const agentMemberEvent: RawMatrixEvent = createAgentMember
+    ? {
+        ...createAgentMember,
+        type: "m.room.member",
+        state_key: input.agentUserId,
+        origin_server_ts:
+          typeof createAgentMember.origin_server_ts === "number"
+            ? createAgentMember.origin_server_ts
+            : input.now,
+      }
+    : {
+        type: "m.room.member",
+        state_key: input.agentUserId,
+        origin_server_ts: input.now,
+        content: { membership: inviteFailed ? "leave" : "invite" },
+      };
+
   const initialStateEvents: RawMatrixEvent[] = [
     {
       type: "m.room.create",
@@ -599,15 +628,14 @@ export async function createTopicRoom(
       origin_server_ts: input.now,
       content: { membership: "join" },
     },
-    {
-      type: "m.room.member",
-      state_key: input.agentUserId,
-      origin_server_ts: input.now,
-      content: { membership: "invite" },
-    },
+    agentMemberEvent,
   ];
 
-  await client.rememberRoomStateEvents(roomId, initialStateEvents);
+  await client.rememberRoomStateEvents(
+    roomId,
+    initialStateEvents,
+    inviteFailed ? { inviteFailed: true } : undefined,
+  );
   return { ok: true, roomId };
 }
 
@@ -712,6 +740,50 @@ async function bestEffortLeaveAndForget(client: MatrixClient, roomId: string): P
   }
 }
 
+function extractAgentMemberFromCreateResponse(
+  body: Record<string, unknown>,
+  agentUserId: string,
+): RawMatrixEvent | undefined {
+  for (const key of ["state", "initial_state"]) {
+    const value = body[key];
+    if (Array.isArray(value)) {
+      const found = value.find(
+        (ev) => isRecord(ev) && ev.type === "m.room.member" && ev.state_key === agentUserId,
+      );
+      if (isRecord(found)) {
+        return found;
+      }
+    }
+  }
+  return undefined;
+}
+
+function hasExplicitInviteFailureInCreateResponse(
+  body: Record<string, unknown>,
+  agentUserId: string,
+): boolean {
+  if (body.invite_failed === true) {
+    return true;
+  }
+  if (typeof body.invite_error === "string" && body.invite_error.trim() !== "") {
+    return true;
+  }
+  if (Array.isArray(body.failed_invites) && body.failed_invites.includes(agentUserId)) {
+    return true;
+  }
+  if (isRecord(body.invite_failures) && agentUserId in body.invite_failures) {
+    return true;
+  }
+  const member = extractAgentMemberFromCreateResponse(body, agentUserId);
+  if (member && isRecord(member.content)) {
+    const membership = member.content.membership;
+    if (membership === "leave" || membership === "ban") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function hasEncryptionInCreateResponse(body: Record<string, unknown>): boolean {
   if (body.encrypted === true || "m.room.encryption" in body) {
     return true;
@@ -752,21 +824,117 @@ function validTimestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function parseTopicMarker(
+export function parseTopicMarker(
   content: unknown,
   ownerUserId: string,
-): { valid: true; agentUserId: string } | { valid: false } {
-  if (!isRecord(content)) {
-    return { valid: false };
-  }
-  if (content.v !== 1) {
-    return { valid: false };
+):
+  | { valid: true; agentUserId: string }
+  | { valid: false; reason: "unsupported-version" | "invalid-agent-id" } {
+  if (!isRecord(content) || content.v !== 1) {
+    return { valid: false, reason: "unsupported-version" };
   }
   const agentUserId = content.agent_user_id;
   if (typeof agentUserId !== "string" || !isValidAgentUserId(agentUserId, ownerUserId)) {
-    return { valid: false };
+    return { valid: false, reason: "invalid-agent-id" };
   }
   return { valid: true, agentUserId };
+}
+
+export function deriveRoomAvailability(
+  room: StoredRoomEvents | undefined,
+  ownerUserId: string,
+): { unavailable: boolean; reason?: string; agentUserId?: string } {
+  if (!room) {
+    return { unavailable: false };
+  }
+  let hasTopicMarker = false;
+  let topicMarkerContent: unknown;
+  for (const event of room.stateEvents) {
+    if (event.type === "im.waypoint.topic" && event.state_key === "") {
+      hasTopicMarker = true;
+      topicMarkerContent = event.content;
+    }
+  }
+  if (!hasTopicMarker) {
+    return { unavailable: false };
+  }
+  return deriveTopicAvailability(topicMarkerContent, room, ownerUserId);
+}
+
+function deriveTopicAvailability(
+  topicMarkerContent: unknown,
+  room: StoredRoomEvents,
+  ownerUserId: string,
+): { unavailable: boolean; reason?: string; agentUserId?: string } {
+  const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
+  if (!marker.valid) {
+    return {
+      unavailable: true,
+      reason:
+        marker.reason === "unsupported-version"
+          ? "因 Topic 标记版本不是 1，无法发送新消息。"
+          : "因绑定的 Bot 用户 ID 不合法，无法发送新消息。",
+    };
+  }
+  const agentUserId = marker.agentUserId;
+  if (
+    room.encryptedIrreversible ||
+    room.stateEvents.some((ev) => ev.type === "m.room.encryption")
+  ) {
+    return {
+      unavailable: true,
+      reason: "因房间在创建后被加密，无法发送新消息。",
+      agentUserId,
+    };
+  }
+
+  let agentMembership: string | undefined;
+  let hasExtraPerson = false;
+  for (const event of room.stateEvents) {
+    if (
+      event.type !== "m.room.member" ||
+      typeof event.state_key !== "string" ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    const membership = event.content.membership;
+    if (event.state_key === agentUserId) {
+      agentMembership = typeof membership === "string" ? membership : undefined;
+    } else if (
+      event.state_key !== ownerUserId &&
+      (membership === "join" || membership === "invite")
+    ) {
+      hasExtraPerson = true;
+    }
+  }
+
+  if (hasExtraPerson) {
+    return {
+      unavailable: true,
+      reason: "因房间多于两人，无法发送新消息。",
+      agentUserId,
+    };
+  }
+  if (agentMembership === "ban") {
+    return {
+      unavailable: true,
+      reason: "因绑定的 Bot 已被 ban，无法发送新消息。",
+      agentUserId,
+    };
+  }
+  if (
+    room.inviteFailed ||
+    (agentMembership !== undefined && agentMembership !== "join" && agentMembership !== "invite")
+  ) {
+    return {
+      unavailable: true,
+      reason: "因邀请绑定的 Bot 失败，无法发送新消息。",
+      agentUserId,
+    };
+  }
+
+  return { unavailable: false, agentUserId };
 }
 
 export function resolvePreselectedBotId(

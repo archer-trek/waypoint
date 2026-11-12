@@ -15208,3 +15208,927 @@ test("补页里的编辑、撤回及已读位置本身被撤回都能正确处�
     expect(timeline.scrollTop).toBe(100);
   });
 });
+
+test("标记版本不是 1 或绑定 Agent 用户 ID 不合法时 Topic 不可用，保留名字、不编名字也不显示用户 ID 或未知，只显示 Owner 消息且恢复后可用", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!bad-ver:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 2, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "高版本话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$bv-1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 3100,
+                        content: { msgtype: "m.text", body: "Owner 说过的话" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$bv-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3200,
+                        content: { msgtype: "m.text", body: "旧版绑定不应展示的 Bot 消息" },
+                      },
+                    ],
+                  },
+                },
+                "!bad-agent-foreign:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@stranger:other.example" } },
+                      { type: "m.room.name", state_key: "", content: { name: "跨服绑定话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$bf-1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2100,
+                        content: { msgtype: "m.text", body: "跨服话题里 Owner 的消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$bf-2",
+                        sender: "@stranger:other.example",
+                        origin_server_ts: 2200,
+                        content: { msgtype: "m.text", body: "跨服发送者不应展示" },
+                      },
+                    ],
+                  },
+                },
+                "!bad-agent-self:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@alice:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "绑定自己话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncRound}`,
+          rooms: {
+            join: {
+              "!bad-ver:example.com": {
+                state: {
+                  events: [
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const badVerRow = await screen.findByRole("button", { name: "高版本话题" });
+  expect(badVerRow).toHaveAttribute("data-unavailable", "true");
+  expect(within(badVerRow).getByText("不可用")).toBeInTheDocument();
+
+  const foreignRow = screen.getByRole("button", { name: "跨服绑定话题" });
+  expect(foreignRow).toHaveAttribute("data-unavailable", "true");
+  expect(within(foreignRow).getByText("不可用")).toBeInTheDocument();
+
+  const selfRow = screen.getByRole("button", { name: "绑定自己话题" });
+  expect(selfRow).toHaveAttribute("data-unavailable", "true");
+  expect(within(selfRow).getByText("不可用")).toBeInTheDocument();
+
+  expect(document.body).not.toHaveTextContent("@stranger:other.example");
+  expect(document.body).not.toHaveTextContent("@alice:example.com");
+  expect(document.body).not.toHaveTextContent("未知");
+
+  // 打开跨服绑定话题
+  await user.click(foreignRow);
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("跨服绑定话题");
+  expect(header).not.toHaveTextContent("小赫");
+  expect(header).not.toHaveTextContent("@stranger:other.example");
+  expect(header).not.toHaveTextContent("未知");
+
+  const statusBanner = screen.getByRole("status", { name: "Topic 不可用" });
+  expect(statusBanner).toHaveTextContent("不合法");
+  expect(statusBanner).toHaveTextContent("无法发送新消息");
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(within(timeline).getByText("跨服话题里 Owner 的消息")).toBeInTheDocument();
+  expect(within(timeline).queryByText("跨服发送者不应展示")).not.toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent("未知");
+  expect(document.body).not.toHaveTextContent("@stranger:other.example");
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  expect(input).toBeDisabled();
+  expect(input).toHaveAttribute("placeholder", "Topic 不可用，无法发送消息");
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  expect(screen.getByLabelText("选择附件")).toBeDisabled();
+
+  // 打开高版本话题，确认只显示 Owner 消息、横幅点明版本原因
+  await user.click(badVerRow);
+  expect(screen.getByRole("banner")).toHaveTextContent("高版本话题");
+  const verBanner = screen.getByRole("status", { name: "Topic 不可用" });
+  expect(verBanner).toHaveTextContent("版本");
+  expect(verBanner).toHaveTextContent("无法发送新消息");
+  expect(within(screen.getByRole("log", { name: "对话时间线" })).getByText("Owner 说过的话")).toBeInTheDocument();
+  expect(screen.queryByText("旧版绑定不应展示的 Bot 消息")).not.toBeInTheDocument();
+
+  // 后续同步把高版本话题的标记修回 v: 1，不可用自动消失
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(badVerRow).not.toHaveAttribute("data-unavailable", "true");
+  });
+  expect(within(badVerRow).queryByText("不可用")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+  expect(screen.getByText("旧版绑定不应展示的 Bot 消息")).toBeInTheDocument();
+});
+
+test("普通加密房间不进列表；已有加密标记或诞生后才加密的 Topic 留在列表并标不可用，保留未读且可前移已读位置，重启后永不自动恢复", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!legacy-enc:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "m.room.name", state_key: "", content: { name: "旧加密房间不应入列" } },
+                      { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!enc-later:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "后来被加密" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$e1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$e1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1100,
+                        content: { msgtype: "m.text", body: "早先的提问" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$e2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1200,
+                        content: { msgtype: "m.text", body: "未读回复" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!enc-later:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.encryption",
+                        state_key: "",
+                        event_id: "$enc-ev",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1300,
+                        content: { algorithm: "m.megolm.v1.aes-sha2" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncRound}`,
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  const encLaterRow = await screen.findByRole("button", { name: "后来被加密" });
+  expect(screen.queryByText("旧加密房间不应入列")).not.toBeInTheDocument();
+  expect(encLaterRow).not.toHaveAttribute("data-unavailable", "true");
+  expect(encLaterRow).toHaveAttribute("data-unread", "true");
+
+  // 下一轮同步收到 m.room.encryption -> 留在列表且标不可用，未读圆点与加粗仍在
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(encLaterRow).toHaveAttribute("data-unavailable", "true");
+  });
+  expect(within(encLaterRow).getByText("不可用")).toBeInTheDocument();
+  expect(encLaterRow).toHaveAttribute("data-unread", "true");
+  expect(encLaterRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
+  expect(encLaterRow.querySelector(".waypoint-topic-name")).toHaveClass("unread");
+
+  // 打开后顶部横幅说明加密原因和无法发送新消息，历史消息正常显示，且已读位置正常前移
+  await user.click(encLaterRow);
+  const banner = screen.getByRole("status", { name: "Topic 不可用" });
+  expect(banner).toHaveTextContent("加密");
+  expect(banner).toHaveTextContent("无法发送新消息");
+  expect(screen.getByText("早先的提问")).toBeInTheDocument();
+  expect(screen.getByText("未读回复")).toBeInTheDocument();
+
+  await waitFor(() => {
+    expect(
+      homeserver.requests.some(
+        (req) =>
+          req.method === "POST" &&
+          req.url.includes("/rooms/!enc-later%3Aexample.com/read_markers") &&
+          JSON.stringify(req.body).includes("$e2"),
+      ),
+    ).toBe(true);
+  });
+  await waitFor(() => {
+    expect(encLaterRow).not.toHaveAttribute("data-unread", "true");
+  });
+
+  // 重启恢复后，即使后续同步没有再带 m.room.encryption，也永久保持不可用
+  first.unmount();
+  renderApp(homeserver);
+
+  const restoredRow = await screen.findByRole("button", { name: "后来被加密" });
+  expect(restoredRow).toHaveAttribute("data-unavailable", "true");
+  expect(within(restoredRow).getByText("不可用")).toBeInTheDocument();
+  expect(screen.queryByText("旧加密房间不应入列")).not.toBeInTheDocument();
+});
+
+test("Agent 被 ban、多于两人（含其他人未接受邀请）或邀请明确失败时 Topic 不可用；恢复后自动可用，且 Waypoint 不踢人、不撤邀请、不解除 ban、不重复邀请", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!banned:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 4000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "被封禁话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "ban" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!three-invite:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "三人待接受" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "invite" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!invite-rejected:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "拒绝邀请话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "leave" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!pending-invite:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "等待接受邀请" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "invite" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!banned:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!three-invite:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "leave" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!invite-rejected:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "invite" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          room_id: "!create-invite-fail:example.com",
+          failed_invites: ["@bot:example.com"],
+        },
+      };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!create-invite-fail%3Aexample.com/state/m.room.encryption")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND", error: "Not found" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const bannedRow = await screen.findByRole("button", { name: "被封禁话题" });
+  const threeRow = screen.getByRole("button", { name: "三人待接受" });
+  const rejectedRow = screen.getByRole("button", { name: "拒绝邀请话题" });
+  const pendingRow = screen.getByRole("button", { name: "等待接受邀请" });
+
+  expect(bannedRow).toHaveAttribute("data-unavailable", "true");
+  expect(threeRow).toHaveAttribute("data-unavailable", "true");
+  expect(rejectedRow).toHaveAttribute("data-unavailable", "true");
+  expect(pendingRow).not.toHaveAttribute("data-unavailable", "true");
+
+  await user.click(bannedRow);
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent(/ban|封禁/);
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("无法发送新消息");
+
+  await user.click(threeRow);
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("多于两人");
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("无法发送新消息");
+
+  await user.click(rejectedRow);
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("邀请");
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("无法发送新消息");
+
+  // 后续同步恢复成只有 Owner 与绑定 Bot
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(bannedRow).not.toHaveAttribute("data-unavailable", "true");
+    expect(threeRow).not.toHaveAttribute("data-unavailable", "true");
+    expect(rejectedRow).not.toHaveAttribute("data-unavailable", "true");
+  });
+  expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
+
+  // 新建 Topic 时若返回明确邀请失败，房间进入列表并呈不可用
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "建房邀请失败");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const createdRow = await screen.findByRole("button", { name: "建房邀请失败" });
+  expect(createdRow).toHaveAttribute("data-unavailable", "true");
+  expect(within(createdRow).getByText("不可用")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("邀请");
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("无法发送新消息");
+
+  // 确认 Waypoint 绝不发送 kick / unban / invite 请求
+  expect(
+    homeserver.requests.some(
+      (r) => r.url.includes("/kick") || r.url.includes("/unban") || r.url.includes("/invite"),
+    ),
+  ).toBe(false);
+});
+
+test("Topic 不可用时保留草稿（含文字与附件）并在恢复后可继续编辑发送，且改名、改 Description、置顶与删除入口一致可用", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t-draft:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "带草稿的话题" } },
+                      { type: "m.room.topic", state_key: "", content: { topic: "旧说明" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t-del:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "可删不可用话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "ban" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t-draft:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 4) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-4",
+            rooms: {
+              join: {
+                "!t-draft:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "leave" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.includes("/tags/im.waypoint.pinned")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (
+      input.method === "PUT" &&
+      (input.url.includes("/state/m.room.name") || input.url.includes("/state/m.room.topic"))
+    ) {
+      return { type: "response", status: 200, body: { event_id: "$state-ok" } };
+    }
+    if (input.method === "POST" && input.url.includes("/rooms/!t-del%3Aexample.com/leave")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.includes("/rooms/!t-del%3Aexample.com/forget")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      return { type: "response", status: 200, body: { event_id: "$sent-draft" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "带草稿的话题" }));
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(input, "写一半的草稿");
+  const file = new File(["hello"], "notes.txt", { type: "text/plain" });
+  await user.upload(screen.getByLabelText("选择附件"), file);
+  expect(await screen.findByText("notes.txt")).toBeInTheDocument();
+
+  // 第三人加入 -> 话题变不可用，草稿（文字与附件）完整保留且输入/发送/移除附件全部禁用
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("多于两人");
+  });
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("写一半的草稿");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toBeDisabled();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveAttribute(
+    "placeholder",
+    "Topic 不可用，无法发送消息",
+  );
+  expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+  expect(screen.getByText("notes.txt")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "移除附件" })).toBeDisabled();
+
+  // 不可用时可置顶、改名、改 Description（不能换绑定的 Bot）
+  await user.click(screen.getByRole("button", { name: "置顶" }));
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "取消置顶" })).toBeInTheDocument();
+  });
+
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+  const editName = screen.getByLabelText("Topic 名字");
+  await user.clear(editName);
+  await user.type(editName, "不可用也可改名");
+  const editDesc = screen.getByLabelText(/Description/);
+  await user.clear(editDesc);
+  await user.type(editDesc, "更新后的说明");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(screen.getByRole("banner")).toHaveTextContent("不可用也可改名");
+  });
+  expect(screen.getByRole("banner")).toHaveTextContent("更新后的说明");
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("多于两人");
+
+  // 重启后草稿仍保留在本地
+  first.unmount();
+  const second = renderApp(homeserver);
+  const renamedRow = await screen.findByRole("button", { name: "不可用也可改名" });
+  expect(renamedRow).toHaveAttribute("data-unavailable", "true");
+  expect(renamedRow).toHaveAttribute("data-pinned", "true");
+  await user.click(renamedRow);
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("写一半的草稿");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toBeDisabled();
+  expect(screen.getByText("notes.txt")).toBeInTheDocument();
+
+  // 第三人离开 -> 恢复可用，草稿可继续编辑并发送
+  await act(async () => {
+    second.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
+  });
+  const recoveredInput = screen.getByRole("textbox", { name: "输入消息" });
+  expect(recoveredInput).toBeEnabled();
+  expect(recoveredInput).toHaveValue("写一半的草稿");
+  await user.click(screen.getByRole("button", { name: "移除附件" }));
+  await user.type(recoveredInput, "补充内容");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => {
+    expect(
+      homeserver.requests.some(
+        (req) =>
+          req.method === "PUT" &&
+          req.url.includes("/rooms/!t-draft%3Aexample.com/send/m.room.message/") &&
+          (req.body as { body?: string }).body === "写一半的草稿补充内容",
+      ),
+    ).toBe(true);
+  });
+
+  // 不可用 Topic 的删除流程与正常 Topic 一致
+  await user.click(screen.getByRole("button", { name: "可删不可用话题" }));
+  await user.click(screen.getByRole("button", { name: "删除" }));
+  await user.click(screen.getByRole("button", { name: "确认删除" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "可删不可用话题" })).not.toBeInTheDocument();
+  });
+});
+
+test("Topic 不可用时失败消息的红叹号仍在，点击马上又失败且不发请求也不在气泡解释原因；重试队列里的未确认消息在不可用时立即转为失败", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let sendAttempts = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t-fail:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "含失败消息话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t-queued:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "排队重试话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t-fail:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t-queued:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendAttempts += 1;
+      if (input.url.includes("!t-fail%3Aexample.com")) {
+        return { type: "response", status: 403, body: { errcode: "M_FORBIDDEN", error: "Forbidden" } };
+      }
+      if (input.url.includes("!t-queued%3Aexample.com")) {
+        return { type: "response", status: 500, body: { errcode: "M_UNKNOWN", error: "Server Error" } };
+      }
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  // 1) 在「含失败消息话题」发送一条会被 403 拒绝的消息 -> 红叹号出现
+  await user.click(await screen.findByRole("button", { name: "含失败消息话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被拒绝的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByRole("button", { name: "失败" })).toBeInTheDocument();
+
+  // 2) 在「排队重试话题」发送一条遇到 500 进入退避重试的未确认消息（先推进 500ms 错开下次同步与退避定时器）
+  await act(async () => {
+    clock.advance(500);
+  });
+  await user.click(screen.getByRole("button", { name: "排队重试话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "排队中的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => {
+    expect(sendAttempts).toBe(2);
+  });
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  const sendCountBeforeUnavailable = homeserver.requests.filter((r) =>
+    r.url.includes("/send/m.room.message/"),
+  ).length;
+  expect(sendCountBeforeUnavailable).toBe(2);
+
+  // 3) 下一轮同步让两个话题都变成不可用 -> 排队中的消息立刻转为失败，且之后即使过了退避时间也不再发任何 send 请求
+  await act(async () => {
+    clock.advance(500);
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("加密");
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "失败" })).toBeInTheDocument();
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  await act(async () => {
+    clock.advance(2000);
+  });
+  expect(
+    homeserver.requests.filter((r) => r.url.includes("/send/m.room.message/")).length,
+  ).toBe(sendCountBeforeUnavailable);
+
+  // 4) 打开「含失败消息话题」，红叹号还在；点击红叹号马上又失败，不发请求且不在气泡上解释原因
+  await user.click(screen.getByRole("button", { name: "含失败消息话题" }));
+  expect(screen.getByRole("status", { name: "Topic 不可用" })).toHaveTextContent("多于两人");
+  const failedButton = screen.getByRole("button", { name: "失败" });
+  await user.click(failedButton);
+
+  // 点击后仍是失败红叹号（不变成未确认、不发送请求、不在气泡周围显示原因）
+  expect(screen.getByRole("button", { name: "失败" })).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(
+    homeserver.requests.filter((r) => r.url.includes("/send/m.room.message/")).length,
+  ).toBe(sendCountBeforeUnavailable);
+  const bubbleRow = screen.getByText("被拒绝的消息").closest(".waypoint-message-row") as HTMLElement;
+  expect(bubbleRow).not.toHaveTextContent("多于两人");
+  expect(bubbleRow).not.toHaveTextContent("无法发送");
+});

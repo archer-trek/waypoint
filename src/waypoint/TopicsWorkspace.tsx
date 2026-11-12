@@ -33,6 +33,7 @@ import {
   computeTargetReadPosition,
   createTopicRoom,
   deleteTopicRoom,
+  deriveRoomAvailability,
   type BubbleVisibility,
   deriveRoomTimelineItems,
   deriveTopics,
@@ -849,6 +850,10 @@ export function TopicsWorkspace({
         if (!mountedRef.current || pausedRef.current) {
           return;
         }
+        await retryQueue.failUnavailablePendingEvents();
+        if (!mountedRef.current || pausedRef.current) {
+          return;
+        }
         setRevision((value) => value + 1);
         if (wasBackedOff && retryQueue.isActive()) {
           retryQueue.wake();
@@ -1539,6 +1544,9 @@ export function TopicsWorkspace({
       return;
     }
     setOpenFailedMenuId((prev) => (prev === localId ? null : prev));
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
+      return;
+    }
     resendingLocalIdsRef.current.add(localId);
     try {
       const pending = await client.resendFailedRoomEvent(roomId, localId);
@@ -1569,7 +1577,7 @@ export function TopicsWorkspace({
 
   async function handleSendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!activeTopic || persistingSendRef.current || reauthRequiredRef.current) {
+    if (!activeTopic || activeTopic.unavailable || persistingSendRef.current || reauthRequiredRef.current) {
       return;
     }
     const roomId = activeTopic.roomId;
@@ -1951,13 +1959,16 @@ export function TopicsWorkspace({
                   <button
                     type="button"
                     aria-label={topic.name}
-                    className={
-                      topic.roomId === activeTopic?.roomId
-                        ? "waypoint-topic-row active"
-                        : "waypoint-topic-row"
-                    }
+                    className={[
+                      "waypoint-topic-row",
+                      topic.roomId === activeTopic?.roomId ? "active" : "",
+                      topic.unavailable ? "unavailable" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                     data-unread={topic.unread ? "true" : undefined}
                     data-pinned={topic.pinned ? "true" : undefined}
+                    data-unavailable={topic.unavailable ? "true" : undefined}
                     onClick={() => openTopic(topic.roomId)}
                   >
                     <span className="waypoint-topic-row-header">
@@ -1975,6 +1986,9 @@ export function TopicsWorkspace({
                         >
                           {topic.name}
                         </span>
+                        {topic.unavailable ? (
+                          <span className="waypoint-topic-row-unavailable">不可用</span>
+                        ) : null}
                       </span>
                       <span className="waypoint-topic-row-trailing">
                         {topic.pinned ? (
@@ -2408,6 +2422,15 @@ export function TopicsWorkspace({
                 ) : null}
               </header>
               {reauthRequired ? renderReauthBanner() : null}
+              {activeTopic.unavailable && activeTopic.unavailableReason ? (
+                <div
+                  role="status"
+                  aria-label="Topic 不可用"
+                  className="waypoint-unavailable-banner"
+                >
+                  {activeTopic.unavailableReason}
+                </div>
+              ) : null}
               {deleteConfirmOpen ? (
                 <div
                   role="alertdialog"
@@ -2603,7 +2626,7 @@ export function TopicsWorkspace({
                         </span>
                         <button
                           type="button"
-                          disabled={persistingSend || reauthRequired}
+                          disabled={persistingSend || activeTopic.unavailable || reauthRequired}
                           onClick={() => handleRemoveAttachment(activeTopic.roomId)}
                         >
                           移除附件
@@ -2617,7 +2640,7 @@ export function TopicsWorkspace({
                           type="file"
                           aria-label="选择附件"
                           className="waypoint-sr-only"
-                          disabled={persistingSend || reauthRequired}
+                          disabled={persistingSend || activeTopic.unavailable || reauthRequired}
                           onChange={(event) => {
                             const file = event.target.files?.[0];
                             event.target.value = "";
@@ -2630,11 +2653,17 @@ export function TopicsWorkspace({
                       <textarea
                         aria-label="输入消息"
                         name="message"
-                        disabled={reauthRequired}
+                        disabled={persistingSend || activeTopic.unavailable || reauthRequired}
+                        placeholder={
+                          activeTopic.unavailable ? "Topic 不可用，无法发送消息" : undefined
+                        }
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                       />
-                      <button type="submit" disabled={persistingSend || reauthRequired}>
+                      <button
+                        type="submit"
+                        disabled={persistingSend || activeTopic.unavailable || reauthRequired}
+                      >
                         发送
                       </button>
                     </form>

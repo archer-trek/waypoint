@@ -955,6 +955,7 @@ export class MatrixClient {
   async rememberRoomStateEvents(
     roomId: string,
     stateEvents: RawMatrixEvent[],
+    options?: { inviteFailed?: boolean },
   ): Promise<void> {
     await this.enqueuePersist(() => {
       if (!this.accessToken) {
@@ -962,6 +963,12 @@ export class MatrixClient {
       }
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const gaps = roomTimelineGaps(existing).map((g) => ({ ...g }));
+      const nextInviteFailed =
+        options?.inviteFailed === true
+          ? true
+          : options?.inviteFailed === false
+            ? undefined
+            : existing.inviteFailed;
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: {
@@ -969,8 +976,13 @@ export class MatrixClient {
           stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
           ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
+          ...(existing.encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
+          ...(nextInviteFailed ? { inviteFailed: true as const } : {}),
         },
       };
+      if (!nextInviteFailed) {
+        delete this.storedRooms[roomId].inviteFailed;
+      }
       return saveSession(this.sessionRecord());
     });
   }
@@ -1293,6 +1305,8 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
       ...(isPlainObject(value.tags) && Object.keys(value.tags).length > 0
         ? { tags: cloneValue(value.tags) as Record<string, unknown> }
         : {}),
+      ...(value.encryptedIrreversible === true ? { encryptedIrreversible: true as const } : {}),
+      ...(value.inviteFailed === true ? { inviteFailed: true as const } : {}),
     };
   }
   return cloned;
@@ -1491,11 +1505,36 @@ function mergeSyncRooms(
         effectiveSyncPrivateReadIds,
       );
 
+      const mergedStateEvents = mergeStateEvents(existing.stateEvents, [
+        ...rawState,
+        ...timelineStateEvents,
+      ]);
+      const hasEncInExisting =
+        existing.encryptedIrreversible === true ||
+        existing.stateEvents.some((ev) => ev.type === "m.room.encryption");
+      const hasEncInRawState = rawState.some((ev) => ev.type === "m.room.encryption");
+      const hasEncInRawTimeline = rawTimelineAll.some((ev) => ev.type === "m.room.encryption");
+      const encryptedIrreversible: true | undefined =
+        hasEncInExisting || hasEncInRawState || hasEncInRawTimeline ? true : undefined;
+
+      let inviteFailed: true | undefined = existing.inviteFailed;
+      if (inviteFailed) {
+        const boundAgentId = boundAgentUserIdFromState(mergedStateEvents);
+        if (boundAgentId) {
+          const incomingAgentMember = [...rawState, ...timelineStateEvents]
+            .reverse()
+            .find((ev) => ev.type === "m.room.member" && ev.state_key === boundAgentId);
+          if (incomingAgentMember && isPlainObject(incomingAgentMember.content)) {
+            const m = incomingAgentMember.content.membership;
+            if (m === "join" || m === "invite") {
+              inviteFailed = undefined;
+            }
+          }
+        }
+      }
+
       next[roomId] = {
-        stateEvents: mergeStateEvents(existing.stateEvents, [
-          ...rawState,
-          ...timelineStateEvents,
-        ]),
+        stateEvents: mergedStateEvents,
         timelineEvents: mergedTimeline,
         ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
         ...(nextBackwardToken && !nextReachedStart ? { backwardToken: nextBackwardToken } : {}),
@@ -1504,6 +1543,8 @@ function mergeSyncRooms(
         ...(nextFullyReadEventId ? { fullyReadEventId: nextFullyReadEventId } : {}),
         ...(nextPrivateReadEventId ? { privateReadEventId: nextPrivateReadEventId } : {}),
         ...(nextTags && Object.keys(nextTags).length > 0 ? { tags: nextTags } : {}),
+        ...(encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
+        ...(inviteFailed ? { inviteFailed: true as const } : {}),
       };
     }
   }
@@ -1757,6 +1798,12 @@ function applyRoomBackfillPage(
     room.stateEvents,
   );
 
+  const hasEnc =
+    room.encryptedIrreversible === true ||
+    room.stateEvents.some((ev) => ev.type === "m.room.encryption") ||
+    rawState.some((ev) => ev.type === "m.room.encryption") ||
+    incomingChronological.some((ev) => ev.type === "m.room.encryption");
+
   const nextRoom: StoredRoomEvents = {
     stateEvents: nextStateEvents,
     timelineEvents: mergedTimeline,
@@ -1769,6 +1816,8 @@ function applyRoomBackfillPage(
     ...(isPlainObject(room.tags) && Object.keys(room.tags).length > 0
       ? { tags: cloneValue(room.tags) as Record<string, unknown> }
       : {}),
+    ...(hasEnc ? { encryptedIrreversible: true as const } : {}),
+    ...(room.inviteFailed ? { inviteFailed: true as const } : {}),
   };
 
   return {
@@ -2372,4 +2421,20 @@ export function localPlaceholderOf(event: RawMatrixEvent): WaypointLocalMeta | u
     status: raw.status,
     txnId: raw.txnId,
   };
+}
+
+function boundAgentUserIdFromState(stateEvents: RawMatrixEvent[]): string | undefined {
+  for (let i = stateEvents.length - 1; i >= 0; i -= 1) {
+    const ev = stateEvents[i];
+    if (
+      ev.type === "im.waypoint.topic" &&
+      ev.state_key === "" &&
+      isPlainObject(ev.content) &&
+      ev.content.v === 1 &&
+      typeof ev.content.agent_user_id === "string"
+    ) {
+      return ev.content.agent_user_id;
+    }
+  }
+  return undefined;
 }

@@ -314,6 +314,10 @@ export function WaypointApp({
       if (!syncIsCurrent(myEpoch, generation)) {
         return;
       }
+      await retryQueue().failUnavailablePendingEvents();
+      if (!syncIsCurrent(myEpoch, generation)) {
+        return;
+      }
       if (wasBackedOff && retryQueue().isActive()) {
         retryQueue().wake();
       }

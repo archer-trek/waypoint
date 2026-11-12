@@ -18,6 +18,8 @@ export type StoredRoomEvents = {
   fullyReadEventId?: string;
   privateReadEventId?: string;
   tags?: Record<string, unknown>;
+  encryptedIrreversible?: true;
+  inviteFailed?: true;
 };
 
 export type PendingReadMarker = {

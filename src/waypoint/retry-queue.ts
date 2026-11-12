@@ -1,6 +1,7 @@
 import type { Clock } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
+import { deriveRoomAvailability } from "./topics";
 
 export const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
@@ -143,6 +144,24 @@ export class RetryQueue {
     }, delay);
   }
 
+  async failUnavailablePendingEvents(): Promise<boolean> {
+    if (this.disposed || !this.client.hasToken) {
+      return false;
+    }
+    let anyFailed = false;
+    const rooms = this.client.rooms();
+    for (const item of this.client.pendingRoomEvents()) {
+      if (deriveRoomAvailability(rooms[item.roomId], this.client.ownerId).unavailable) {
+        await this.client.failPendingRoomEvent(item.roomId, item.txnId);
+        anyFailed = true;
+      }
+    }
+    if (anyFailed && !this.disposed) {
+      this.callbacks.onFailed?.();
+    }
+    return anyFailed;
+  }
+
   async flush(): Promise<void> {
     await Promise.all([this.flushEvents(), this.flushReadMarkers()]);
   }
@@ -162,6 +181,15 @@ export class RetryQueue {
         }
         const head = pending[0];
         const myEpoch = this.runEpoch;
+        if (deriveRoomAvailability(this.client.rooms()[head.roomId], this.client.ownerId).unavailable) {
+          await this.client.failPendingRoomEvent(head.roomId, head.txnId);
+          this.backoffStep = 0;
+          if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
+            break;
+          }
+          this.callbacks.onFailed?.();
+          continue;
+        }
         let result;
         try {
           result = await this.client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);

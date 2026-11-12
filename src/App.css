@@ -651,3 +651,31 @@ p[role="alert"] {
   border: 0.0625rem solid #d8c89e;
   background: #fffdf6;
 }
+
+.waypoint-topic-row.unavailable {
+  opacity: 0.65;
+  color: #6b6760;
+}
+
+.waypoint-topic-row-unavailable {
+  font-size: 0.6875rem;
+  padding: 0.0625rem 0.25rem;
+  border-radius: 0.25rem;
+  background: #e2ddd2;
+  color: #5c564d;
+  flex-shrink: 0;
+}
+
+.waypoint-unavailable-banner {
+  flex-shrink: 0;
+  padding: 0.5rem 1.25rem;
+  background: #f3e8d2;
+  border-bottom: 0.0625rem solid #d9c8a3;
+  color: #5a4318;
+  font-size: 0.875rem;
+}
+
+.waypoint-attach-button:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
