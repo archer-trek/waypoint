@@ -1,0 +1,40 @@
+:root {
+  font-family: system-ui, sans-serif;
+  line-height: 1.5;
+  color: #1a1a1a;
+  background: #f6f5f2;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem;
+}
+
+label,
+button {
+  display: block;
+}
+
+input,
+button {
+  font: inherit;
+}
+
+input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+}
+
+button {
+  margin-top: 1rem;
+}
+
+p[role="alert"] {
+  color: #8a1f1f;
+}
