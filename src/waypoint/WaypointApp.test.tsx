@@ -2932,11 +2932,13 @@ test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，按手
   expect(screen.getByRole("banner")).toHaveTextContent("bot3");
   expect(screen.getByRole("banner")).not.toHaveTextContent("@bot3:example.com");
 
-  // 重启后收到 rooms.leave 时，离开的房间从列表移除
+  // 重启后先展示本地缓存，再等增量 sync 的 rooms.leave 把离开的房间移出列表
   first.unmount();
   renderApp(homeserver);
   expect(await screen.findByText("话题一")).toBeInTheDocument();
-  expect(screen.queryByText("话题三")).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.queryByText("话题三")).not.toBeInTheDocument();
+  });
 });
 
 test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时不显示选择与列表副标题，但打开后标题栏仍同时显示 Topic 与 Bot 名字且空 Description 不占元素", async () => {
@@ -3309,11 +3311,14 @@ test("宽视口常驻左右两栏、不自动打开第一条 Topic，未选中�
   expect(screen.getByRole("banner")).toHaveTextContent("首条话题");
   expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
 
-  // 当前打开的 Topic 被移出后，不自动打开剩余的第一条，而是回到未选中引导
+  // 当前打开的 Topic 被移出后，不自动打开剩余的第一条，而是回到未选中引导。
+  // 重开先展示缓存，需等增量 sync 的 rooms.leave 落地后再断言已离开的房间消失。
   first.unmount();
   renderApp(homeserver);
   expect(await screen.findByText("第二条话题")).toBeInTheDocument();
-  expect(screen.queryByText("首条话题")).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(screen.queryByText("首条话题")).not.toBeInTheDocument();
+  });
   expect(screen.queryByRole("banner")).not.toBeInTheDocument();
   expect(screen.getByText(/选择一条 Topic/)).toBeInTheDocument();
 });
