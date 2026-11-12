@@ -89,11 +89,6 @@ main {
   color: #555;
 }
 
-.waypoint-unavailable-tag {
-  font-size: 0.75rem;
-  color: #8a1f1f;
-}
-
 .waypoint-detail {
   flex: 1 1 auto;
   min-width: 0;

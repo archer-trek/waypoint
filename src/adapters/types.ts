@@ -31,7 +31,6 @@ export interface PlatformAdapter {
   onSystemBack?: (handler: () => boolean) => () => void;
   pushNavigationEntry?: () => void;
   popNavigationEntry?: () => void;
-  acquireSingleInstanceGuard?: () => (() => void) | false;
   focusMainWindow?: () => void;
 }
 

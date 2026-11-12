@@ -1,7 +1,12 @@
+import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
 const WIDE_VIEWPORT_MEDIA_QUERY = "(min-width: 48em)";
-let productionInstanceActive = false;
+const KEYBOARD_INSET_EVENT = "waypoint:keyboard-inset";
+
+type VirtualKeyboardLike = EventTarget & {
+  boundingRect?: { height?: number };
+};
 
 export const systemClock: Clock = {
   setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
@@ -32,36 +37,43 @@ function subscribeViewportMode(onChange: (mode: ViewportMode) => void): () => vo
   return () => mediaQuery.removeListener(handleChange);
 }
 
-function measureKeyboardInsetBottom(): number {
-  if (typeof window === "undefined" || !window.visualViewport) {
-    return 0;
+function getVirtualKeyboard(): VirtualKeyboardLike | undefined {
+  if (typeof navigator === "undefined") {
+    return undefined;
   }
-  const vv = window.visualViewport;
-  const inset = window.innerHeight - (vv.height + vv.offsetTop);
-  return Number.isFinite(inset) && inset > 0 ? Math.round(inset) : 0;
+  return (navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike }).virtualKeyboard;
 }
 
-function subscribeKeyboardInsetBottom(onChange: (insetBottom: number) => void): () => void {
-  if (typeof window === "undefined") {
-    return () => undefined;
+function readRootCssKeyboardInset(): number {
+  if (typeof document === "undefined" || !document.documentElement) {
+    return 0;
   }
-  let lastInset = measureKeyboardInsetBottom();
-  const notify = () => {
-    const nextInset = measureKeyboardInsetBottom();
-    if (nextInset !== lastInset) {
-      lastInset = nextInset;
-      onChange(nextInset);
+  const inlineValue = document.documentElement.style?.getPropertyValue("--keyboard-inset") ?? "";
+  const raw =
+    inlineValue.trim() !== ""
+      ? inlineValue
+      : typeof window !== "undefined" && typeof window.getComputedStyle === "function"
+        ? window.getComputedStyle(document.documentElement).getPropertyValue("--keyboard-inset")
+        : "";
+  if (!raw.trim()) {
+    return 0;
+  }
+  return normalizeInset(parseFloat(raw));
+}
+
+function parseKeyboardInsetEvent(event: Event): number | undefined {
+  const detail = (event as CustomEvent<unknown>).detail;
+  if (typeof detail === "number") {
+    return normalizeInset(detail);
+  }
+  if (typeof detail === "object" && detail !== null) {
+    const record = detail as { bottom?: unknown; insetBottom?: unknown; height?: unknown };
+    const raw = record.bottom ?? record.insetBottom ?? record.height;
+    if (typeof raw === "number") {
+      return normalizeInset(raw);
     }
-  };
-  const vv = window.visualViewport;
-  vv?.addEventListener("resize", notify);
-  vv?.addEventListener("scroll", notify);
-  window.addEventListener("resize", notify);
-  return () => {
-    vv?.removeEventListener("resize", notify);
-    vv?.removeEventListener("scroll", notify);
-    window.removeEventListener("resize", notify);
-  };
+  }
+  return undefined;
 }
 
 export function detectPlatform(): PlatformAdapter {
@@ -69,7 +81,64 @@ export function detectPlatform(): PlatformAdapter {
     ? "Waypoint Android"
     : "Waypoint macOS";
   let navDepth = 0;
-  let suppressedDepth: number | null = null;
+  let suppressedPopCount = 0;
+  let backInFlight = false;
+  let queuedBacks = 0;
+  let queuedPushes = 0;
+  let hasSystemBackListener = false;
+  let customEventInset = 0;
+
+  function measureKeyboardInsetBottom(): number {
+    if (typeof window === "undefined") {
+      return 0;
+    }
+    const vv = window.visualViewport;
+    const vvInset = vv
+      ? normalizeInset(window.innerHeight - (vv.height + vv.offsetTop))
+      : 0;
+    const vk = getVirtualKeyboard();
+    const vkInset =
+      vk?.boundingRect && typeof vk.boundingRect.height === "number"
+        ? normalizeInset(vk.boundingRect.height)
+        : 0;
+    const cssInset = readRootCssKeyboardInset();
+    return Math.max(vvInset, vkInset, customEventInset, cssInset);
+  }
+
+  function subscribeKeyboardInsetBottom(onChange: (insetBottom: number) => void): () => void {
+    if (typeof window === "undefined") {
+      return () => undefined;
+    }
+    let lastInset = measureKeyboardInsetBottom();
+    const notify = () => {
+      const nextInset = measureKeyboardInsetBottom();
+      if (nextInset !== lastInset) {
+        lastInset = nextInset;
+        onChange(nextInset);
+      }
+    };
+    const handleCustomInset = (event: Event) => {
+      const parsed = parseKeyboardInsetEvent(event);
+      if (parsed !== undefined) {
+        customEventInset = parsed;
+        notify();
+      }
+    };
+    const vv = window.visualViewport;
+    const vk = getVirtualKeyboard();
+    vv?.addEventListener("resize", notify);
+    vv?.addEventListener("scroll", notify);
+    vk?.addEventListener?.("geometrychange", notify);
+    window.addEventListener("resize", notify);
+    window.addEventListener(KEYBOARD_INSET_EVENT, handleCustomInset);
+    return () => {
+      vv?.removeEventListener("resize", notify);
+      vv?.removeEventListener("scroll", notify);
+      vk?.removeEventListener?.("geometrychange", notify);
+      window.removeEventListener("resize", notify);
+      window.removeEventListener(KEYBOARD_INSET_EVENT, handleCustomInset);
+    };
+  }
 
   return {
     deviceDisplayName,
@@ -79,48 +148,79 @@ export function detectPlatform(): PlatformAdapter {
     subscribeKeyboardInsetBottom,
     pushNavigationEntry() {
       navDepth += 1;
-      suppressedDepth = null;
+      if (hasSystemBackListener && queuedBacks > 0) {
+        queuedBacks -= 1;
+        suppressedPopCount = Math.max(0, suppressedPopCount - 1);
+        return;
+      }
+      if (hasSystemBackListener && backInFlight) {
+        queuedPushes += 1;
+        return;
+      }
       if (typeof window !== "undefined" && window.history) {
         window.history.pushState({ waypointDepth: navDepth }, "");
       }
     },
     popNavigationEntry() {
-      if (navDepth > 0) {
-        navDepth -= 1;
-        suppressedDepth = navDepth;
-        if (typeof window !== "undefined" && window.history) {
-          window.history.back();
+      if (navDepth <= 0) {
+        return;
+      }
+      navDepth -= 1;
+      if (hasSystemBackListener && queuedPushes > 0) {
+        queuedPushes -= 1;
+        return;
+      }
+      if (typeof window !== "undefined" && window.history) {
+        suppressedPopCount += 1;
+        if (hasSystemBackListener && backInFlight) {
+          queuedBacks += 1;
+          return;
         }
+        if (hasSystemBackListener) {
+          backInFlight = true;
+        }
+        window.history.back();
       }
     },
     onSystemBack(handler) {
       if (typeof window === "undefined") {
         return () => undefined;
       }
-      const handlePopState = (event: PopStateEvent) => {
-        const stateDepth =
-          event.state && typeof (event.state as { waypointDepth?: unknown }).waypointDepth === "number"
-            ? (event.state as { waypointDepth: number }).waypointDepth
-            : 0;
-        if (suppressedDepth !== null && stateDepth === suppressedDepth) {
-          suppressedDepth = null;
+      hasSystemBackListener = true;
+      const handlePopState = () => {
+        backInFlight = false;
+        if (suppressedPopCount > 0) {
+          suppressedPopCount -= 1;
+          if (queuedBacks > 0) {
+            queuedBacks -= 1;
+            backInFlight = true;
+            window.history.back();
+            return;
+          }
+          if (queuedPushes > 0) {
+            const toPush = queuedPushes;
+            queuedPushes = 0;
+            const baseDepth = navDepth - toPush;
+            for (let i = 1; i <= toPush; i += 1) {
+              window.history.pushState({ waypointDepth: baseDepth + i }, "");
+            }
+            return;
+          }
           return;
         }
-        suppressedDepth = null;
-        if (handler() && navDepth > 0) {
+        if (navDepth > 0) {
           navDepth -= 1;
         }
+        handler();
       };
       window.addEventListener("popstate", handlePopState);
-      return () => window.removeEventListener("popstate", handlePopState);
-    },
-    acquireSingleInstanceGuard() {
-      if (productionInstanceActive) {
-        return false;
-      }
-      productionInstanceActive = true;
       return () => {
-        productionInstanceActive = false;
+        window.removeEventListener("popstate", handlePopState);
+        hasSystemBackListener = false;
+        backInFlight = false;
+        queuedBacks = 0;
+        queuedPushes = 0;
+        suppressedPopCount = 0;
       };
     },
     focusMainWindow() {

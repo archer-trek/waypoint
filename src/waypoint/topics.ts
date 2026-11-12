@@ -1,23 +1,11 @@
-export type BotRosterEntry = {
+import type { TransportResult } from "../adapters/types";
+import type { MatrixClient } from "./matrix-client";
+import { formatMatrixActionFailure, isRecord } from "./matrix-errors";
+import type { RawMatrixEvent, StoredRoomEvents } from "./session-store";
+
+export type RegisteredAgent = {
   userId: string;
   handwrittenName?: string;
-};
-
-export type StoredMemberState = {
-  membership: string;
-  displayname?: string;
-};
-
-export type StoredRoomRecord = {
-  roomId: string;
-  name?: string;
-  description?: string;
-  hasTopicMarker: boolean;
-  topicMarker?: unknown;
-  encrypted: boolean;
-  members: Record<string, StoredMemberState>;
-  createdAt?: number;
-  lastMessageTs?: number;
 };
 
 export type TopicSummary = {
@@ -26,9 +14,14 @@ export type TopicSummary = {
   description?: string;
   agentUserId?: string;
   botDisplayName?: string;
-  unavailableReason?: string;
   lastActivityTs?: number;
 };
+
+export type CreateTopicResult =
+  | { ok: true; roomId: string }
+  | { ok: false; message: string };
+
+const directAppendQueues = new WeakMap<MatrixClient, Promise<void>>();
 
 export function isFullUserId(user: string): boolean {
   if (!user.startsWith("@")) {
@@ -66,12 +59,12 @@ export function isValidAgentUserId(userId: string, ownerUserId: string): boolean
   return isFullUserId(userId) && userId !== ownerUserId && serverName(userId) === ownerServer;
 }
 
-export function parseBotRoster(content: unknown, ownerUserId: string): BotRosterEntry[] {
+export function parseRegisteredAgents(content: unknown, ownerUserId: string): RegisteredAgent[] {
   if (!isRecord(content) || !Array.isArray(content.agents)) {
     return [];
   }
   const seen = new Set<string>();
-  const roster: BotRosterEntry[] = [];
+  const registeredAgents: RegisteredAgent[] = [];
   for (const agent of content.agents) {
     if (!isRecord(agent)) {
       continue;
@@ -83,151 +76,338 @@ export function parseBotRoster(content: unknown, ownerUserId: string): BotRoster
     seen.add(userId);
     const handwrittenName =
       typeof agent.name === "string" && agent.name.trim() !== "" ? agent.name.trim() : undefined;
-    roster.push({ userId, handwrittenName });
+    registeredAgents.push({ userId, handwrittenName });
   }
-  return roster;
+  return registeredAgents;
 }
 
 export function resolveBotName(
   agentUserId: string,
-  roster: BotRosterEntry[],
-  roomMembers?: Record<string, StoredMemberState>,
+  registeredAgents: RegisteredAgent[],
+  roomScope?: StoredRoomEvents | StoredRoomEvents[],
 ): string {
-  const rosterEntry = roster.find((entry) => entry.userId === agentUserId);
-  if (rosterEntry?.handwrittenName) {
-    return rosterEntry.handwrittenName;
+  const registeredAgent = registeredAgents.find((entry) => entry.userId === agentUserId);
+  if (registeredAgent?.handwrittenName) {
+    return registeredAgent.handwrittenName;
   }
-  const memberDisplayName = roomMembers?.[agentUserId]?.displayname;
-  if (memberDisplayName) {
-    return memberDisplayName;
+  const rooms = Array.isArray(roomScope) ? roomScope : roomScope ? [roomScope] : [];
+  for (const room of rooms) {
+    const memberDisplayName = findMemberDisplayName(room.stateEvents, agentUserId);
+    if (memberDisplayName) {
+      return memberDisplayName;
+    }
   }
   return localpartOf(agentUserId);
 }
 
-export function mergeSyncRooms(
-  current: Record<string, StoredRoomRecord>,
-  body: unknown,
-  incremental: boolean,
-): Record<string, StoredRoomRecord> {
-  const next: Record<string, StoredRoomRecord> = incremental ? { ...current } : {};
-  if (!isRecord(body) || !isRecord(body.rooms)) {
-    return next;
+function findMemberDisplayName(stateEvents: RawMatrixEvent[], userId: string): string | undefined {
+  for (let i = stateEvents.length - 1; i >= 0; i -= 1) {
+    const event = stateEvents[i];
+    if (event.type === "m.room.member" && event.state_key === userId && isRecord(event.content)) {
+      const displayname = event.content.displayname;
+      if (typeof displayname === "string" && displayname.trim() !== "") {
+        return displayname.trim();
+      }
+      return undefined;
+    }
   }
+  return undefined;
+}
 
-  const joinRooms = body.rooms.join;
-  if (isRecord(joinRooms)) {
-    for (const [roomId, roomSync] of Object.entries(joinRooms)) {
-      if (!isRecord(roomSync)) {
+export function deriveTopics(
+  rooms: Record<string, StoredRoomEvents>,
+  registeredAgents: RegisteredAgent[],
+  ownerUserId: string,
+): TopicSummary[] {
+  const topics: TopicSummary[] = [];
+
+  for (const [roomId, room] of Object.entries(rooms)) {
+    let hasTopicMarker = false;
+    let topicMarkerContent: unknown;
+    let markerTs: number | undefined;
+    let createTs: number | undefined;
+    let name: string | undefined;
+    let description: string | undefined;
+
+    for (const event of room.stateEvents) {
+      if (typeof event.type !== "string" || typeof event.state_key !== "string") {
         continue;
       }
-      const existing = next[roomId];
-      const record: StoredRoomRecord = existing
-        ? {
-            ...existing,
-            members: { ...existing.members },
-          }
-        : {
-            roomId,
-            hasTopicMarker: false,
-            encrypted: false,
-            members: {},
-          };
-
-      const stateEvents =
-        isRecord(roomSync.state) && Array.isArray(roomSync.state.events) ? roomSync.state.events : [];
-      for (const event of stateEvents) {
-        applyStateEvent(record, event);
-      }
-
-      const timelineEvents =
-        isRecord(roomSync.timeline) && Array.isArray(roomSync.timeline.events)
-          ? roomSync.timeline.events
-          : [];
-      for (const event of timelineEvents) {
-        if (!isRecord(event)) {
-          continue;
+      const ts = validTimestamp(event.origin_server_ts);
+      if (event.type === "im.waypoint.topic" && event.state_key === "") {
+        hasTopicMarker = true;
+        topicMarkerContent = event.content;
+        if (markerTs === undefined && ts !== undefined) {
+          markerTs = ts;
         }
-        if (typeof event.state_key === "string") {
-          applyStateEvent(record, event);
-        } else if (isActivityMessageEvent(event)) {
-          const ts = validTimestamp(event.origin_server_ts);
-          if (ts !== undefined) {
-            record.lastMessageTs =
-              record.lastMessageTs !== undefined ? Math.max(record.lastMessageTs, ts) : ts;
-          }
+      } else if (event.type === "m.room.create" && event.state_key === "") {
+        if (ts !== undefined) {
+          createTs = ts;
         }
+      } else if (event.type === "m.room.name" && event.state_key === "") {
+        name =
+          isRecord(event.content) &&
+          typeof event.content.name === "string" &&
+          event.content.name.trim() !== ""
+            ? event.content.name.trim()
+            : undefined;
+      } else if (event.type === "m.room.topic" && event.state_key === "") {
+        description =
+          isRecord(event.content) &&
+          typeof event.content.topic === "string" &&
+          event.content.topic.trim() !== ""
+            ? event.content.topic.trim()
+            : undefined;
       }
-
-      next[roomId] = record;
     }
+
+    if (!hasTopicMarker) {
+      continue;
+    }
+
+    let lastMessageTs: number | undefined;
+    for (const event of room.timelineEvents) {
+      if (typeof event.state_key === "string") {
+        continue;
+      }
+      if (isActivityMessageEvent(event)) {
+        const ts = validTimestamp(event.origin_server_ts);
+        if (ts !== undefined) {
+          lastMessageTs = lastMessageTs !== undefined ? Math.max(lastMessageTs, ts) : ts;
+        }
+      }
+    }
+
+    const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
+    const agentUserId = marker.valid ? marker.agentUserId : undefined;
+    const botDisplayName = agentUserId
+      ? resolveBotName(agentUserId, registeredAgents, room)
+      : undefined;
+    const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
+
+    topics.push({
+      roomId,
+      name: name ?? "未命名 Topic",
+      description,
+      agentUserId,
+      botDisplayName,
+      lastActivityTs,
+    });
   }
 
-  const leaveRooms = body.rooms.leave;
-  if (isRecord(leaveRooms)) {
-    for (const roomId of Object.keys(leaveRooms)) {
-      delete next[roomId];
+  topics.sort((left, right) => {
+    const leftTs = left.lastActivityTs ?? -1;
+    const rightTs = right.lastActivityTs ?? -1;
+    if (leftTs !== rightTs) {
+      return rightTs - leftTs;
     }
+    return left.roomId.localeCompare(right.roomId);
+  });
+
+  return topics;
+}
+
+export async function createTopicRoom(
+  client: MatrixClient,
+  input: {
+    name: string;
+    description?: string;
+    agentUserId: string;
+    now: number;
+  },
+): Promise<CreateTopicResult> {
+  if (!client.hasToken) {
+    return { ok: false, message: "新建 Topic 失败，因为尚未连接。" };
   }
 
+  const body: Record<string, unknown> = {
+    preset: "private_chat",
+    is_direct: true,
+    invite: [input.agentUserId],
+    name: input.name,
+    initial_state: [
+      {
+        type: "im.waypoint.topic",
+        state_key: "",
+        content: { v: 1, agent_user_id: input.agentUserId },
+      },
+      {
+        type: "m.room.history_visibility",
+        state_key: "",
+        content: { history_visibility: "shared" },
+      },
+    ],
+  };
+  if (input.description) {
+    body.topic = input.description;
+  }
+
+  let createResult: TransportResult;
+  try {
+    createResult = await client.createRoom(body);
+  } catch {
+    return { ok: false, message: "新建 Topic 失败，因为到达不了。" };
+  }
+
+  if (createResult.type !== "response" || createResult.status !== 200 || !isRecord(createResult.body)) {
+    return { ok: false, message: createTopicFailureMessage(createResult) };
+  }
+
+  const rawRoomId = createResult.body.room_id;
+  const roomId =
+    typeof rawRoomId === "string" && rawRoomId.trim() !== "" ? rawRoomId.trim() : undefined;
+  if (!roomId) {
+    return { ok: false, message: "新建 Topic 失败，因为 Homeserver 没有返回房间 ID。" };
+  }
+
+  if (hasEncryptionInCreateResponse(createResult.body)) {
+    await bestEffortLeaveAndForget(client, roomId);
+    return {
+      ok: false,
+      message: "新建 Topic 失败，因为 Homeserver 强制开启了加密，Waypoint 不支持加密房间。",
+    };
+  }
+
+  let encryptionResult: TransportResult;
+  try {
+    encryptionResult = await client.getRoomStateEvent(roomId, "m.room.encryption");
+  } catch {
+    await bestEffortLeaveAndForget(client, roomId);
+    return { ok: false, message: "新建 Topic 失败，因为无法确认房间是否未加密。" };
+  }
+
+  if (encryptionResult.type === "response" && encryptionResult.status === 200) {
+    await bestEffortLeaveAndForget(client, roomId);
+    return {
+      ok: false,
+      message: "新建 Topic 失败，因为 Homeserver 强制开启了加密，Waypoint 不支持加密房间。",
+    };
+  }
+
+  if (!(encryptionResult.type === "response" && encryptionResult.status === 404)) {
+    await bestEffortLeaveAndForget(client, roomId);
+    return { ok: false, message: createTopicFailureMessage(encryptionResult) };
+  }
+
+  const initialStateEvents: RawMatrixEvent[] = [
+    {
+      type: "m.room.create",
+      state_key: "",
+      origin_server_ts: input.now,
+      content: { creator: client.ownerId },
+    },
+    {
+      type: "im.waypoint.topic",
+      state_key: "",
+      origin_server_ts: input.now,
+      content: { v: 1, agent_user_id: input.agentUserId },
+    },
+    {
+      type: "m.room.name",
+      state_key: "",
+      origin_server_ts: input.now,
+      content: { name: input.name },
+    },
+    ...(input.description
+      ? [
+          {
+            type: "m.room.topic",
+            state_key: "",
+            origin_server_ts: input.now,
+            content: { topic: input.description },
+          },
+        ]
+      : []),
+    {
+      type: "m.room.history_visibility",
+      state_key: "",
+      origin_server_ts: input.now,
+      content: { history_visibility: "shared" },
+    },
+    {
+      type: "m.room.member",
+      state_key: client.ownerId,
+      origin_server_ts: input.now,
+      content: { membership: "join" },
+    },
+    {
+      type: "m.room.member",
+      state_key: input.agentUserId,
+      origin_server_ts: input.now,
+      content: { membership: "invite" },
+    },
+  ];
+
+  await client.rememberCreatedRoom(roomId, initialStateEvents);
+  return { ok: true, roomId };
+}
+
+export function appendDirectRoom(
+  client: MatrixClient,
+  agentUserId: string,
+  roomId: string,
+): Promise<void> {
+  const prev = directAppendQueues.get(client) ?? Promise.resolve();
+  const next = prev
+    .catch(() => undefined)
+    .then(async () => {
+      if (!client.hasToken || !client.ownerId) {
+        return;
+      }
+      const nextDirect = appendDirectRoomMapping(
+        client.accountData("m.direct"),
+        agentUserId,
+        roomId,
+      );
+      try {
+        const result = await client.putAccountData("m.direct", nextDirect);
+        if (result.type === "response" && result.status >= 200 && result.status < 300) {
+          await client.retainAccountData("m.direct", nextDirect);
+        }
+      } catch {
+        // Best-effort per ADR-0023: never fail or roll back created Topic
+      }
+    });
+  directAppendQueues.set(client, next);
   return next;
 }
 
-function applyStateEvent(record: StoredRoomRecord, event: unknown): void {
-  if (!isRecord(event) || typeof event.type !== "string" || typeof event.state_key !== "string") {
-    return;
+async function bestEffortLeaveAndForget(client: MatrixClient, roomId: string): Promise<void> {
+  try {
+    await client.leaveRoom(roomId);
+  } catch {
+    // Best-effort cleanup
   }
-  const { type, state_key: stateKey, content } = event;
-  const ts = validTimestamp(event.origin_server_ts);
-
-  if (type === "im.waypoint.topic" && stateKey === "") {
-    record.hasTopicMarker = true;
-    record.topicMarker = content;
-    if (record.createdAt === undefined && ts !== undefined) {
-      record.createdAt = ts;
-    }
-    return;
-  }
-
-  if (type === "m.room.create" && stateKey === "") {
-    if (ts !== undefined) {
-      record.createdAt = ts;
-    }
-    return;
-  }
-
-  if (type === "m.room.name" && stateKey === "") {
-    record.name =
-      isRecord(content) && typeof content.name === "string" && content.name.trim() !== ""
-        ? content.name.trim()
-        : undefined;
-    return;
-  }
-
-  if (type === "m.room.topic" && stateKey === "") {
-    record.description =
-      isRecord(content) && typeof content.topic === "string" && content.topic.trim() !== ""
-        ? content.topic.trim()
-        : undefined;
-    return;
-  }
-
-  if (type === "m.room.encryption" && stateKey === "") {
-    record.encrypted = true;
-    return;
-  }
-
-  if (type === "m.room.member" && stateKey !== "") {
-    const membership =
-      isRecord(content) && typeof content.membership === "string" ? content.membership : "leave";
-    const displayname =
-      isRecord(content) && typeof content.displayname === "string" && content.displayname.trim() !== ""
-        ? content.displayname.trim()
-        : undefined;
-    record.members[stateKey] = { membership, displayname };
+  try {
+    await client.forgetRoom(roomId);
+  } catch {
+    // Best-effort cleanup
   }
 }
 
-function isActivityMessageEvent(event: Record<string, unknown>): boolean {
+function hasEncryptionInCreateResponse(body: Record<string, unknown>): boolean {
+  if (body.encrypted === true || "m.room.encryption" in body) {
+    return true;
+  }
+  for (const key of ["state", "initial_state"]) {
+    const value = body[key];
+    if (Array.isArray(value)) {
+      if (value.some((ev) => isRecord(ev) && ev.type === "m.room.encryption")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function createTopicFailureMessage(result: TransportResult): string {
+  return formatMatrixActionFailure("新建 Topic", result, {
+    serverErrorReason: "Homeserver 暂时不能创建房间",
+    rejectedReason: "Homeserver 拒绝了建房请求",
+  });
+}
+
+function isActivityMessageEvent(event: RawMatrixEvent): boolean {
   if (event.type !== "m.room.message") {
     return false;
   }
@@ -243,46 +423,6 @@ function isActivityMessageEvent(event: Record<string, unknown>): boolean {
 
 function validTimestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-export function deriveTopics(
-  rooms: Record<string, StoredRoomRecord>,
-  roster: BotRosterEntry[],
-  ownerUserId: string,
-): TopicSummary[] {
-  const topics: TopicSummary[] = [];
-
-  for (const room of Object.values(rooms)) {
-    if (!room.hasTopicMarker) {
-      continue;
-    }
-    const marker = parseTopicMarker(room.topicMarker, ownerUserId);
-    const agentUserId = marker.valid ? marker.agentUserId : undefined;
-    const botDisplayName = agentUserId ? resolveBotName(agentUserId, roster, room.members) : undefined;
-    const unavailableReason = computeUnavailableReason(room, marker, ownerUserId);
-    const lastActivityTs = room.lastMessageTs ?? room.createdAt;
-
-    topics.push({
-      roomId: room.roomId,
-      name: room.name ?? "未命名 Topic",
-      description: room.description,
-      agentUserId,
-      botDisplayName,
-      unavailableReason,
-      lastActivityTs,
-    });
-  }
-
-  topics.sort((left, right) => {
-    const leftTs = left.lastActivityTs ?? -1;
-    const rightTs = right.lastActivityTs ?? -1;
-    if (leftTs !== rightTs) {
-      return rightTs - leftTs;
-    }
-    return left.roomId.localeCompare(right.roomId);
-  });
-
-  return topics;
 }
 
 function parseTopicMarker(
@@ -302,45 +442,20 @@ function parseTopicMarker(
   return { valid: true, agentUserId };
 }
 
-function computeUnavailableReason(
-  room: StoredRoomRecord,
-  marker: { valid: true; agentUserId: string } | { valid: false },
-  ownerUserId: string,
-): string | undefined {
-  if (room.encrypted) {
-    return "因房间已加密不可用，无法发送新消息。";
-  }
-  if (!marker.valid) {
-    return "因 Topic 标记无法识别不可用，无法发送新消息。";
-  }
-  const extraActiveMembers = Object.entries(room.members).some(([userId, member]) => {
-    if (userId === ownerUserId || userId === marker.agentUserId) {
-      return false;
-    }
-    return member.membership === "join" || member.membership === "invite" || member.membership === "knock";
-  });
-  if (extraActiveMembers) {
-    return "因房间多于两人不可用，无法发送新消息。";
-  }
-  const agentMembership = room.members[marker.agentUserId]?.membership;
-  if (agentMembership === "ban" || agentMembership === "leave") {
-    return "因 Bot 无法加入不可用，无法发送新消息。";
-  }
-  return undefined;
-}
-
 export function resolvePreselectedBotId(
   topics: TopicSummary[],
-  roster: BotRosterEntry[],
+  registeredAgents: RegisteredAgent[],
 ): string {
-  if (roster.length <= 1 || topics.length === 0) {
+  if (registeredAgents.length <= 1 || topics.length === 0) {
     return "";
   }
   const latest = topics[0];
   if (latest.lastActivityTs === undefined || !latest.agentUserId) {
     return "";
   }
-  return roster.some((bot) => bot.userId === latest.agentUserId) ? latest.agentUserId : "";
+  return registeredAgents.some((bot) => bot.userId === latest.agentUserId)
+    ? latest.agentUserId
+    : "";
 }
 
 export function appendDirectRoomMapping(
@@ -361,8 +476,4 @@ export function appendDirectRoomMapping(
     ? existingForAgent
     : [...existingForAgent, roomId];
   return next;
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -3099,7 +3099,7 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
                   state: {
                     events: [
                       { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
-                      { type: "m.room.name", state_key: "", content: { name: "旧会话残留 Topic" } },
+                      { type: "m.room.name", state_key: "", content: { name: "放弃前残留 Topic" } },
                       {
                         type: "im.waypoint.topic",
                         state_key: "",
@@ -3190,7 +3190,7 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   expect(await screen.findByText("同步到的 Topic")).toBeInTheDocument();
-  expect(screen.queryByText("旧会话残留 Topic")).not.toBeInTheDocument();
+  expect(screen.queryByText("放弃前残留 Topic")).not.toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "新建 Topic" }));
   expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
@@ -3835,5 +3835,613 @@ test("软键盘弹出时将 keyboard inset 传入界面与输入区容器，收�
   } finally {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
     Object.defineProperty(window, "visualViewport", { configurable: true, value: originalVisualViewport });
+  }
+});
+
+test("窄视口提交新建 Topic 期间触发系统返回时留在新建页并重对齐历史深度，失败或成功后按返回均回到 Topic 列表而非退出应用", async () => {
+  const user = userEvent.setup();
+  const { detectPlatform } = await import("../adapters/production");
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      matches: query === "(min-width: 48em)" ? false : true,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  try {
+    // 子场景 A：提交期间触发系统返回，随后建房失败留在表单，再次系统返回回到 Topic 列表
+    globalThis.indexedDB = new IDBFactory();
+    const hsFail = new FakeHomeserver();
+    const failCreateDeferred = deferred<TransportResult>();
+    hsFail.handler = passwordLoginHandler(async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: { next_batch: "batch-1", account_data: validAgents },
+        };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+        return failCreateDeferred.promise;
+      }
+      throw new Error(input.url);
+    });
+
+    window.history.replaceState({ testRoot: "submitting-fail" }, "");
+    const pushSpyFail = vi.spyOn(window.history, "pushState");
+    const viewFail = render(
+      <WaypointApp homeserver={hsFail} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+    expect(pushSpyFail).toHaveBeenCalledTimes(1);
+    expect(window.history.state).toEqual({ waypointDepth: 1 });
+
+    await user.type(screen.getByLabelText("Topic 名字"), "提交中返回失败");
+    await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+    expect(screen.getByRole("button", { name: "正在创建…" })).toBeDisabled();
+
+    // 真实浏览器/jsdom history.back() 触发系统返回
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    // 仍停留在新建表单，且浏览器历史深度已被重新压回 depth=1
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+    expect(screen.getByLabelText("Topic 名字")).toHaveValue("提交中返回失败");
+    expect(screen.getByRole("button", { name: "正在创建…" })).toBeDisabled();
+    expect(pushSpyFail).toHaveBeenCalledTimes(2);
+    expect(window.history.state).toEqual({ waypointDepth: 1 });
+
+    // 建房失败后留在表单报错
+    await act(async () => {
+      failCreateDeferred.resolve({
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "Temporary failure" },
+      });
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Temporary failure");
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+
+    // 再次按下系统返回应回到 Topic 列表（不漏出应用外）
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+    expect(window.history.state).toEqual({ testRoot: "submitting-fail" });
+    viewFail.unmount();
+    pushSpyFail.mockRestore();
+
+    // 子场景 B：提交期间触发系统返回，随后建房成功打开新 Topic，按系统返回回到 Topic 列表
+    globalThis.indexedDB = new IDBFactory();
+    const hsSuccess = new FakeHomeserver();
+    const okCreateDeferred = deferred<TransportResult>();
+    hsSuccess.handler = passwordLoginHandler(async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: { next_batch: "batch-1", account_data: validAgents },
+        };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+        return okCreateDeferred.promise;
+      }
+      if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+        return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+      }
+      if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(input.url);
+    });
+
+    window.history.replaceState({ testRoot: "submitting-ok" }, "");
+    const pushSpyOk = vi.spyOn(window.history, "pushState");
+    const viewOk = render(
+      <WaypointApp homeserver={hsSuccess} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+    await user.type(screen.getByLabelText("Topic 名字"), "提交中返回成功");
+    await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+    expect(pushSpyOk).toHaveBeenCalledTimes(2);
+    expect(window.history.state).toEqual({ waypointDepth: 1 });
+
+    await act(async () => {
+      okCreateDeferred.resolve({
+        type: "response",
+        status: 200,
+        body: { room_id: "!created-ok:example.com" },
+      });
+    });
+    expect(await screen.findByRole("banner")).toHaveTextContent("提交中返回成功");
+    expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+
+    // 建房成功后按系统返回应退回 Topic 列表
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(screen.getByText("提交中返回成功")).toBeInTheDocument();
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+    expect(window.history.state).toEqual({ testRoot: "submitting-ok" });
+    viewOk.unmount();
+    pushSpyOk.mockRestore();
+  } finally {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+  }
+});
+
+test("宽视口同时打开 Topic 与新建表单时快速切换 宽 -> 窄 -> 宽，两次异步 popstate 均被抑制且不会意外关闭表单或当前 Topic", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "双层栈话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const { detectPlatform } = await import("../adapters/production");
+  const originalMatchMedia = window.matchMedia;
+  let isWide = true;
+  const mqListeners = new Set<() => void>();
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      get matches() {
+        return query === "(min-width: 48em)" ? isWide : !isWide;
+      },
+      media: query,
+      addEventListener: (_type: string, listener: () => void) => {
+        mqListeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: () => void) => {
+        mqListeners.delete(listener);
+      },
+      addListener: (listener: () => void) => {
+        mqListeners.add(listener);
+      },
+      removeListener: (listener: () => void) => {
+        mqListeners.delete(listener);
+      },
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  window.history.replaceState({ testRoot: "rapid-switch" }, "");
+  const backSpy = vi.spyOn(window.history, "back");
+  const pushSpy = vi.spyOn(window.history, "pushState");
+  const setWide = (next: boolean) => {
+    isWide = next;
+    for (const listener of mqListeners) {
+      listener();
+    }
+  };
+
+  try {
+    const view = render(
+      <WaypointApp homeserver={homeserver} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+
+    // 宽视口先打开 Topic，再点击新建 Topic 并写入草稿
+    await user.click(await screen.findByRole("button", { name: "双层栈话题" }));
+    expect(screen.getByRole("banner")).toHaveTextContent("双层栈话题");
+    await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+    await user.type(screen.getByLabelText("Topic 名字"), "切屏保留草稿");
+    expect(pushSpy).not.toHaveBeenCalled();
+
+    // 快速切换 宽 -> 窄 -> 宽（触发两次 pushNavigationEntry 后紧接着两次 popNavigationEntry）
+    act(() => {
+      setWide(false);
+    });
+    expect(pushSpy).toHaveBeenCalledTimes(2);
+    act(() => {
+      setWide(true);
+    });
+
+    // 等待两次异步 history.back() 与 popstate 全部完成
+    await waitFor(() => {
+      expect(backSpy).toHaveBeenCalledTimes(2);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    // 新建表单与草稿仍完好保留，取消后原打开的 Topic 也仍保持打开
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+    expect(screen.getByLabelText("Topic 名字")).toHaveValue("切屏保留草稿");
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByRole("banner")).toHaveTextContent("双层栈话题");
+    expect(window.history.state).toEqual({ testRoot: "rapid-switch" });
+
+    // 再次切到窄视口并触发真实系统返回，验证历史栈与抑制计数器未残留错位
+    act(() => {
+      setWide(false);
+    });
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+
+    view.unmount();
+  } finally {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    backSpy.mockRestore();
+    pushSpy.mockRestore();
+  }
+});
+
+test("连续新建两条 Topic 时串行追加 m.direct，不会因前一次 PUT 未完成而覆盖丢掉前一条房间 ID", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let createIndex = 0;
+  let directPutIndex = 0;
+  const firstDirectPut = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "助理" }] },
+              },
+              {
+                type: "m.direct",
+                content: { "@bot:example.com": ["!old:example.com"] },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      createIndex += 1;
+      return { type: "response", status: 200, body: { room_id: `!room${createIndex}:example.com` } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      directPutIndex += 1;
+      if (directPutIndex === 1) {
+        return firstDirectPut.promise;
+      }
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  // 创建第一条 Topic：此时第一次 m.direct PUT 仍处于挂起中
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "连续话题一");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  expect(await screen.findByRole("banner")).toHaveTextContent("连续话题一");
+
+  // 立即创建第二条 Topic
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "连续话题二");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  expect(await screen.findByRole("banner")).toHaveTextContent("连续话题二");
+
+  // 第一次 PUT 未完成前，第二次 PUT 尚未发出
+  const directPutsBefore = homeserver.requests.filter(
+    (r) => r.method === "PUT" && r.url.includes("/account_data/m.direct"),
+  );
+  expect(directPutsBefore).toHaveLength(1);
+  expect(directPutsBefore[0]?.body).toEqual({
+    "@bot:example.com": ["!old:example.com", "!room1:example.com"],
+  });
+
+  // 放行第一次 PUT，第二次 PUT 应基于最新 m.direct 追加，保留全部房间 ID
+  await act(async () => {
+    firstDirectPut.resolve({ type: "response", status: 200, body: {} });
+  });
+
+  await waitFor(() => {
+    const directPuts = homeserver.requests.filter(
+      (r) => r.method === "PUT" && r.url.includes("/account_data/m.direct"),
+    );
+    expect(directPuts).toHaveLength(2);
+    expect(directPuts[1]?.body).toEqual({
+      "@bot:example.com": ["!old:example.com", "!room1:example.com", "!room2:example.com"],
+    });
+  });
+});
+
+test("按房间保存原始事件：m.replace 编辑不提前抬高 Topic 活动排序，增量状态更新在重启后保持最新", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [
+                      { user_id: "@bot1:example.com", name: "一号" },
+                      { user_id: "@bot2:example.com", name: "二号" },
+                    ],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题一" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg1",
+                        sender: "@bot1:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "原消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit1",
+                        sender: "@bot1:example.com",
+                        origin_server_ts: 9000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 改后消息",
+                          "m.new_content": { msgtype: "m.text", body: "改后消息" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$msg1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题二" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg2",
+                        sender: "@bot2:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "最新常规消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.name",
+                      event_id: "$rename1",
+                      state_key: "",
+                      origin_server_ts: 4000,
+                      content: { name: "话题一已改名" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  // m.replace (ts=9000) 不算作新活动，最新活动仍是 !t2 (ts=3000) -> 预选 @bot2
+  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  first.unmount();
+
+  // 重启后增量同步带来的 m.room.name 更新保留原 im.waypoint.topic 状态并生效
+  renderApp(homeserver);
+  expect(await screen.findByText("话题一已改名")).toBeInTheDocument();
+  expect(screen.getByText("话题二")).toBeInTheDocument();
+});
+
+test("生产平台适配器支持 virtualKeyboard、waypoint:keyboard-inset 事件与 CSS --keyboard-inset 回退", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "键盘多源话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const { detectPlatform } = await import("../adapters/production");
+  const vkListeners = new Set<EventListener>();
+  const fakeVk = {
+    boundingRect: { height: 0 },
+    addEventListener: (_type: string, listener: EventListener) => {
+      vkListeners.add(listener);
+    },
+    removeEventListener: (_type: string, listener: EventListener) => {
+      vkListeners.delete(listener);
+    },
+  };
+  const originalVkDescriptor = Object.getOwnPropertyDescriptor(navigator, "virtualKeyboard");
+  Object.defineProperty(navigator, "virtualKeyboard", {
+    configurable: true,
+    value: fakeVk,
+  });
+
+  try {
+    const view = render(
+      <WaypointApp homeserver={homeserver} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "键盘多源话题" }));
+    const main = screen.getByRole("main");
+    expect(main.style.paddingBottom).toBe("0px");
+
+    // 1. VirtualKeyboard geometrychange
+    act(() => {
+      fakeVk.boundingRect = { height: 275 };
+      for (const listener of vkListeners) {
+        listener(new Event("geometrychange"));
+      }
+    });
+    expect(main.style.paddingBottom).toBe("275px");
+
+    act(() => {
+      fakeVk.boundingRect = { height: 0 };
+      for (const listener of vkListeners) {
+        listener(new Event("geometrychange"));
+      }
+    });
+    expect(main.style.paddingBottom).toBe("0px");
+
+    // 2. 自定义 waypoint:keyboard-inset DOM 事件
+    act(() => {
+      window.dispatchEvent(new CustomEvent("waypoint:keyboard-inset", { detail: { bottom: 324 } }));
+    });
+    expect(main.style.paddingBottom).toBe("324px");
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent("waypoint:keyboard-inset", { detail: { bottom: 0 } }));
+    });
+    expect(main.style.paddingBottom).toBe("0px");
+
+    // 3. :root CSS --keyboard-inset 变量回退
+    act(() => {
+      document.documentElement.style.setProperty("--keyboard-inset", "260px");
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(main.style.paddingBottom).toBe("260px");
+
+    act(() => {
+      document.documentElement.style.removeProperty("--keyboard-inset");
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(main.style.paddingBottom).toBe("0px");
+
+    view.unmount();
+  } finally {
+    document.documentElement.style.removeProperty("--keyboard-inset");
+    if (originalVkDescriptor) {
+      Object.defineProperty(navigator, "virtualKeyboard", originalVkDescriptor);
+    } else {
+      delete (navigator as unknown as { virtualKeyboard?: unknown }).virtualKeyboard;
+    }
   }
 });

@@ -1,4 +1,9 @@
-import type { StoredRoomRecord } from "./topics";
+export type RawMatrixEvent = Record<string, unknown>;
+
+export type StoredRoomEvents = {
+  stateEvents: RawMatrixEvent[];
+  timelineEvents: RawMatrixEvent[];
+};
 
 export type SessionRecord = {
   baseUrl: string;
@@ -7,7 +12,7 @@ export type SessionRecord = {
   deviceId?: string;
   syncCursor?: string;
   accountData?: Record<string, unknown>;
-  rooms?: Record<string, StoredRoomRecord>;
+  rooms?: Record<string, StoredRoomEvents>;
 };
 
 const DB_NAME = "waypoint";

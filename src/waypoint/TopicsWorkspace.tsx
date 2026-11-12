@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import {
+  appendDirectRoom,
+  createTopicRoom,
   deriveTopics,
-  localpartOf,
-  parseBotRoster,
+  parseRegisteredAgents,
+  resolveBotName,
   resolvePreselectedBotId,
-  type BotRosterEntry,
-  type StoredRoomRecord,
 } from "./topics";
 
 export function TopicsWorkspace({
@@ -33,10 +34,16 @@ export function TopicsWorkspace({
   const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
 
-  const roster = parseBotRoster(client.accountData("im.waypoint.agents"), client.ownerId);
+  const registeredAgents = parseRegisteredAgents(
+    client.accountData("im.waypoint.agents"),
+    client.ownerId,
+  );
   const rooms = client.rooms();
-  const topics = deriveTopics(rooms, roster, client.ownerId);
-  const activeTopic = activeTopicId ? topics.find((topic) => topic.roomId === activeTopicId) : undefined;
+  const roomList = Object.values(rooms);
+  const topics = deriveTopics(rooms, registeredAgents, client.ownerId);
+  const activeTopic = activeTopicId
+    ? topics.find((topic) => topic.roomId === activeTopicId)
+    : undefined;
 
   useEffect(() => {
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
@@ -48,15 +55,19 @@ export function TopicsWorkspace({
   const navDepthRef = useRef(0);
   const targetDepth = viewportMode === "narrow" ? (creating ? 1 : 0) + (activeTopic ? 1 : 0) : 0;
 
-  useEffect(() => {
-    while (navDepthRef.current < targetDepth) {
+  function syncNavigationDepth(desiredDepth: number) {
+    while (navDepthRef.current < desiredDepth) {
       navDepthRef.current += 1;
       platform?.pushNavigationEntry?.();
     }
-    while (navDepthRef.current > targetDepth) {
+    while (navDepthRef.current > desiredDepth) {
       navDepthRef.current -= 1;
       platform?.popNavigationEntry?.();
     }
+  }
+
+  useEffect(() => {
+    syncNavigationDepth(targetDepth);
   }, [targetDepth, platform]);
 
   const backHandlerRef = useRef<() => boolean>(() => false);
@@ -67,6 +78,7 @@ export function TopicsWorkspace({
     if (creating) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
       if (submitting) {
+        syncNavigationDepth(targetDepth);
         return true;
       }
       setCreating(false);
@@ -103,7 +115,11 @@ export function TopicsWorkspace({
     setSubmitting(false);
     setNameInput("");
     setDescriptionInput("");
-    setSelectedBotId(roster.length === 1 ? roster[0].userId : resolvePreselectedBotId(topics, roster));
+    setSelectedBotId(
+      registeredAgents.length === 1
+        ? registeredAgents[0].userId
+        : resolvePreselectedBotId(topics, registeredAgents),
+    );
     setFormError(undefined);
   }
 
@@ -150,8 +166,8 @@ export function TopicsWorkspace({
       setFormError("请输入 Topic 名字。");
       return;
     }
-    const agentUserId = roster.length === 1 ? roster[0].userId : selectedBotId;
-    if (!agentUserId || !roster.some((bot) => bot.userId === agentUserId)) {
+    const agentUserId = registeredAgents.length === 1 ? registeredAgents[0].userId : selectedBotId;
+    if (!agentUserId || !registeredAgents.some((bot) => bot.userId === agentUserId)) {
       setFormError("请选择要绑定的 Bot。");
       return;
     }
@@ -161,7 +177,7 @@ export function TopicsWorkspace({
     setFormError(undefined);
 
     const now = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
-    const result = await client.createTopicRoom({
+    const result = await createTopicRoom(client, {
       name: trimmedName,
       description: trimmedDescription || undefined,
       agentUserId,
@@ -178,14 +194,14 @@ export function TopicsWorkspace({
     setActiveTopicId(result.roomId);
     setDescriptionExpanded(false);
     setRevision((value) => value + 1);
-    void client.appendDirectRoom(agentUserId, result.roomId);
+    void appendDirectRoom(client, agentUserId, result.roomId);
   }
 
   const isNarrow = viewportMode === "narrow";
   const isNarrowPushed = isNarrow && (creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
   const showDetail = !isNarrow || isNarrowPushed;
-  const safeInset = Number.isFinite(keyboardInsetBottom) && keyboardInsetBottom > 0 ? Math.round(keyboardInsetBottom) : 0;
+  const safeInset = normalizeInset(keyboardInsetBottom);
 
   return (
     <div
@@ -219,11 +235,8 @@ export function TopicsWorkspace({
                   >
                     <span className="waypoint-topic-row-title">
                       <span>{topic.name}</span>
-                      {topic.unavailableReason ? (
-                        <span className="waypoint-unavailable-tag">不可用</span>
-                      ) : null}
                     </span>
-                    {roster.length > 1 && topic.botDisplayName ? (
+                    {registeredAgents.length > 1 && topic.botDisplayName ? (
                       <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
                     ) : null}
                   </button>
@@ -280,7 +293,7 @@ export function TopicsWorkspace({
                   <p className="waypoint-field-hint">
                     留空表示没有额外上下文；填写后会发给这条 Topic 绑定的 Bot，不是私密备忘。
                   </p>
-                  {roster.length > 1 ? (
+                  {registeredAgents.length > 1 ? (
                     <label>
                       绑定 Bot
                       <select
@@ -289,9 +302,9 @@ export function TopicsWorkspace({
                         onChange={(event) => setSelectedBotId(event.target.value)}
                       >
                         <option value="">请选择 Bot</option>
-                        {roster.map((bot) => (
+                        {registeredAgents.map((bot) => (
                           <option key={bot.userId} value={bot.userId}>
-                            {resolveRosterOptionLabel(bot, rooms)}
+                            {resolveBotName(bot.userId, registeredAgents, roomList)}
                           </option>
                         ))}
                       </select>
@@ -343,11 +356,6 @@ export function TopicsWorkspace({
                     {activeTopic.description}
                   </button>
                 ) : null}
-                {activeTopic.unavailableReason ? (
-                  <p role="status" className="waypoint-unavailable-banner">
-                    {activeTopic.unavailableReason}
-                  </p>
-                ) : null}
               </header>
               <main
                 className="waypoint-timeline-container"
@@ -381,20 +389,4 @@ export function TopicsWorkspace({
       ) : null}
     </div>
   );
-}
-
-function resolveRosterOptionLabel(
-  bot: BotRosterEntry,
-  rooms: Record<string, StoredRoomRecord>,
-): string {
-  if (bot.handwrittenName) {
-    return bot.handwrittenName;
-  }
-  for (const room of Object.values(rooms)) {
-    const memberDisplayName = room.members[bot.userId]?.displayname;
-    if (memberDisplayName) {
-      return memberDisplayName;
-    }
-  }
-  return localpartOf(bot.userId);
 }
