@@ -37,6 +37,7 @@ import {
   deleteTopicRoom,
   deriveRoomAvailability,
   type BubbleVisibility,
+  type TimelineMedia,
   deriveRoomTimelineItems,
   deriveTopics,
   formatTopicListTime,
@@ -94,6 +95,7 @@ export function TopicsWorkspace({
     [providedRetryQueue, client, clock],
   );
   const [, setRevision] = useState(0);
+  const [, setMediaRevision] = useState(0);
   const [backfillTick, setBackfillTick] = useState(0);
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -191,6 +193,14 @@ export function TopicsWorkspace({
     top: 0,
   });
   const userScrolledRoomRef = useRef<string | null>(null);
+  const downloadedMediaCacheRef = useRef<
+    Map<string, { data: Uint8Array; mimeType: string; imageUrl?: string; revoke?: () => void }>
+  >(new Map());
+  const localMediaUrlCacheRef = useRef<
+    Map<string, { dataRef: Uint8Array; url: string; revoke?: () => void }>
+  >(new Map());
+  const downloadingMediaRef = useRef<Set<string>>(new Set());
+  const failedImageMxcUrlsRef = useRef<Set<string>>(new Set());
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -220,7 +230,7 @@ export function TopicsWorkspace({
       const promptSig = item.prompt
         ? `${item.prompt.kind}:${item.prompt.answered ? 1 : 0}:${item.prompt.superseded ? 1 : 0}:${item.prompt.queuedKey ?? ""}:${item.prompt.options.map((o) => `${o.key}${o.redacted ? "!" : ""}`).join(",")}`
         : "";
-      return `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${promptSig}:${item.body}`;
+      return `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${promptSig}:${item.media?.mxcUrl ?? ""}:${item.media?.filename ?? ""}:${item.body}`;
     })
     .join("\0");
 
@@ -1190,6 +1200,14 @@ export function TopicsWorkspace({
       }
       unsubVisibility();
       unsubResume();
+      for (const entry of downloadedMediaCacheRef.current.values()) {
+        entry.revoke?.();
+      }
+      downloadedMediaCacheRef.current.clear();
+      for (const entry of localMediaUrlCacheRef.current.values()) {
+        entry.revoke?.();
+      }
+      localMediaUrlCacheRef.current.clear();
       client.setCredentialRejectedHandler(undefined);
       retryQueue.setCallbacks({});
       if (!providedRetryQueue) {
@@ -1778,6 +1796,303 @@ export function TopicsWorkspace({
     }
   }
 
+  function getOrCreateLocalImageUrl(localId: string, attachment: DraftAttachment): string {
+    const existing = localMediaUrlCacheRef.current.get(localId);
+    if (existing && existing.dataRef === attachment.data) {
+      return existing.url;
+    }
+    existing?.revoke?.();
+    const created = createRenderableMediaUrl(attachment.data, attachment.mimeType);
+    localMediaUrlCacheRef.current.set(localId, {
+      dataRef: attachment.data,
+      url: created.url,
+      revoke: created.revoke,
+    });
+    return created.url;
+  }
+
+  useEffect(() => {
+    if (reauthRequired || !client.hasToken || exiting) {
+      return;
+    }
+    for (const item of activeTimelineItems) {
+      if (item.kind !== "message" || !item.media || item.media.kind !== "image") {
+        continue;
+      }
+      const mxcUrl = item.media.mxcUrl;
+      if (
+        !mxcUrl ||
+        item.media.localAttachment ||
+        downloadedMediaCacheRef.current.has(mxcUrl) ||
+        downloadingMediaRef.current.has(mxcUrl) ||
+        failedImageMxcUrlsRef.current.has(mxcUrl)
+      ) {
+        continue;
+      }
+      downloadingMediaRef.current.add(mxcUrl);
+      const fallbackMime = item.media.mimeType || "image/png";
+      void client
+        .downloadMedia(mxcUrl)
+        .then((result) => {
+          if (!mountedRef.current || !client.hasToken) {
+            return;
+          }
+          if (isCredentialRejected(result)) {
+            pauseForCredentialRejection();
+            return;
+          }
+          const bytes =
+            result.type === "response" && result.status >= 200 && result.status < 300
+              ? extractBytesFromTransportBody(result.body)
+              : undefined;
+          if (!bytes) {
+            failedImageMxcUrlsRef.current.add(mxcUrl);
+            return;
+          }
+          const created = createRenderableMediaUrl(bytes, fallbackMime);
+          downloadedMediaCacheRef.current.set(mxcUrl, {
+            data: bytes,
+            mimeType: fallbackMime,
+            imageUrl: created.url,
+            revoke: created.revoke,
+          });
+          setMediaRevision((value) => value + 1);
+        })
+        .catch(() => {
+          failedImageMxcUrlsRef.current.add(mxcUrl);
+        })
+        .finally(() => {
+          downloadingMediaRef.current.delete(mxcUrl);
+        });
+    }
+  }, [timelineContentKey, visibleComposerRoomId, client, exiting, reauthRequired]);
+
+  function handleOpenExternalUrl(url: string) {
+    if (platform?.openExternalUrl) {
+      void Promise.resolve(platform.openExternalUrl(url)).catch(() => undefined);
+      return;
+    }
+    if (typeof window !== "undefined" && typeof window.open === "function") {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  async function invokePlatformOpenMedia(input: {
+    data: Uint8Array;
+    mimeType: string;
+    filename: string;
+  }) {
+    if (platform?.openMediaFile) {
+      await Promise.resolve(platform.openMediaFile(input));
+      return;
+    }
+    if (typeof document !== "undefined") {
+      const created = createRenderableMediaUrl(input.data, input.mimeType);
+      const anchor = document.createElement("a");
+      anchor.href = created.url;
+      anchor.download = input.filename;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.click();
+      if (created.revoke) {
+        clock.setTimeout(() => created.revoke?.(), 60_000);
+      }
+    }
+  }
+
+  async function handleOpenMedia(media: TimelineMedia) {
+    if (media.externalUrl) {
+      handleOpenExternalUrl(media.externalUrl);
+      return;
+    }
+    if (media.localAttachment) {
+      try {
+        await invokePlatformOpenMedia({
+          data: new Uint8Array(media.localAttachment.data),
+          mimeType: media.localAttachment.mimeType,
+          filename: media.localAttachment.name,
+        });
+      } catch {
+        showPinNotice("打开附件失败，请重试。");
+      }
+      return;
+    }
+    const mxcUrl = media.mxcUrl;
+    if (!mxcUrl) {
+      return;
+    }
+    let cached = downloadedMediaCacheRef.current.get(mxcUrl);
+    if (!cached) {
+      if (reauthRequiredRef.current || !client.hasToken) {
+        return;
+      }
+      failedImageMxcUrlsRef.current.delete(mxcUrl);
+      let result: TransportResult;
+      try {
+        result = await client.downloadMedia(mxcUrl);
+      } catch {
+        showPinNotice("打开附件失败，请重试。");
+        return;
+      }
+      if (!mountedRef.current || !client.hasToken) {
+        return;
+      }
+      if (isCredentialRejected(result)) {
+        pauseForCredentialRejection();
+        return;
+      }
+      const bytes =
+        result.type === "response" && result.status >= 200 && result.status < 300
+          ? extractBytesFromTransportBody(result.body)
+          : undefined;
+      if (!bytes) {
+        if (media.kind === "image") {
+          failedImageMxcUrlsRef.current.add(mxcUrl);
+        }
+        showPinNotice("打开附件失败，请重试。");
+        return;
+      }
+      const mimeType = media.mimeType || "application/octet-stream";
+      const created = media.kind === "image" ? createRenderableMediaUrl(bytes, mimeType) : undefined;
+      cached = {
+        data: bytes,
+        mimeType,
+        ...(created ? { imageUrl: created.url, revoke: created.revoke } : {}),
+      };
+      downloadedMediaCacheRef.current.set(mxcUrl, cached);
+      if (media.kind === "image") {
+        setMediaRevision((value) => value + 1);
+      }
+    }
+    try {
+      await invokePlatformOpenMedia({
+        data: new Uint8Array(cached.data),
+        mimeType: media.mimeType || cached.mimeType,
+        filename: media.filename,
+      });
+    } catch {
+      showPinNotice("打开附件失败，请重试。");
+    }
+  }
+
+  function buildAttachmentEventContent(
+    attachment: DraftAttachment,
+    captionText: string,
+  ): Record<string, unknown> {
+    const msgtype = attachment.mimeType.startsWith("image/") ? "m.image" : "m.file";
+    const body = captionText.trim() !== "" ? captionText : attachment.name;
+    return {
+      msgtype,
+      body,
+      filename: attachment.name,
+      info: {
+        mimetype: attachment.mimeType,
+        size: attachment.size,
+      },
+    };
+  }
+
+  async function sendComposerAttachmentMessage(
+    roomId: string,
+    attachment: DraftAttachment,
+    captionText: string,
+  ) {
+    if (persistingSendRef.current || reauthRequiredRef.current) {
+      return;
+    }
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
+      return;
+    }
+    persistingSendRef.current = true;
+    setPersistingSend(true);
+    setComposerError(undefined);
+    try {
+      const content = buildAttachmentEventContent(attachment, captionText);
+      await client.enqueueRoomEvent(roomId, "m.room.message", content, {
+        clearDraft: true,
+        attachment,
+      });
+      bumpDraftSeq(roomId);
+      setDraftsByRoom((prev) => {
+        if (!(roomId in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      });
+      setRevision((value) => value + 1);
+      void retryQueue.flush();
+    } catch {
+      setComposerError("消息保存失败，请重试。");
+    } finally {
+      persistingSendRef.current = false;
+      setPersistingSend(false);
+    }
+  }
+
+  async function sendMultipleAttachmentsInOrder(roomId: string, files: File[]) {
+    if (files.length === 0 || persistingSendRef.current || reauthRequiredRef.current) {
+      return;
+    }
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
+      return;
+    }
+    persistingSendRef.current = true;
+    setPersistingSend(true);
+    setComposerError(undefined);
+    try {
+      const attachments: DraftAttachment[] = [];
+      for (const file of files) {
+        const data = await readFileBytes(file);
+        attachments.push({
+          name: file.name,
+          mimeType: file.type || "application/octet-stream",
+          size: data.byteLength,
+          data,
+        });
+      }
+      const initialCaption = draftsByRoomRef.current[roomId]?.text ?? "";
+      for (let i = 0; i < attachments.length; i += 1) {
+        const attachment = attachments[i]!;
+        const captionForItem = i === 0 && initialCaption.trim() !== "" ? initialCaption : "";
+        const content = buildAttachmentEventContent(attachment, captionForItem);
+        await client.enqueueRoomEvent(roomId, "m.room.message", content, {
+          clearDraft: i === attachments.length - 1,
+          attachment,
+        });
+      }
+      bumpDraftSeq(roomId);
+      setDraftsByRoom((prev) => {
+        if (!(roomId in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
+      });
+      setRevision((value) => value + 1);
+      void retryQueue.flush();
+    } catch {
+      setRevision((value) => value + 1);
+      setComposerError("附件保存失败，请重试。");
+    } finally {
+      persistingSendRef.current = false;
+      setPersistingSend(false);
+    }
+  }
+
+  function handlePickedFiles(roomId: string, files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+    if (files.length === 1) {
+      void handleSelectAttachment(roomId, files[0]!);
+      return;
+    }
+    void sendMultipleAttachmentsInOrder(roomId, files);
+  }
+
   async function sendComposerTextMessage(roomId: string, body: string) {
     if (persistingSendRef.current || reauthRequiredRef.current) {
       return;
@@ -1825,7 +2140,11 @@ export function TopicsWorkspace({
     const roomId = activeTopic.roomId;
     const draft = draftsByRoomRef.current[roomId];
     const body = draft?.text ?? "";
-    if (draft?.attachment || body.trim() === "") {
+    if (draft?.attachment) {
+      await sendComposerAttachmentMessage(roomId, draft.attachment, body);
+      return;
+    }
+    if (body.trim() === "") {
       return;
     }
     await sendComposerTextMessage(roomId, body);
@@ -2147,6 +2466,7 @@ export function TopicsWorkspace({
     );
   }
 
+  const allowMacOsFileTransfer = platform?.deviceDisplayName !== "Waypoint Android";
   const isNarrow = viewportMode === "narrow";
   const isNarrowPushed = isNarrow && (settingsOpen || creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
@@ -2748,6 +3068,31 @@ export function TopicsWorkspace({
                 <main
                   className="waypoint-timeline-container"
                   style={{ paddingBottom: `${safeInset}px` }}
+                  onDragOver={(event) => {
+                    if (!allowMacOsFileTransfer) {
+                      return;
+                    }
+                    const hasFiles =
+                      (event.dataTransfer?.files?.length ?? 0) > 0 ||
+                      Array.from(event.dataTransfer?.types ?? []).includes("Files");
+                    if (hasFiles) {
+                      event.preventDefault();
+                    }
+                  }}
+                  onDrop={(event) => {
+                    if (!allowMacOsFileTransfer) {
+                      return;
+                    }
+                    const files = extractDataTransferFiles(event.dataTransfer);
+                    if (files.length === 0) {
+                      return;
+                    }
+                    event.preventDefault();
+                    if (persistingSend || activeTopic.unavailable || reauthRequired) {
+                      return;
+                    }
+                    handlePickedFiles(activeTopic.roomId, files);
+                  }}
                 >
                   <div
                     ref={timelineRef}
@@ -2836,7 +3181,61 @@ export function TopicsWorkspace({
                                   : undefined
                               }
                             >
-                              <MessageBody body={item.body} />
+                              {item.media ? (
+                                <div className="waypoint-media-bubble">
+                                  {item.media.kind === "image" ? (
+                                    <button
+                                      type="button"
+                                      aria-label={`查看图片 ${item.media.filename}`}
+                                      className="waypoint-media-image-button"
+                                      onClick={() => void handleOpenMedia(item.media!)}
+                                    >
+                                      {(() => {
+                                        const imageSrc = item.media.localAttachment
+                                          ? getOrCreateLocalImageUrl(
+                                              item.localId ?? item.key,
+                                              item.media.localAttachment,
+                                            )
+                                          : item.media.mxcUrl
+                                            ? downloadedMediaCacheRef.current.get(item.media.mxcUrl)?.imageUrl
+                                            : undefined;
+                                        return imageSrc ? (
+                                          <img
+                                            src={imageSrc}
+                                            alt={item.media.filename}
+                                            className="waypoint-bubble-image"
+                                          />
+                                        ) : (
+                                          <span className="waypoint-media-filename">
+                                            {item.media.filename}
+                                          </span>
+                                        );
+                                      })()}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      className="waypoint-media-file-button"
+                                      onClick={() => void handleOpenMedia(item.media!)}
+                                    >
+                                      <span className="waypoint-media-filename">
+                                        {item.media.filename}
+                                      </span>
+                                    </button>
+                                  )}
+                                  {item.media.caption ? (
+                                    <MessageBody
+                                      body={item.media.caption}
+                                      onOpenExternalUrl={handleOpenExternalUrl}
+                                    />
+                                  ) : null}
+                                </div>
+                              ) : (
+                                <MessageBody
+                                  body={item.body}
+                                  onOpenExternalUrl={handleOpenExternalUrl}
+                                />
+                              )}
                             </div>
                             {item.reactions && item.reactions.length > 0 ? (
                               <div className="waypoint-message-reactions">
@@ -2956,15 +3355,14 @@ export function TopicsWorkspace({
                         附件
                         <input
                           type="file"
+                          multiple
                           aria-label="选择附件"
                           className="waypoint-sr-only"
                           disabled={persistingSend || activeTopic.unavailable || reauthRequired}
                           onChange={(event) => {
-                            const file = event.target.files?.[0];
+                            const files = event.target.files ? Array.from(event.target.files) : [];
                             event.target.value = "";
-                            if (file) {
-                              void handleSelectAttachment(activeTopic.roomId, file);
-                            }
+                            handlePickedFiles(activeTopic.roomId, files);
                           }}
                         />
                       </label>
@@ -2977,6 +3375,20 @@ export function TopicsWorkspace({
                         }
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
+                        onPaste={(event) => {
+                          if (!allowMacOsFileTransfer) {
+                            return;
+                          }
+                          const files = extractDataTransferFiles(event.clipboardData);
+                          if (files.length === 0) {
+                            return;
+                          }
+                          event.preventDefault();
+                          if (persistingSend || activeTopic.unavailable || reauthRequired) {
+                            return;
+                          }
+                          handlePickedFiles(activeTopic.roomId, files);
+                        }}
                       />
                       <button
                         type="submit"
@@ -3032,4 +3444,60 @@ async function readFileBytes(file: File): Promise<Uint8Array> {
     reader.readAsArrayBuffer(file);
   });
   return new Uint8Array(buffer);
+}
+
+function extractBytesFromTransportBody(body: unknown): Uint8Array | undefined {
+  if (body instanceof Uint8Array) {
+    return new Uint8Array(body);
+  }
+  if (body instanceof ArrayBuffer) {
+    return new Uint8Array(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength));
+  }
+  return undefined;
+}
+
+function createRenderableMediaUrl(
+  data: Uint8Array,
+  mimeType: string,
+): { url: string; revoke?: () => void } {
+  const safeMime = mimeType || "application/octet-stream";
+  if (typeof URL.createObjectURL === "function") {
+    const objectUrl = URL.createObjectURL(new Blob([new Uint8Array(data)], { type: safeMime }));
+    return {
+      url: objectUrl,
+      revoke: () => URL.revokeObjectURL(objectUrl),
+    };
+  }
+  let binary = "";
+  for (let i = 0; i < data.length; i += 1) {
+    binary += String.fromCharCode(data[i]!);
+  }
+  return {
+    url: `data:${safeMime};base64,${btoa(binary)}`,
+  };
+}
+
+function extractDataTransferFiles(transfer: DataTransfer | null | undefined): File[] {
+  if (!transfer) {
+    return [];
+  }
+  if (transfer.files && transfer.files.length > 0) {
+    return Array.from(transfer.files);
+  }
+  if (transfer.items && transfer.items.length > 0) {
+    const out: File[] = [];
+    for (const item of Array.from(transfer.items)) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) {
+          out.push(file);
+        }
+      }
+    }
+    return out;
+  }
+  return [];
 }

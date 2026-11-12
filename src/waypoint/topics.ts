@@ -1,12 +1,12 @@
 import type { TransportResult } from "../adapters/types";
-import { localPlaceholderOf, roomTimelineGaps, type MatrixClient } from "./matrix-client";
+import { localPlaceholderOf, parseMxcUri, roomTimelineGaps, type MatrixClient } from "./matrix-client";
 import {
   disconnectedMessage,
   formatMatrixActionFailure,
   isRecord,
   transportFailureMessage,
 } from "./matrix-errors";
-import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
+import type { DraftAttachment, PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
   userId: string;
@@ -1118,6 +1118,18 @@ export type TimelinePrompt = {
   superseded: boolean;
 };
 
+export type TimelineMedia = {
+  kind: "image" | "file";
+  msgtype: "m.image" | "m.file" | "m.audio" | "m.video";
+  mxcUrl?: string;
+  externalUrl?: string;
+  filename: string;
+  caption?: string;
+  mimeType?: string;
+  size?: number;
+  localAttachment?: DraftAttachment;
+};
+
 export type TimelineItem =
   | {
       kind: "day-separator";
@@ -1130,12 +1142,75 @@ export type TimelineItem =
       eventId?: string;
       side: "left" | "right";
       body: string;
+      media?: TimelineMedia;
       status: "confirmed" | "unconfirmed" | "failed";
       localId?: string;
       responding?: boolean;
       reactions?: string[];
       prompt?: TimelinePrompt;
     };
+
+function isSafeHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function extractMediaFromContent(
+  content: Record<string, unknown>,
+  localAttachment?: DraftAttachment,
+): TimelineMedia | undefined {
+  const msgtype = content.msgtype;
+  if (
+    msgtype !== "m.image" &&
+    msgtype !== "m.file" &&
+    msgtype !== "m.audio" &&
+    msgtype !== "m.video"
+  ) {
+    return undefined;
+  }
+  const rawUrl = typeof content.url === "string" ? content.url.trim() : "";
+  const mxcUrl = rawUrl && parseMxcUri(rawUrl) ? rawUrl : undefined;
+  const externalUrl = !mxcUrl && rawUrl && isSafeHttpUrl(rawUrl) ? rawUrl : undefined;
+  if (!localAttachment && !mxcUrl && !externalUrl) {
+    return undefined;
+  }
+  const kind: "image" | "file" =
+    msgtype === "m.image" && (mxcUrl || localAttachment) ? "image" : "file";
+  const rawBody = typeof content.body === "string" ? content.body : "";
+  const rawFilename = typeof content.filename === "string" ? content.filename.trim() : "";
+  const filename =
+    rawFilename ||
+    localAttachment?.name ||
+    (rawBody.trim() !== "" ? rawBody.trim() : kind === "image" ? "image" : "file");
+  const caption = rawBody.trim() !== "" && rawBody !== filename ? rawBody : undefined;
+  const mimeType =
+    isRecord(content.info) &&
+    typeof content.info.mimetype === "string" &&
+    content.info.mimetype.trim() !== ""
+      ? content.info.mimetype
+      : localAttachment?.mimeType;
+  const size =
+    isRecord(content.info) &&
+    typeof content.info.size === "number" &&
+    Number.isFinite(content.info.size)
+      ? content.info.size
+      : localAttachment?.size;
+  return {
+    kind,
+    msgtype,
+    ...(mxcUrl ? { mxcUrl } : {}),
+    ...(externalUrl ? { externalUrl } : {}),
+    filename,
+    ...(caption ? { caption } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(size !== undefined ? { size } : {}),
+    ...(localAttachment ? { localAttachment } : {}),
+  };
+}
 
 function stripStreamingCursor(body: string): string {
   return body.replace(/ ?▉$/, "");
@@ -1259,8 +1334,23 @@ export function deriveRoomTimelineItems(
       const local = localPlaceholderOf(event);
       if (local) {
         seenLocalTxnIds.add(local.txnId);
+        if (!isRecord(event.content)) {
+          return;
+        }
+        const media = extractMediaFromContent(event.content, local.attachment);
+        if (media) {
+          items.push({
+            kind: "message",
+            key: `local-${local.id}`,
+            side: "right",
+            body: media.caption ?? media.filename,
+            media,
+            status: local.status,
+            localId: local.id,
+          });
+          return;
+        }
         if (
-          !isRecord(event.content) ||
           event.content.msgtype !== "m.text" ||
           typeof event.content.body !== "string" ||
           event.content.body.trim() === ""
@@ -1287,22 +1377,30 @@ export function deriveRoomTimelineItems(
       if (!side) {
         return;
       }
-      if (
-        !isRecord(event.content) ||
-        event.content.msgtype !== "m.text" ||
-        typeof event.content.body !== "string"
-      ) {
+      if (!isRecord(event.content)) {
         return;
       }
       const rawEventId =
         typeof event.event_id === "string" && event.event_id !== ""
           ? event.event_id
           : undefined;
-      const edit = rawEventId ? latestEdits.get(rawEventId) : undefined;
-      const rawBody = edit ? edit.body : event.content.body;
-      const body = edit || side === "left" ? stripStreamingCursor(rawBody) : rawBody;
-      if (body.trim() === "") {
-        return;
+      const media = extractMediaFromContent(event.content);
+      let body = "";
+      if (!media) {
+        if (
+          event.content.msgtype !== "m.text" ||
+          typeof event.content.body !== "string"
+        ) {
+          return;
+        }
+        const edit = rawEventId ? latestEdits.get(rawEventId) : undefined;
+        const rawBody = edit ? edit.body : event.content.body;
+        body = edit || side === "left" ? stripStreamingCursor(rawBody) : rawBody;
+        if (body.trim() === "") {
+          return;
+        }
+      } else {
+        body = media.caption ?? media.filename;
       }
       const eventId = rawEventId ?? `confirmed-${index}`;
       const ts = validTimestamp(event.origin_server_ts);
@@ -1325,6 +1423,7 @@ export function deriveRoomTimelineItems(
         eventId: rawEventId,
         side,
         body,
+        ...(media ? { media } : {}),
         status: "confirmed",
         ...(rawEventId && eyesTargetIds.has(rawEventId) ? { responding: true } : {}),
         ...(reactions && reactions.length > 0 ? { reactions } : {}),
@@ -1337,8 +1436,23 @@ export function deriveRoomTimelineItems(
     if (seenLocalTxnIds.has(pending.txnId)) {
       continue;
     }
+    if (pending.type !== "m.room.message") {
+      continue;
+    }
+    const media = extractMediaFromContent(pending.content, pending.attachment);
+    if (media) {
+      items.push({
+        kind: "message",
+        key: `pending-${pending.txnId}`,
+        side: "right",
+        body: media.caption ?? media.filename,
+        media,
+        status: "unconfirmed",
+        localId: pending.txnId,
+      });
+      continue;
+    }
     if (
-      pending.type !== "m.room.message" ||
       pending.content.msgtype !== "m.text" ||
       typeof pending.content.body !== "string" ||
       pending.content.body.trim() === ""
@@ -1774,8 +1888,13 @@ function isRenderableTextBubbleEvent(
   ) {
     return false;
   }
+  if (!isRecord(event.content)) {
+    return false;
+  }
+  if (extractMediaFromContent(event.content)) {
+    return true;
+  }
   if (
-    !isRecord(event.content) ||
     event.content.msgtype !== "m.text" ||
     typeof event.content.body !== "string"
   ) {

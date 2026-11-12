@@ -190,6 +190,62 @@ export class RetryQueue {
           this.callbacks.onFailed?.();
           continue;
         }
+        if (
+          head.attachment &&
+          (typeof head.content.url !== "string" || head.content.url === "")
+        ) {
+          let uploadResult;
+          try {
+            uploadResult = await this.client.uploadMedia(
+              head.attachment.data,
+              head.attachment.mimeType,
+              head.attachment.name,
+            );
+          } catch {
+            if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
+              this.scheduleRetry();
+            }
+            break;
+          }
+          if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
+            break;
+          }
+          if (isCredentialRejected(uploadResult)) {
+            this.pause();
+            this.callbacks.onCredentialRejected?.();
+            break;
+          }
+          if (
+            uploadResult.type === "response" &&
+            uploadResult.status === 200 &&
+            isRecord(uploadResult.body) &&
+            typeof uploadResult.body.content_uri === "string" &&
+            uploadResult.body.content_uri !== ""
+          ) {
+            const contentUri = uploadResult.body.content_uri;
+            await this.client.recordUploadedMediaUrl(head.roomId, head.txnId, contentUri);
+            head.content = { ...head.content, url: contentUri };
+            this.backoffStep = 0;
+            if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
+              break;
+            }
+          } else if (
+            uploadResult.type === "failure" ||
+            isRateLimited(uploadResult.status, uploadResult.body) ||
+            uploadResult.status >= 500
+          ) {
+            this.scheduleRetry();
+            break;
+          } else {
+            await this.client.failPendingRoomEvent(head.roomId, head.txnId);
+            this.backoffStep = 0;
+            if (this.disposed) {
+              break;
+            }
+            this.callbacks.onFailed?.();
+            continue;
+          }
+        }
         let result;
         try {
           result = await this.client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);

@@ -2,6 +2,7 @@ import {
   Component,
   Fragment,
   isValidElement,
+  useMemo,
   type ComponentProps,
   type ErrorInfo,
   type ReactNode,
@@ -226,7 +227,71 @@ function RawFallbackBody({ body }: { body: string }) {
   );
 }
 
-export function MessageBody({ body }: { body: string }) {
+function normalizeExternalHref(href: string | undefined): string | undefined {
+  if (typeof href !== "string") {
+    return undefined;
+  }
+  const trimmed = href.trim();
+  if (!trimmed || trimmed === "streamdown:incomplete-link") {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "http:" || parsed.protocol === "https:" || parsed.protocol === "mailto:") {
+      return trimmed;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function MessageBody({
+  body,
+  onOpenExternalUrl,
+}: {
+  body: string;
+  onOpenExternalUrl?: (url: string) => void;
+}) {
+  const components = useMemo<Components>(
+    () => ({
+      ...STREAMDOWN_COMPONENTS,
+      a: ({
+        children,
+        href,
+        node: _node,
+        target: _target,
+        rel: _rel,
+        onClick,
+        ...props
+      }: ComponentProps<"a"> & ExtraProps) => {
+        const safeHref = normalizeExternalHref(href);
+        if (!safeHref) {
+          return <span>{children}</span>;
+        }
+        return (
+          <a
+            {...props}
+            href={safeHref}
+            rel="noopener noreferrer"
+            onClick={(event) => {
+              event.preventDefault();
+              onClick?.(event);
+              if (onOpenExternalUrl) {
+                onOpenExternalUrl(safeHref);
+              } else if (typeof window !== "undefined" && typeof window.open === "function") {
+                window.open(safeHref, "_blank", "noopener,noreferrer");
+              }
+            }}
+          >
+            {children}
+          </a>
+        );
+      },
+    }),
+    [onOpenExternalUrl],
+  );
+
   const plugins = getStreamdownPlugins();
   if (!plugins) {
     return <RawFallbackBody body={body} />;
@@ -239,7 +304,7 @@ export function MessageBody({ body }: { body: string }) {
         mode="static"
         plugins={plugins}
         rehypePlugins={SAFE_REHYPE_PLUGINS}
-        components={STREAMDOWN_COMPONENTS}
+        components={components}
         controls={STREAMDOWN_CONTROLS}
         remend={STREAMDOWN_REMEND}
         linkSafety={STREAMDOWN_LINK_SAFETY}

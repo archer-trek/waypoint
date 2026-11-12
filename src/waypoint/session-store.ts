@@ -33,6 +33,7 @@ export type PendingRoomEvent = {
   type: string;
   sender: string;
   content: Record<string, unknown>;
+  attachment?: DraftAttachment;
 };
 
 export type DraftAttachment = {

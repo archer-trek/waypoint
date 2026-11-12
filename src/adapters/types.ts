@@ -15,6 +15,7 @@ export type HomeserverRequest = {
   url: string;
   headers?: Record<string, string>;
   body?: unknown;
+  responseType?: "json" | "bytes";
   signal?: AbortSignal;
 };
 
@@ -37,6 +38,12 @@ export interface PlatformAdapter {
   isAppVisible?: () => boolean;
   subscribeAppVisibility?: (onChange: (visible: boolean) => void) => () => void;
   subscribeNetworkResume?: (onResume: () => void) => () => void;
+  openExternalUrl?: (url: string) => void | Promise<void>;
+  openMediaFile?: (input: {
+    data: Uint8Array;
+    mimeType: string;
+    filename: string;
+  }) => void | Promise<void>;
 }
 
 export interface Clock {

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, expect, test, vi } from "vitest";
-import type { Clock, HomeserverRequest, HomeserverTransport, TransportResult } from "../adapters/types";
+import type { Clock, HomeserverRequest, HomeserverTransport, PlatformAdapter, TransportResult } from "../adapters/types";
 import { WaypointApp } from "./WaypointApp";
 
 beforeEach(() => {
@@ -56,12 +56,16 @@ class FakeHomeserver implements HomeserverTransport {
   }
 }
 
-function renderApp(homeserver = new FakeHomeserver(), deviceDisplayName = "Waypoint macOS") {
+function renderApp(
+  homeserver = new FakeHomeserver(),
+  deviceDisplayName = "Waypoint macOS",
+  extraPlatform?: Partial<PlatformAdapter>,
+) {
   const clock = new ManualClock();
   const view = render(
     <WaypointApp
       homeserver={homeserver}
-      platform={{ deviceDisplayName }}
+      platform={{ deviceDisplayName, ...extraPlatform }}
       clock={clock}
     />,
   );
@@ -6758,7 +6762,7 @@ test("忽略非 m.text、空 body 与缺失 origin_server_ts 的异常边角，�
                       event_id: "$img-day1",
                       sender: "@bot:example.com",
                       origin_server_ts: day1Ts,
-                      content: { msgtype: "m.image", body: "photo.png", url: "mxc://example.com/1" },
+                      content: { msgtype: "m.emote", body: "photo.png" },
                     },
                     {
                       type: "m.room.message",
@@ -19595,4 +19599,855 @@ test("单档预种撤回仅停用该档、非提示 reaction 仍可见、且 Top
   expect(within(promptRow).getByRole("button", { name: /拒绝/ })).toBeDisabled();
   expect(within(timeline).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
   expect(within(sidebar).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+});
+
+test("发送单个附件：图片用 m.image、文件及音视频用 m.file，说明进正文无说明用文件名，交出时复制字节进本机支持重启后重传 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let uploadOnline = true;
+  let uploadCount = 0;
+  const uploadedPayloads: Array<{ url: string; headers: Record<string, string>; bytes: Uint8Array }> = [];
+  const sentEvents: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-att:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "附件发送话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/_matrix/media/v3/upload")) {
+      if (!uploadOnline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      uploadCount += 1;
+      const bytes = input.body instanceof Uint8Array ? new Uint8Array(input.body) : new Uint8Array();
+      uploadedPayloads.push({ url: input.url, headers: input.headers ?? {}, bytes });
+      return {
+        type: "response",
+        status: 200,
+        body: { content_uri: `mxc://example.com/media-${uploadCount}` },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sentEvents.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: { event_id: `$ev-${sentEvents.length}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v1/media/download/")) {
+      return {
+        type: "response",
+        status: 200,
+        body: new Uint8Array([1, 2, 3, 4]),
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const app1 = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "附件发送话题" }));
+
+  // 1. 图片 + 说明文字
+  const imgBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([imgBytes], "shot.png", { type: "image/png" }),
+  );
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "报错截图");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => {
+    expect(sentEvents).toHaveLength(1);
+  });
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  expect(uploadedPayloads[0]!.url).toBe("https://matrix.example.com/_matrix/media/v3/upload?filename=shot.png");
+  expect(uploadedPayloads[0]!.headers.Authorization).toBe("Bearer tok-1");
+  expect(uploadedPayloads[0]!.headers["Content-Type"]).toBe("image/png");
+  expect(Array.from(uploadedPayloads[0]!.bytes)).toEqual(Array.from(imgBytes));
+  expect(sentEvents[0]!.body).toEqual({
+    msgtype: "m.image",
+    body: "报错截图",
+    filename: "shot.png",
+    url: "mxc://example.com/media-1",
+    info: { mimetype: "image/png", size: imgBytes.byteLength },
+  });
+
+  // 2. 语音/视频没有说明时当 m.file 发送，body 用文件名
+  const audioBytes = new Uint8Array([73, 68, 51, 3, 0]);
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([audioBytes], "voice.mp3", { type: "audio/mpeg" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => {
+    expect(sentEvents).toHaveLength(2);
+  });
+  expect(sentEvents[1]!.body).toEqual({
+    msgtype: "m.file",
+    body: "voice.mp3",
+    filename: "voice.mp3",
+    url: "mxc://example.com/media-2",
+    info: { mimetype: "audio/mpeg", size: audioBytes.byteLength },
+  });
+
+  // 3. 离线交出后字节已复制进设备：重启后无需原 File 对象也能上传并确认
+  uploadOnline = false;
+  const pdfBytes = new Uint8Array([37, 80, 68, 70, 45, 49, 46, 52]);
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([pdfBytes], "report.pdf", { type: "application/pdf" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const timeline1 = screen.getByRole("log", { name: "对话时间线" });
+  expect(await within(timeline1).findByText("report.pdf")).toBeInTheDocument();
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+
+  app1.unmount();
+
+  uploadOnline = true;
+  const app2 = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件发送话题" }));
+
+  await waitFor(() => {
+    expect(sentEvents).toHaveLength(3);
+  });
+  expect(Array.from(uploadedPayloads[2]!.bytes)).toEqual(Array.from(pdfBytes));
+  expect(sentEvents[2]!.body).toEqual({
+    msgtype: "m.file",
+    body: "report.pdf",
+    filename: "report.pdf",
+    url: "mxc://example.com/media-3",
+    info: { mimetype: "application/pdf", size: pdfBytes.byteLength },
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  app2.unmount();
+});
+
+test("上传成功后记住媒体地址不重复上传，使用固定事务 ID，同步或确认后仍是同一条气泡，且 4xx 失败可原地重发 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let uploadCalls = 0;
+  let uploadMode: "ok" | "4xx" = "ok";
+  let sendMode: "500" | "4xx" | "sync-echo" | "ok" = "500";
+  const sendAttempts: Array<{ txnId: string; urlField: unknown }> = [];
+  let syncRound = 0;
+  let lastEchoTxnId: string | undefined;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t-retry:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "附件重试话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (sendMode === "sync-echo" && lastEchoTxnId) {
+        const echoTxn = lastEchoTxnId;
+        lastEchoTxnId = undefined;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: `batch-${syncRound}`,
+            rooms: {
+              join: {
+                "!t-retry:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$echo-att-1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        unsigned: { transaction_id: echoTxn },
+                        content: {
+                          msgtype: "m.file",
+                          body: "once.bin",
+                          filename: "once.bin",
+                          url: "mxc://example.com/remembered-1",
+                          info: { mimetype: "application/octet-stream", size: 4 },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/_matrix/media/v3/upload")) {
+      uploadCalls += 1;
+      if (uploadMode === "4xx") {
+        return { type: "response", status: 413, body: { errcode: "M_TOO_LARGE", error: "too big" } };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { content_uri: `mxc://example.com/remembered-${uploadCalls}` },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const txnId = input.url.split("/").pop()!;
+      const body = input.body as { url?: unknown };
+      sendAttempts.push({ txnId, urlField: body.url });
+      if (sendMode === "500") {
+        return { type: "response", status: 500, body: { errcode: "M_UNKNOWN", error: "temporary" } };
+      }
+      if (sendMode === "4xx") {
+        return { type: "response", status: 403, body: { errcode: "M_FORBIDDEN", error: "rejected" } };
+      }
+      if (sendMode === "sync-echo") {
+        lastEchoTxnId = txnId;
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { event_id: `$sent-${sendAttempts.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const app1 = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "附件重试话题" }));
+
+  // 1. 上传成功但 send 返回 500；重启后继续重发：不重新上传、沿用同一个 txnId、sync 回声确认后仍只有一条气泡
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([new Uint8Array([1, 2, 3, 4])], "once.bin", { type: "application/octet-stream" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => {
+    expect(uploadCalls).toBe(1);
+    expect(sendAttempts).toHaveLength(1);
+  });
+  expect(sendAttempts[0]!.urlField).toBe("mxc://example.com/remembered-1");
+
+  // 退避重试一次，仍是同一 txnId 且未再上传
+  await act(async () => {
+    app1.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(sendAttempts).toHaveLength(2);
+  });
+  expect(uploadCalls).toBe(1);
+  expect(sendAttempts[1]!.txnId).toBe(sendAttempts[0]!.txnId);
+  expect(sendAttempts[1]!.urlField).toBe("mxc://example.com/remembered-1");
+
+  // 重启设备：依然记住已上传地址和同一 txnId，并由 /sync 回声确认成同一条气泡
+  app1.unmount();
+  sendMode = "sync-echo";
+  const app2 = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件重试话题" }));
+
+  await waitFor(() => {
+    expect(sendAttempts).toHaveLength(3);
+  });
+  expect(uploadCalls).toBe(1);
+  expect(sendAttempts[2]!.txnId).toBe(sendAttempts[0]!.txnId);
+  expect(sendAttempts[2]!.urlField).toBe("mxc://example.com/remembered-1");
+
+  await act(async () => {
+    app2.clock.advance(1000);
+  });
+  const timeline2 = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(timeline2.querySelectorAll(".waypoint-bubble")).toHaveLength(1);
+  expect(timeline2.querySelector("[data-event-id=\"$echo-att-1\"]")).not.toBeNull();
+
+  // 2. 发送阶段 4xx 永久失败后，点红叹号重发仍复用已记住的 mxc://，不重新上传
+  sendMode = "4xx";
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([new Uint8Array([5, 6])], "second.txt", { type: "text/plain" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const failBtn1 = await screen.findByRole("button", { name: "失败" });
+  expect(uploadCalls).toBe(2);
+
+  sendMode = "ok";
+  await user.click(failBtn1);
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(uploadCalls).toBe(2);
+  expect(sendAttempts[sendAttempts.length - 1]!.urlField).toBe("mxc://example.com/remembered-2");
+
+  // 3. 上传阶段 4xx 失败后，点红叹号重发会重新上传已复制的字节并最终确认
+  uploadMode = "4xx";
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([new Uint8Array([7, 8, 9])], "third.txt", { type: "text/plain" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  const failBtn2 = await screen.findByRole("button", { name: "失败" });
+  expect(uploadCalls).toBe(3);
+
+  uploadMode = "ok";
+  await user.click(failBtn2);
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(uploadCalls).toBe(4);
+  expect(sendAttempts[sendAttempts.length - 1]!.urlField).toBe("mxc://example.com/remembered-4");
+  expect(timeline2.querySelectorAll(".waypoint-bubble")).toHaveLength(3);
+
+  app2.unmount();
+});
+
+test("选择器多选多个附件时按选择顺序逐条上传发送 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sequence: string[] = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-multi:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "多选附件话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/_matrix/media/v3/upload")) {
+      const filename = decodeURIComponent(new URL(input.url).searchParams.get("filename") ?? "");
+      sequence.push(`upload:${filename}`);
+      return {
+        type: "response",
+        status: 200,
+        body: { content_uri: `mxc://example.com/${filename}` },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const body = input.body as { msgtype: string; body: string; filename?: string; url?: string };
+      sequence.push(`send:${body.msgtype}:${body.filename}:${body.body}`);
+      return { type: "response", status: 200, body: { event_id: `$ev-${sequence.length}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v1/media/download/")) {
+      return { type: "response", status: 200, body: new Uint8Array([1, 2, 3]) };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "多选附件话题" }));
+
+  const fileInput = screen.getByLabelText("选择附件") as HTMLInputElement;
+  expect(fileInput.multiple).toBe(true);
+
+  await user.upload(fileInput, [
+    new File([new Uint8Array([1])], "one.txt", { type: "text/plain" }),
+    new File([new Uint8Array([2])], "two.png", { type: "image/png" }),
+    new File([new Uint8Array([3])], "three.mp4", { type: "video/mp4" }),
+  ]);
+
+  await waitFor(() => {
+    expect(sequence).toHaveLength(6);
+  });
+  expect(sequence).toEqual([
+    "upload:one.txt",
+    "send:m.file:one.txt:one.txt",
+    "upload:two.png",
+    "send:m.image:two.png:two.png",
+    "upload:three.mp4",
+    "send:m.file:three.mp4:three.mp4",
+  ]);
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll(".waypoint-bubble")).toHaveLength(3);
+});
+
+test("图片缩在气泡宽度内认证下载、音视频当文件、http(s)不内联，点开交系统查看器且下载媒体不入耐久库 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const openMediaFile = vi.fn();
+  const openExternalUrl = vi.fn();
+  const downloadReqs: Array<{ url: string; auth?: string }> = [];
+  let failFileDownloadOnce = true;
+
+  const imgBytes = new Uint8Array([10, 20, 30, 40]);
+  const docBytes = new Uint8Array([50, 60, 70]);
+  const audioBytes = new Uint8Array([80, 90]);
+  const videoBytes = new Uint8Array([100, 110]);
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-view:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "媒体查看话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-img",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2000,
+                      content: {
+                        msgtype: "m.image",
+                        body: "架构图",
+                        filename: "arch.png",
+                        url: "mxc://example.com/img-1",
+                        info: { mimetype: "image/png", size: 4 },
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-http-img",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2100,
+                      content: {
+                        msgtype: "m.image",
+                        body: "外链图不内联",
+                        filename: "remote.png",
+                        url: "https://evil.example/remote.png",
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-file",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2200,
+                      content: {
+                        msgtype: "m.file",
+                        body: "spec.pdf",
+                        filename: "spec.pdf",
+                        url: "mxc://example.com/file-1",
+                        info: { mimetype: "application/pdf", size: 3 },
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-audio",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2300,
+                      content: {
+                        msgtype: "m.audio",
+                        body: "note.ogg",
+                        filename: "note.ogg",
+                        url: "mxc://example.com/audio-1",
+                        info: { mimetype: "audio/ogg", size: 2 },
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-video",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2400,
+                      content: {
+                        msgtype: "m.video",
+                        body: "demo.mp4",
+                        filename: "demo.mp4",
+                        url: "mxc://example.com/video-1",
+                        info: { mimetype: "video/mp4", size: 2 },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v1/media/download/")) {
+      downloadReqs.push({ url: input.url, auth: input.headers?.Authorization });
+      if (input.url.endsWith("/example.com/img-1")) {
+        return { type: "response", status: 200, body: imgBytes };
+      }
+      if (input.url.endsWith("/example.com/file-1")) {
+        if (failFileDownloadOnce) {
+          failFileDownloadOnce = false;
+          return { type: "failure", failure: { type: "network" } };
+        }
+        return { type: "response", status: 200, body: docBytes };
+      }
+      if (input.url.endsWith("/example.com/audio-1")) {
+        return { type: "response", status: 200, body: audioBytes };
+      }
+      if (input.url.endsWith("/example.com/video-1")) {
+        return { type: "response", status: 200, body: videoBytes };
+      }
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const app1 = renderApp(homeserver, "Waypoint macOS", { openMediaFile, openExternalUrl });
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "媒体查看话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+
+  // 1. mxc 图片走通信层认证下载并缩在气泡宽度内；非 mxc http(s) 图片不内联；音视频不出现 audio/video 元素
+  const imgEl = await within(timeline).findByAltText("arch.png");
+  expect(getComputedStyle(imgEl).maxWidth).toBe("100%");
+  expect(downloadReqs).toEqual([
+    {
+      url: "https://matrix.example.com/_matrix/client/v1/media/download/example.com/img-1",
+      auth: "Bearer tok-1",
+    },
+  ]);
+  expect(timeline.querySelectorAll("img")).toHaveLength(1);
+  expect(timeline.querySelector("img[src^=\"https://\"]")).toBeNull();
+  expect(timeline.querySelector("audio")).toBeNull();
+  expect(timeline.querySelector("video")).toBeNull();
+  expect(within(timeline).getByText("架构图")).toBeInTheDocument();
+
+  // 2. 点击图片直接交给系统查看器（不做画廊），且不重复下载
+  await user.click(screen.getByRole("button", { name: "查看图片 arch.png" }));
+  await waitFor(() => {
+    expect(openMediaFile).toHaveBeenCalledTimes(1);
+  });
+  expect(openMediaFile).toHaveBeenLastCalledWith({
+    data: imgBytes,
+    mimeType: "image/png",
+    filename: "arch.png",
+  });
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(downloadReqs).toHaveLength(1);
+
+  // 3. 点击 http(s) 非 mxc 媒体仅走外链打开
+  await user.click(within(timeline).getByRole("button", { name: "remote.png" }));
+  expect(openExternalUrl).toHaveBeenCalledWith("https://evil.example/remote.png");
+
+  // 4. 文件、语音、视频仅在点击时才认证下载并交给系统查看器；下载失败轻提示且不崩溃
+  await user.click(within(timeline).getByRole("button", { name: "spec.pdf" }));
+  expect(await screen.findByText("打开附件失败，请重试。")).toBeInTheDocument();
+  expect(openMediaFile).toHaveBeenCalledTimes(1);
+
+  await user.click(within(timeline).getByRole("button", { name: "spec.pdf" }));
+  await waitFor(() => {
+    expect(openMediaFile).toHaveBeenCalledTimes(2);
+  });
+  expect(openMediaFile).toHaveBeenLastCalledWith({
+    data: docBytes,
+    mimeType: "application/pdf",
+    filename: "spec.pdf",
+  });
+
+  await user.click(within(timeline).getByRole("button", { name: "note.ogg" }));
+  await waitFor(() => {
+    expect(openMediaFile).toHaveBeenCalledTimes(3);
+  });
+  expect(openMediaFile).toHaveBeenLastCalledWith({
+    data: audioBytes,
+    mimeType: "audio/ogg",
+    filename: "note.ogg",
+  });
+
+  await user.click(within(timeline).getByRole("button", { name: "demo.mp4" }));
+  await waitFor(() => {
+    expect(openMediaFile).toHaveBeenCalledTimes(4);
+  });
+  expect(openMediaFile).toHaveBeenLastCalledWith({
+    data: videoBytes,
+    mimeType: "video/mp4",
+    filename: "demo.mp4",
+  });
+
+  // 5. 下载下来的媒体文件不写入 IndexedDB；重启后需要重新认证下载
+  app1.unmount();
+  const countBeforeRestart = downloadReqs.length;
+  const app2 = renderApp(homeserver, "Waypoint macOS", { openMediaFile, openExternalUrl });
+  await user.click(await screen.findByRole("button", { name: "媒体查看话题" }));
+  await waitFor(() => {
+    expect(downloadReqs.length).toBeGreaterThan(countBeforeRestart);
+  });
+  app2.unmount();
+});
+
+test("消息正文外链通过系统浏览器打开，不在应用 WebView 内导航，危险协议不作为可点链接 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const openExternalUrl = vi.fn();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-links:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "外链测试话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$link-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2000,
+                      content: {
+                        msgtype: "m.text",
+                        body: "查看 [文档](https://docs.example.com/guide) 或联系 [邮箱](mailto:support@example.com) 或 [危险](javascript:alert(1))",
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver, "Waypoint macOS", { openExternalUrl });
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "外链测试话题" }));
+
+  const docsLink = await screen.findByRole("link", { name: "文档" });
+  expect(docsLink).not.toHaveAttribute("target", "_blank");
+
+  let docsDefaultPrevented = false;
+  document.addEventListener(
+    "click",
+    (e) => {
+      docsDefaultPrevented = e.defaultPrevented;
+    },
+    { once: true },
+  );
+  await user.click(docsLink);
+  expect(docsDefaultPrevented).toBe(true);
+  expect(openExternalUrl).toHaveBeenCalledWith("https://docs.example.com/guide");
+
+  const mailLink = screen.getByRole("link", { name: "邮箱" });
+  await user.click(mailLink);
+  expect(openExternalUrl).toHaveBeenCalledWith("mailto:support@example.com");
+
+  expect(screen.queryByRole("link", { name: "危险" })).not.toBeInTheDocument();
+});
+
+test("粘贴和拖文件只在 macOS 生效（单文件进草稿、多文件逐条发送），Android 只走选择器 (#62)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sentFilenames: string[] = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-dnd:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "粘贴拖拽话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/_matrix/media/v3/upload")) {
+      const filename = decodeURIComponent(new URL(input.url).searchParams.get("filename") ?? "");
+      return { type: "response", status: 200, body: { content_uri: `mxc://example.com/${filename}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const body = input.body as { filename?: string };
+      if (body.filename) {
+        sentFilenames.push(body.filename);
+      }
+      return { type: "response", status: 200, body: { event_id: `$ev-${sentFilenames.length}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v1/media/download/")) {
+      return { type: "response", status: 200, body: new Uint8Array([1]) };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  // 1. macOS: 支持粘贴与拖拽（单文件进草稿，多文件按顺序发送）
+  const macApp = renderApp(homeserver, "Waypoint macOS");
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "粘贴拖拽话题" }));
+
+  const macInput = screen.getByRole("textbox", { name: "输入消息" });
+  const pastedSingle = new File([new Uint8Array([1, 2])], "pasted.png", { type: "image/png" });
+  fireEvent.paste(macInput, {
+    clipboardData: {
+      files: [pastedSingle],
+      items: [{ kind: "file", getAsFile: () => pastedSingle }],
+    },
+  });
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("pasted.png");
+  await user.click(screen.getByRole("button", { name: "移除附件" }));
+
+  const p1 = new File([new Uint8Array([11])], "paste-1.txt", { type: "text/plain" });
+  const p2 = new File([new Uint8Array([12])], "paste-2.txt", { type: "text/plain" });
+  fireEvent.paste(macInput, {
+    clipboardData: {
+      files: [p1, p2],
+      items: [
+        { kind: "file", getAsFile: () => p1 },
+        { kind: "file", getAsFile: () => p2 },
+      ],
+    },
+  });
+  await waitFor(() => {
+    expect(sentFilenames).toEqual(["paste-1.txt", "paste-2.txt"]);
+  });
+
+  const dropZone = screen.getByRole("log", { name: "对话时间线" });
+  const droppedSingle = new File([new Uint8Array([3, 4])], "dropped.txt", { type: "text/plain" });
+  fireEvent.drop(dropZone, {
+    dataTransfer: { files: [droppedSingle] },
+  });
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("dropped.txt");
+  await user.click(screen.getByRole("button", { name: "移除附件" }));
+
+  const d1 = new File([new Uint8Array([5])], "drop-1.txt", { type: "text/plain" });
+  const d2 = new File([new Uint8Array([6])], "drop-2.txt", { type: "text/plain" });
+  fireEvent.drop(dropZone, {
+    dataTransfer: { files: [d1, d2] },
+  });
+  await waitFor(() => {
+    expect(sentFilenames).toEqual(["paste-1.txt", "paste-2.txt", "drop-1.txt", "drop-2.txt"]);
+  });
+  macApp.unmount();
+
+  // 2. Android: 粘贴与拖拽文件均不生效，只能用选择器
+  globalThis.indexedDB = new IDBFactory();
+  const androidApp = renderApp(homeserver, "Waypoint Android");
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "粘贴拖拽话题" }));
+
+  const androidInput = screen.getByRole("textbox", { name: "输入消息" });
+  const androidPaste = new File([new Uint8Array([7])], "android-paste.png", { type: "image/png" });
+  fireEvent.paste(androidInput, {
+    clipboardData: {
+      files: [androidPaste],
+      items: [{ kind: "file", getAsFile: () => androidPaste }],
+    },
+  });
+  const androidDrop = new File([new Uint8Array([8])], "android-drop.txt", { type: "text/plain" });
+  fireEvent.drop(screen.getByRole("log", { name: "对话时间线" }), {
+    dataTransfer: { files: [androidDrop] },
+  });
+  await act(async () => {
+    androidApp.clock.advance(500);
+  });
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  expect(sentFilenames).toEqual(["paste-1.txt", "paste-2.txt", "drop-1.txt", "drop-2.txt"]);
+
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([new Uint8Array([9])], "android-picker.pdf", { type: "application/pdf" }),
+  );
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("android-picker.pdf");
+  androidApp.unmount();
 });

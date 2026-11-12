@@ -32,6 +32,7 @@ export type WaypointLocalMeta = {
   id: string;
   status: LocalMessageStatus;
   txnId: string;
+  attachment?: DraftAttachment;
 };
 
 export class MatrixClient {
@@ -233,6 +234,8 @@ export class MatrixClient {
     url: string;
     body?: unknown;
     json?: boolean;
+    contentType?: string;
+    responseType?: "json" | "bytes";
     signal?: AbortSignal;
   }): Promise<TransportResult> {
     const requestToken = this.accessToken;
@@ -248,12 +251,15 @@ export class MatrixClient {
     };
     if (input.json) {
       headers["Content-Type"] = "application/json";
+    } else if (input.contentType) {
+      headers["Content-Type"] = input.contentType;
     }
     const requestPromise = this.transport.request({
       method: input.method,
       url: input.url,
       headers,
       ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.responseType ? { responseType: input.responseType } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (!input.signal) {
@@ -629,27 +635,111 @@ export class MatrixClient {
     });
   }
 
+  uploadMedia(
+    data: Uint8Array,
+    mimeType: string,
+    filename: string,
+  ): Promise<TransportResult> {
+    const query = filename ? `?filename=${encodeURIComponent(filename)}` : "";
+    return this.authedRequest({
+      method: "POST",
+      url: matrixUrl(this.baseUrl, `/_matrix/media/v3/upload${query}`),
+      contentType: mimeType || "application/octet-stream",
+      body: new Uint8Array(data),
+    });
+  }
+
+  downloadMedia(mxcUri: string): Promise<TransportResult> {
+    const parsed = parseMxcUri(mxcUri);
+    if (!parsed) {
+      return Promise.resolve({ type: "failure", failure: { type: "network" } });
+    }
+    return this.authedRequest({
+      method: "GET",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v1/media/download/${encodeURIComponent(parsed.serverName)}/${encodeURIComponent(parsed.mediaId)}`,
+      ),
+      responseType: "bytes",
+    });
+  }
+
+  async recordUploadedMediaUrl(
+    roomId: string,
+    txnId: string,
+    mxcUrl: string,
+  ): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      let changed = false;
+      const nextPending = this.storedPendingEvents.map((item) => {
+        if (item.roomId === roomId && item.txnId === txnId) {
+          changed = true;
+          return {
+            ...clonePendingEvent(item),
+            content: {
+              ...(cloneValue(item.content) as Record<string, unknown>),
+              url: mxcUrl,
+            },
+          };
+        }
+        return item;
+      });
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const room = nextRooms[roomId];
+      if (room) {
+        const placeholderIndex = room.timelineEvents.findIndex(
+          (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+        );
+        if (placeholderIndex !== -1) {
+          const placeholder = room.timelineEvents[placeholderIndex];
+          const existingContent = isPlainObject(placeholder.content) ? placeholder.content : {};
+          room.timelineEvents[placeholderIndex] = {
+            ...placeholder,
+            content: {
+              ...existingContent,
+              url: mxcUrl,
+            },
+          };
+          changed = true;
+        }
+      }
+      if (!changed) {
+        return;
+      }
+      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+      this.storedPendingEvents = nextPending;
+      this.storedRooms = nextRooms;
+    });
+  }
+
   async enqueueRoomEvent(
     roomId: string,
     type: string,
     content: Record<string, unknown>,
-    options?: { clearDraft?: boolean },
+    options?: { clearDraft?: boolean; attachment?: DraftAttachment },
   ): Promise<PendingRoomEvent> {
     if (!this.accessToken || !this.userId) {
       throw new Error("没有 access token");
     }
+    const copiedAttachment = options?.attachment
+      ? cloneDraftAttachment(options.attachment)
+      : undefined;
     const item: PendingRoomEvent = {
       txnId: this.nextTxnId(),
       roomId,
       type,
       sender: this.userId,
       content: cloneValue(content) as Record<string, unknown>,
+      ...(copiedAttachment ? { attachment: copiedAttachment } : {}),
     };
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
         throw new Error("没有 access token");
       }
-      const nextPending = [...this.storedPendingEvents, item];
+      const nextPending = [...this.storedPendingEvents, clonePendingEvent(item)];
       let nextRooms = this.storedRooms;
       if (type === "m.room.message") {
         nextRooms = cloneStoredRooms(this.storedRooms);
@@ -662,6 +752,7 @@ export class MatrixClient {
             id: item.txnId,
             status: "unconfirmed",
             txnId: item.txnId,
+            ...(copiedAttachment ? { attachment: cloneDraftAttachment(copiedAttachment) } : {}),
           },
         });
         nextRooms[roomId] = existingRoom;
@@ -946,6 +1037,10 @@ export class MatrixClient {
       ) {
         return;
       }
+      const placeholderMeta = localPlaceholderOf(placeholder);
+      const copiedAttachment = placeholderMeta?.attachment
+        ? cloneDraftAttachment(placeholderMeta.attachment)
+        : undefined;
       const newTxnId = this.nextTxnId();
       const item: PendingRoomEvent = {
         txnId: newTxnId,
@@ -953,6 +1048,7 @@ export class MatrixClient {
         type: placeholder.type,
         sender: placeholder.sender,
         content: cloneValue(placeholder.content) as Record<string, unknown>,
+        ...(copiedAttachment ? { attachment: copiedAttachment } : {}),
       };
       existingRoom.timelineEvents[placeholderIndex] = {
         ...placeholder,
@@ -960,6 +1056,7 @@ export class MatrixClient {
           id: localId,
           status: "unconfirmed",
           txnId: newTxnId,
+          ...(copiedAttachment ? { attachment: cloneDraftAttachment(copiedAttachment) } : {}),
         },
       };
       const nextPending = [...this.storedPendingEvents, item];
@@ -1016,12 +1113,16 @@ export class MatrixClient {
       if (placeholderIndex !== -1) {
         const placeholder = existingRoom.timelineEvents[placeholderIndex];
         const meta = localPlaceholderOf(placeholder)!;
+        const preservedAttachment = meta.attachment ?? pending?.attachment;
         existingRoom.timelineEvents[placeholderIndex] = {
           ...placeholder,
           waypoint_local: {
             id: meta.id,
             status: "failed",
             txnId,
+            ...(preservedAttachment
+              ? { attachment: cloneDraftAttachment(preservedAttachment) }
+              : {}),
           },
         };
         nextRooms[roomId] = existingRoom;
@@ -1034,6 +1135,9 @@ export class MatrixClient {
             id: pending.txnId,
             status: "failed",
             txnId: pending.txnId,
+            ...(pending.attachment
+              ? { attachment: cloneDraftAttachment(pending.attachment) }
+              : {}),
           },
         });
         nextRooms[roomId] = existingRoom;
@@ -1201,6 +1305,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function cloneValue(value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  }
   if (Array.isArray(value)) {
     return value.map(cloneValue);
   }
@@ -2321,12 +2431,14 @@ function isAccountData(value: unknown): value is Record<string, unknown> {
 }
 
 function clonePendingEvent(item: PendingRoomEvent): PendingRoomEvent {
+  const attachment = item.attachment ? cloneDraftAttachment(item.attachment) : undefined;
   return {
     txnId: item.txnId,
     roomId: item.roomId,
     type: item.type,
     sender: item.sender,
     content: cloneValue(item.content) as Record<string, unknown>,
+    ...(attachment ? { attachment } : {}),
   };
 }
 
@@ -2345,6 +2457,7 @@ function clonePendingEvents(raw: unknown[]): PendingRoomEvent[] {
       item.sender !== "" &&
       isPlainObject(item.content)
     ) {
+      const attachment = cloneDraftAttachment(item.attachment);
       out.push(
         clonePendingEvent({
           txnId: item.txnId,
@@ -2352,6 +2465,7 @@ function clonePendingEvents(raw: unknown[]): PendingRoomEvent[] {
           type: item.type,
           sender: item.sender,
           content: item.content,
+          ...(attachment ? { attachment } : {}),
         }),
       );
     }
@@ -2589,6 +2703,23 @@ function reconcilePendingReadMarkersWithSync(
   });
 }
 
+export function parseMxcUri(uri: string): { serverName: string; mediaId: string } | undefined {
+  if (!uri.startsWith("mxc://")) {
+    return undefined;
+  }
+  const rest = uri.slice("mxc://".length);
+  const slashIdx = rest.indexOf("/");
+  if (slashIdx <= 0) {
+    return undefined;
+  }
+  const serverName = rest.slice(0, slashIdx);
+  const mediaId = rest.slice(slashIdx + 1);
+  if (!serverName || !mediaId || mediaId.includes("/")) {
+    return undefined;
+  }
+  return { serverName, mediaId };
+}
+
 export function localPlaceholderOf(event: RawMatrixEvent): WaypointLocalMeta | undefined {
   if (!isPlainObject(event.waypoint_local)) {
     return undefined;
@@ -2603,10 +2734,12 @@ export function localPlaceholderOf(event: RawMatrixEvent): WaypointLocalMeta | u
   ) {
     return undefined;
   }
+  const attachment = cloneDraftAttachment(raw.attachment);
   return {
     id: raw.id,
     status: raw.status,
     txnId: raw.txnId,
+    ...(attachment ? { attachment } : {}),
   };
 }
 

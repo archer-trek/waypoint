@@ -1,3 +1,4 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
@@ -289,6 +290,57 @@ export function detectPlatform(): PlatformAdapter {
     isAppVisible: currentAppVisible,
     subscribeAppVisibility,
     subscribeNetworkResume,
+    async openExternalUrl(url: string) {
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "mailto:") {
+        return;
+      }
+      if (isTauri()) {
+        try {
+          await invoke("plugin:opener|open_url", { url });
+          return;
+        } catch {
+          // fallback to window.open
+        }
+      }
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    },
+    openMediaFile({ data, mimeType, filename }) {
+      if (typeof document === "undefined") {
+        return;
+      }
+      const bytes = new Uint8Array(data);
+      const safeMime = mimeType || "application/octet-stream";
+      if (typeof URL.createObjectURL === "function") {
+        const blob = new Blob([bytes], { type: safeMime });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.click();
+        window.setTimeout(() => {
+          URL.revokeObjectURL(objectUrl);
+        }, 60_000);
+        return;
+      }
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += 1) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        const dataUrl = `data:${safeMime};base64,${btoa(binary)}`;
+        window.open(dataUrl, "_blank", "noopener,noreferrer");
+      }
+    },
   };
 }
 
@@ -296,10 +348,20 @@ export function createFetchTransport(): HomeserverTransport {
   return {
     async request(input) {
       try {
+        let requestBody: BodyInit | undefined;
+        if (input.body !== undefined) {
+          if (input.body instanceof Uint8Array) {
+            requestBody = new Uint8Array(input.body);
+          } else if (input.body instanceof ArrayBuffer) {
+            requestBody = new Uint8Array(input.body);
+          } else {
+            requestBody = JSON.stringify(input.body);
+          }
+        }
         const response = await fetch(input.url, {
           method: input.method,
           headers: input.headers,
-          body: input.body === undefined ? undefined : JSON.stringify(input.body),
+          body: requestBody,
           redirect: "manual",
           ...(input.signal ? { signal: input.signal } : {}),
         });
@@ -308,6 +370,10 @@ export function createFetchTransport(): HomeserverTransport {
           (response.status >= 300 && response.status < 400)
         ) {
           return { type: "response", status: response.status || 302, body: null };
+        }
+        if (input.responseType === "bytes" && response.status >= 200 && response.status < 300) {
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          return { type: "response", status: response.status, body: bytes };
         }
         const text = await response.text();
         if (!text) {
