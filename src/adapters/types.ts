@@ -20,8 +20,19 @@ export interface HomeserverTransport {
   request(input: HomeserverRequest): Promise<TransportResult>;
 }
 
+export type ViewportMode = "wide" | "narrow";
+
 export interface PlatformAdapter {
   deviceDisplayName: string;
+  viewportMode?: () => ViewportMode;
+  subscribeViewportMode?: (onChange: (mode: ViewportMode) => void) => () => void;
+  keyboardInsetBottom?: () => number;
+  subscribeKeyboardInsetBottom?: (onChange: (insetBottom: number) => void) => () => void;
+  onSystemBack?: (handler: () => boolean) => () => void;
+  pushNavigationEntry?: () => void;
+  popNavigationEntry?: () => void;
+  acquireSingleInstanceGuard?: () => (() => void) | false;
+  focusMainWindow?: () => void;
 }
 
 export interface Clock {

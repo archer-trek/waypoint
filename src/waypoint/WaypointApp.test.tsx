@@ -3201,3 +3201,639 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
   expect(header).toHaveTextContent("登记后首条 Topic");
   expect(header).toHaveTextContent("bot");
 });
+
+test("宽视口常驻左右两栏、不自动打开第一条 Topic，未选中时右侧显示选择或新建引导且无隐藏左栏或新窗口入口", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncs += 1;
+      if (syncs === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "首条话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "第二条话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            leave: {
+              "!t1:example.com": {},
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  expect(sidebar).toBeVisible();
+  expect(screen.getByText("首条话题")).toBeInTheDocument();
+  expect(screen.getByText("第二条话题")).toBeInTheDocument();
+
+  // 不自动打开第一条 Topic，右侧展示选择或新建引导
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  expect(screen.getByText(/选择一条 Topic/)).toBeInTheDocument();
+  const quickCreate = screen.getByRole("button", { name: "新建一条 Topic" });
+  expect(quickCreate).toBeInTheDocument();
+
+  // 不允许折叠隐藏左栏，也不提供新建窗口或在新窗口打开 Topic
+  expect(screen.queryByRole("button", { name: /收起|折叠|隐藏/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /新窗口/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: /新窗口/ })).not.toBeInTheDocument();
+
+  // 点击右侧快捷新建按钮打开新建表单，且左栏依然常驻可见
+  await user.click(quickCreate);
+  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeInTheDocument();
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  await user.click(screen.getByRole("button", { name: "首条话题" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("首条话题");
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+
+  // 当前打开的 Topic 被移出后，不自动打开剩余的第一条，而是回到未选中引导
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("第二条话题")).toBeInTheDocument();
+  expect(screen.queryByText("首条话题")).not.toBeInTheDocument();
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  expect(screen.getByText(/选择一条 Topic/)).toBeInTheDocument();
+});
+
+test("窄视口先见全屏 Topic 列表（不显示右侧引导，无抽屉），点开推入全屏对话或新建页，并用顶栏返回回到列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "小助理" }] },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "窄屏话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return { type: "response", status: 200, body: { room_id: "!t2:example.com" } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint Android", viewportMode: () => "narrow" } as import("../adapters/types").PlatformAdapter}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  // 窄视口先见全屏 Topic 列表，不自动打开第一条，不展示宽屏右侧引导，不做侧滑抽屉
+  expect(await screen.findByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByText("窄屏话题")).toBeInTheDocument();
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Topic 引导" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /抽屉|菜单/ })).not.toBeInTheDocument();
+
+  // 点击 Topic 推入全屏对话，隐藏列表页，固定顶栏有返回按钮
+  await user.click(screen.getByRole("button", { name: "窄屏话题" }));
+  expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+  const header = screen.getByRole("banner");
+  expect(header).toHaveTextContent("窄屏话题");
+  expect(header).toHaveTextContent("小助理");
+  const backBtn = screen.getByRole("button", { name: "返回" });
+  expect(backBtn).toBeVisible();
+
+  // 点击顶栏返回回到全屏 Topic 列表
+  await user.click(backBtn);
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+
+  // 点击新建 Topic 推入全屏新建页（隐藏列表），可用顶栏返回回到列表
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+
+  // 窄屏下新建成功推入新 Topic 对话，返回后可在列表中看到新 Topic
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "窄屏新建话题");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  expect(await screen.findByRole("banner")).toHaveTextContent("窄屏新建话题");
+  expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByText("窄屏新建话题")).toBeInTheDocument();
+});
+
+test("窄视口支持系统返回（adapter onSystemBack 与浏览器 popstate）从对话或新建页回到 Topic 列表并保持历史栈对齐", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncs += 1;
+      if (syncs === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "系统返回话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            leave: { "!t1:example.com": {} },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  // Case 1: 通过 PlatformAdapter 的 onSystemBack 触发系统返回
+  let backHandler: (() => boolean) | undefined;
+  let pushed = 0;
+  let popped = 0;
+  const clock = new ManualClock();
+  const view = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint Android",
+        viewportMode: () => "narrow",
+        onSystemBack: (handler: () => boolean) => {
+          backHandler = handler;
+          return () => {
+            backHandler = undefined;
+          };
+        },
+        pushNavigationEntry: () => {
+          pushed += 1;
+        },
+        popNavigationEntry: () => {
+          popped += 1;
+        },
+      } as import("../adapters/types").PlatformAdapter}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  expect(await screen.findByText("系统返回话题")).toBeInTheDocument();
+  expect(pushed).toBe(0);
+  // 列表页时系统返回不消费事件
+  expect(backHandler?.()).toBe(false);
+
+  // 打开 Topic 推入历史项；系统返回消费事件并回到列表，不再额外 pop
+  await user.click(screen.getByRole("button", { name: "系统返回话题" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("系统返回话题");
+  expect(pushed).toBe(1);
+  expect(popped).toBe(0);
+
+  act(() => {
+    expect(backHandler?.()).toBe(true);
+  });
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  expect(popped).toBe(0);
+
+  // 打开新建 Topic 页后通过系统返回回到列表
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  expect(pushed).toBe(2);
+  act(() => {
+    expect(backHandler?.()).toBe(true);
+  });
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+  expect(popped).toBe(0);
+
+  // 点击顶栏返回按钮时主动清理压入的历史项
+  await user.click(screen.getByRole("button", { name: "系统返回话题" }));
+  expect(pushed).toBe(3);
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(popped).toBe(1);
+
+  view.unmount();
+
+  // Case 2: 通过生产平台适配器的 matchMedia (48em) 与 popstate 触发系统返回
+  const { detectPlatform } = await import("../adapters/production");
+  const originalMatchMedia = window.matchMedia;
+  const pushStateSpy = vi.spyOn(window.history, "pushState");
+  const backSpy = vi.spyOn(window.history, "back");
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      matches: query === "(min-width: 48em)" ? false : true,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  try {
+    globalThis.indexedDB = new IDBFactory();
+    syncs = 0;
+    const prodView = render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={detectPlatform()}
+        clock={new ManualClock()}
+      />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "系统返回话题" }));
+    expect(screen.getByRole("banner")).toHaveTextContent("系统返回话题");
+    expect(pushStateSpy).toHaveBeenCalledTimes(1);
+
+    // 模拟系统返回触发 popstate
+    act(() => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+    expect(backSpy).not.toHaveBeenCalled();
+
+    // 再次打开并点 UI 返回按钮时，会调用 history.back() 弹出历史项
+    await user.click(screen.getByRole("button", { name: "系统返回话题" }));
+    expect(pushStateSpy).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(backSpy).toHaveBeenCalledTimes(1);
+
+    prodView.unmount();
+  } finally {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    pushStateSpy.mockRestore();
+    backSpy.mockRestore();
+  }
+});
+
+test("宽窄视口切换时保留已打开 Topic 与新建表单草稿且不重建同步循环，全局阻止第二个界面实例并发运行并聚焦主窗口", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCount += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "正在讨论的话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  let currentMode: "wide" | "narrow" = "narrow";
+  const listeners = new Set<(mode: "wide" | "narrow") => void>();
+  const setViewport = (mode: "wide" | "narrow") => {
+    currentMode = mode;
+    for (const listener of listeners) {
+      listener(mode);
+    }
+  };
+  let focusCalls = 0;
+
+  const platform: import("../adapters/types").PlatformAdapter = {
+    deviceDisplayName: "Waypoint macOS",
+    viewportMode: () => currentMode,
+    subscribeViewportMode: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    focusMainWindow: () => {
+      focusCalls += 1;
+    },
+  } as import("../adapters/types").PlatformAdapter;
+
+  const first = render(
+    <WaypointApp homeserver={homeserver} platform={platform} clock={new ManualClock()} />,
+  );
+  await login(user);
+
+  // 窄视口打开 Topic，再切宽视口，再切回窄视口
+  await user.click(await screen.findByRole("button", { name: "正在讨论的话题" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("正在讨论的话题");
+  expect(syncCount).toBe(1);
+
+  act(() => {
+    setViewport("wide");
+  });
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByRole("banner")).toHaveTextContent("正在讨论的话题");
+  expect(screen.queryByRole("button", { name: "返回" })).not.toBeInTheDocument();
+  expect(syncCount).toBe(1);
+
+  act(() => {
+    setViewport("narrow");
+  });
+  expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+  expect(screen.getByRole("banner")).toHaveTextContent("正在讨论的话题");
+  expect(screen.getByRole("button", { name: "返回" })).toBeVisible();
+  expect(syncCount).toBe(1);
+
+  // 返回列表并打开新建表单输入草稿，在窄<->宽之间切换时表单内容不丢失
+  await user.click(screen.getByRole("button", { name: "返回" }));
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "草稿标题");
+  await user.type(screen.getByLabelText(/Description/), "未提交上下文");
+
+  act(() => {
+    setViewport("wide");
+  });
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("草稿标题");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("未提交上下文");
+  expect(syncCount).toBe(1);
+
+  act(() => {
+    setViewport("narrow");
+  });
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("草稿标题");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("未提交上下文");
+  expect(syncCount).toBe(1);
+
+  // 同时尝试挂载第二个 WaypointApp 实例时，不启动第二套同步/客户端，改为聚焦主窗口
+  const requestCountBeforeSecond = homeserver.requests.length;
+  const second = render(
+    <WaypointApp homeserver={homeserver} platform={platform} clock={new ManualClock()} />,
+  );
+  await waitFor(() => {
+    expect(focusCalls).toBe(1);
+  });
+  expect(screen.getByText(/主窗口/)).toBeInTheDocument();
+  expect(homeserver.requests).toHaveLength(requestCountBeforeSecond);
+  expect(syncCount).toBe(1);
+
+  second.unmount();
+  first.unmount();
+
+  // 第一个实例卸载后，重新打开单个主窗口可正常恢复同步
+  const third = render(
+    <WaypointApp homeserver={homeserver} platform={platform} clock={new ManualClock()} />,
+  );
+  expect(await screen.findByText("正在讨论的话题")).toBeInTheDocument();
+  expect(syncCount).toBe(2);
+  third.unmount();
+});
+
+test("软键盘弹出时将 keyboard inset 传入界面与输入区容器，收起时恢复（含生产 visualViewport 监听）", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "键盘避让话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  // Case 1: 通过 PlatformAdapter 传递动态软键盘 inset
+  let inset = 0;
+  const insetListeners = new Set<(next: number) => void>();
+  const setInset = (next: number) => {
+    inset = next;
+    for (const listener of insetListeners) {
+      listener(next);
+    }
+  };
+
+  const view = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint Android",
+        viewportMode: () => "narrow",
+        keyboardInsetBottom: () => inset,
+        subscribeKeyboardInsetBottom: (listener: (next: number) => void) => {
+          insetListeners.add(listener);
+          return () => {
+            insetListeners.delete(listener);
+          };
+        },
+      } as import("../adapters/types").PlatformAdapter}
+      clock={new ManualClock()}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "键盘避让话题" }));
+
+  const conversationMain = screen.getByRole("main");
+  expect(conversationMain.style.paddingBottom).toBe("0px");
+
+  act(() => {
+    setInset(312);
+  });
+  const workspace = conversationMain.closest(".waypoint-workspace") as HTMLElement;
+  expect(workspace.style.getPropertyValue("--keyboard-inset")).toBe("312px");
+  expect(conversationMain.style.paddingBottom).toBe("312px");
+  const safeArea = conversationMain.querySelector(".waypoint-composer-safe-area") as HTMLElement;
+  expect(safeArea).toBeInTheDocument();
+  expect(safeArea).toHaveAttribute("data-keyboard-inset", "312");
+
+  act(() => {
+    setInset(0);
+  });
+  expect(workspace.style.getPropertyValue("--keyboard-inset")).toBe("0px");
+  expect(conversationMain.style.paddingBottom).toBe("0px");
+  expect(safeArea).toHaveAttribute("data-keyboard-inset", "0");
+
+  view.unmount();
+
+  // Case 2: 生产 detectPlatform 从 visualViewport 推导软键盘 inset
+  const { detectPlatform } = await import("../adapters/production");
+  const originalInnerHeight = window.innerHeight;
+  const originalVisualViewport = window.visualViewport;
+  const vvListeners = new Map<string, Set<EventListener>>();
+  const fakeVisualViewport = {
+    height: 800,
+    offsetTop: 0,
+    addEventListener: (type: string, listener: EventListener) => {
+      if (!vvListeners.has(type)) {
+        vvListeners.set(type, new Set());
+      }
+      vvListeners.get(type)?.add(listener);
+    },
+    removeEventListener: (type: string, listener: EventListener) => {
+      vvListeners.get(type)?.delete(listener);
+    },
+  };
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+  Object.defineProperty(window, "visualViewport", { configurable: true, value: fakeVisualViewport });
+  try {
+    globalThis.indexedDB = new IDBFactory();
+    const prodView = render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={detectPlatform()}
+        clock={new ManualClock()}
+      />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "键盘避让话题" }));
+
+    const prodMain = screen.getByRole("main");
+    expect(prodMain.style.paddingBottom).toBe("0px");
+
+    act(() => {
+      fakeVisualViewport.height = 500;
+      for (const listener of vvListeners.get("resize") ?? []) {
+        listener(new Event("resize"));
+      }
+    });
+    expect(prodMain.style.paddingBottom).toBe("300px");
+
+    act(() => {
+      fakeVisualViewport.height = 800;
+      for (const listener of vvListeners.get("resize") ?? []) {
+        listener(new Event("resize"));
+      }
+    });
+    expect(prodMain.style.paddingBottom).toBe("0px");
+
+    prodView.unmount();
+  } finally {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: originalVisualViewport });
+  }
+});

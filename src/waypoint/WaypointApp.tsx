@@ -1,14 +1,17 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import type {
   Clock,
   HomeserverTransport,
   PlatformAdapter,
   TransportFailure,
   TransportResult,
+  ViewportMode,
 } from "../adapters/types";
 import { MatrixClient } from "./matrix-client";
 import { TopicsWorkspace } from "./TopicsWorkspace";
 import { isFullUserId, isRecord, parseBotRoster, serverName } from "./topics";
+
+let liveAppInstanceToken: symbol | null = null;
 
 type Phase =
   | { name: "booting" }
@@ -28,6 +31,11 @@ export function WaypointApp({
   clock: Clock;
 }) {
   const [phase, setPhase] = useState<Phase>({ name: "booting" });
+  const [viewportMode, setViewportMode] = useState<ViewportMode>(() => platform.viewportMode ? platform.viewportMode() : "wide");
+  const [keyboardInsetBottom, setKeyboardInsetBottom] = useState<number>(() =>
+    normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+  );
+  const [duplicateInstance, setDuplicateInstance] = useState(false);
   const clientRef = useRef<MatrixClient | undefined>(undefined);
 
   function client(): MatrixClient {
@@ -41,8 +49,49 @@ export function WaypointApp({
   const syncGeneration = useRef(0);
   const epoch = useRef(0);
   const abandoning = useRef(false);
+  const platformRef = useRef(platform);
+  platformRef.current = platform;
 
   useEffect(() => {
+    setViewportMode(platform.viewportMode ? platform.viewportMode() : "wide");
+    if (!platform.subscribeViewportMode) {
+      return undefined;
+    }
+    return platform.subscribeViewportMode((mode) => {
+      setViewportMode(mode);
+    });
+  }, [platform]);
+
+  useEffect(() => {
+    setKeyboardInsetBottom(
+      normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+    );
+    if (!platform.subscribeKeyboardInsetBottom) {
+      return undefined;
+    }
+    return platform.subscribeKeyboardInsetBottom((inset) => {
+      setKeyboardInsetBottom(normalizeInset(inset));
+    });
+  }, [platform]);
+
+  useEffect(() => {
+    if (liveAppInstanceToken !== null) {
+      setDuplicateInstance(true);
+      platformRef.current.focusMainWindow?.();
+      return;
+    }
+    const guardRelease = platformRef.current.acquireSingleInstanceGuard
+      ? platformRef.current.acquireSingleInstanceGuard()
+      : () => undefined;
+    if (guardRelease === false) {
+      setDuplicateInstance(true);
+      platformRef.current.focusMainWindow?.();
+      return;
+    }
+    const myToken = Symbol("waypoint-app-instance");
+    liveAppInstanceToken = myToken;
+    setDuplicateInstance(false);
+
     let cancelled = false;
     void (async () => {
       const restored = await client().restore();
@@ -73,6 +122,10 @@ export function WaypointApp({
         clock.clearTimeout(retryTimer.current);
         retryTimer.current = undefined;
       }
+      if (liveAppInstanceToken === myToken) {
+        liveAppInstanceToken = null;
+      }
+      guardRelease();
     };
   }, [clock]);
 
@@ -369,12 +422,29 @@ export function WaypointApp({
     await syncNow();
   }
 
+  if (duplicateInstance) {
+    return (
+      <main className="waypoint-auth-main">
+        <p role="status">Waypoint 已在主窗口中运行，请切回主窗口继续。</p>
+      </main>
+    );
+  }
+
   if (phase.name === "topics") {
-    return <TopicsWorkspace client={client()} clock={clock} />;
+    return <TopicsWorkspace
+        client={client()}
+        clock={clock}
+        platform={platform}
+        viewportMode={viewportMode}
+        keyboardInsetBottom={keyboardInsetBottom}
+      />;
   }
 
   return (
-    <main>
+    <main
+      className="waypoint-auth-main"
+      style={{ "--keyboard-inset": `${keyboardInsetBottom}px`, paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined } as CSSProperties}
+    >
       <p>尚未进入 Topic 列表</p>
       {phase.name === "address" ? (
         <form onSubmit={submitAddress}>
@@ -750,4 +820,8 @@ function loginFailure(result: TransportResult): { message: string; clearPassword
     };
   }
   return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };
+}
+
+function normalizeInset(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
 }
