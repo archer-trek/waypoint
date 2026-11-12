@@ -8,6 +8,7 @@ import type {
   ViewportMode,
 } from "../adapters/types";
 import { MatrixClient } from "./matrix-client";
+import { RetryQueue } from "./retry-queue";
 import {
   credentialRejectedMessage,
   errcode,
@@ -16,6 +17,7 @@ import {
   isCredentialRejected,
   isRateLimited,
   isRecord,
+  isSyncCursorRejected,
   sentence,
   transportFailureMessage,
 } from "./matrix-errors";
@@ -57,6 +59,7 @@ export function WaypointApp({
   );
   const [duplicateInstance, setDuplicateInstance] = useState(false);
   const clientRef = useRef<MatrixClient | undefined>(undefined);
+  const retryQueueRef = useRef<RetryQueue | undefined>(undefined);
 
   function client(): MatrixClient {
     if (!clientRef.current) {
@@ -65,11 +68,20 @@ export function WaypointApp({
     return clientRef.current;
   }
 
+  function retryQueue(): RetryQueue {
+    if (!retryQueueRef.current) {
+      retryQueueRef.current = new RetryQueue(client(), clock);
+    }
+    return retryQueueRef.current;
+  }
+
   const retryTimer = useRef<number | undefined>(undefined);
   const backoffStep = useRef(0);
   const syncGeneration = useRef(0);
   const epoch = useRef(0);
   const abandoning = useRef(false);
+  const phaseNameRef = useRef(phase.name);
+  phaseNameRef.current = phase.name;
   const platformRef = useRef(platform);
   platformRef.current = platform;
 
@@ -114,6 +126,12 @@ export function WaypointApp({
       const matrix = client();
       if (restored === "sync") {
         setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
+        if (
+          hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId) &&
+          matrix.pendingRoomEvents().length > 0
+        ) {
+          void retryQueue().flush();
+        }
         void syncNow();
         return;
       }
@@ -135,10 +153,34 @@ export function WaypointApp({
         clock.clearTimeout(retryTimer.current);
         retryTimer.current = undefined;
       }
+      retryQueueRef.current?.dispose();
       if (liveAppInstanceToken === myToken) {
         liveAppInstanceToken = null;
       }
     };
+  }, [clock]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      if (phaseNameRef.current !== "syncing") {
+        return;
+      }
+      const matrix = client();
+      if (!matrix.hasToken) {
+        return;
+      }
+      backoffStep.current = 0;
+      clearRetry();
+      void syncNow();
+      if (
+        hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId) &&
+        retryQueue().isActive()
+      ) {
+        retryQueue().wake();
+      }
+    };
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
   }, [clock]);
 
   function clearRetry() {
@@ -167,6 +209,7 @@ export function WaypointApp({
     syncGeneration.current += 1;
     clearRetry();
     backoffStep.current = 0;
+    retryQueue().resume();
     const matrix = client();
     const address = matrix.address;
     const userId = matrix.ownerId;
@@ -193,9 +236,19 @@ export function WaypointApp({
     const myEpoch = epoch.current;
     const generation = ++syncGeneration.current;
     clearRetry();
-    const attempt = await matrix.sync();
+    let attempt = await matrix.sync();
     if (!syncIsCurrent(myEpoch, generation)) {
       return;
+    }
+    if (isSyncCursorRejected(attempt.incremental, attempt.result)) {
+      await matrix.dropSyncCursor();
+      if (!syncIsCurrent(myEpoch, generation)) {
+        return;
+      }
+      attempt = await matrix.sync();
+      if (!syncIsCurrent(myEpoch, generation)) {
+        return;
+      }
     }
     const sync = attempt.result;
     if (isCredentialRejected(sync)) {
@@ -216,10 +269,14 @@ export function WaypointApp({
       return;
     }
     if (sync.type === "response" && sync.status === 200) {
+      const wasBackedOff = backoffStep.current > 0;
       backoffStep.current = 0;
       await matrix.retainSync(attempt);
       if (!syncIsCurrent(myEpoch, generation)) {
         return;
+      }
+      if (wasBackedOff && retryQueue().isActive()) {
+        retryQueue().wake();
       }
       setPhase(
         hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
@@ -432,6 +489,7 @@ export function WaypointApp({
       );
       return;
     }
+    retryQueue().resume();
     await matrix.rememberLogin(session.userId, session.accessToken, session.deviceId);
     setPhase({ name: "syncing", address, userId: session.userId });
     await syncNow();
@@ -450,6 +508,7 @@ export function WaypointApp({
       <TopicsWorkspace
         client={client()}
         clock={clock}
+        retryQueue={retryQueue()}
         platform={platform}
         viewportMode={viewportMode}
         keyboardInsetBottom={keyboardInsetBottom}

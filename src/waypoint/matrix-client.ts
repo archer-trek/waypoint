@@ -10,7 +10,10 @@ import {
   type RawMatrixEvent,
   type SessionRecord,
   type StoredRoomEvents,
+  type StoredTimelineGap,
 } from "./session-store";
+
+const MAX_SYNC_TIMELINE_EVENTS_PER_ROOM = 20;
 
 export type SyncAttempt = {
   result: TransportResult;
@@ -176,14 +179,21 @@ export class MatrixClient {
       .then((result) => ({ result, incremental: Boolean(cursor) }));
   }
 
+  async dropSyncCursor(): Promise<void> {
+    await this.enqueuePersist(() => {
+      this.syncCursor = undefined;
+      return saveSession(this.sessionRecord());
+    });
+  }
+
   async retainSync(attempt: SyncAttempt): Promise<void> {
     if (attempt.result.type !== "response" || attempt.result.status !== 200) {
       return;
     }
     const body = attempt.result.body;
     await this.enqueuePersist(() => {
-      this.storedAccountData = mergeAccountData(this.storedAccountData, body, attempt.incremental);
-      this.storedRooms = mergeSyncRooms(this.storedRooms, body, attempt.incremental);
+      this.storedAccountData = mergeAccountData(this.storedAccountData, body);
+      this.storedRooms = mergeSyncRooms(this.storedRooms, body);
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
       this.storedDrafts = reconcileDraftsWithSync(this.storedDrafts, body);
       const cursor = nextBatch(body);
@@ -416,6 +426,7 @@ export class MatrixClient {
         [roomId]: {
           stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
+          ...(existing.timelineGap ? { timelineGap: { ...existing.timelineGap } } : {}),
         },
       };
       return saveSession(this.sessionRecord());
@@ -555,7 +566,20 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
     const timelineEvents = Array.isArray(value.timelineEvents)
       ? value.timelineEvents.filter(isPlainObject).map(cloneObject)
       : [];
-    cloned[roomId] = { stateEvents, timelineEvents };
+    let timelineGap: StoredTimelineGap | undefined;
+    if (isPlainObject(value.timelineGap) && value.timelineGap.limited === true) {
+      timelineGap = {
+        limited: true,
+        ...(typeof value.timelineGap.prevBatch === "string" && value.timelineGap.prevBatch !== ""
+          ? { prevBatch: value.timelineGap.prevBatch }
+          : {}),
+      };
+    }
+    cloned[roomId] = {
+      stateEvents,
+      timelineEvents,
+      ...(timelineGap ? { timelineGap } : {}),
+    };
   }
   return cloned;
 }
@@ -563,9 +587,8 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
 function mergeSyncRooms(
   current: Record<string, StoredRoomEvents>,
   body: unknown,
-  incremental: boolean,
 ): Record<string, StoredRoomEvents> {
-  const next: Record<string, StoredRoomEvents> = incremental ? cloneStoredRooms(current) : {};
+  const next: Record<string, StoredRoomEvents> = cloneStoredRooms(current);
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
     return next;
   }
@@ -581,10 +604,23 @@ function mergeSyncRooms(
         isPlainObject(roomSync.state) && Array.isArray(roomSync.state.events)
           ? roomSync.state.events.filter(isPlainObject)
           : [];
-      const rawTimeline =
+      const rawTimelineAll =
         isPlainObject(roomSync.timeline) && Array.isArray(roomSync.timeline.events)
           ? roomSync.timeline.events.filter(isPlainObject)
           : [];
+      const rawTimeline = rawTimelineAll.slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM);
+      const isLimited =
+        (isPlainObject(roomSync.timeline) && roomSync.timeline.limited === true) ||
+        rawTimelineAll.length > MAX_SYNC_TIMELINE_EVENTS_PER_ROOM;
+      const prevBatch =
+        isPlainObject(roomSync.timeline) &&
+        typeof roomSync.timeline.prev_batch === "string" &&
+        roomSync.timeline.prev_batch !== ""
+          ? roomSync.timeline.prev_batch
+          : undefined;
+      const timelineGap: StoredTimelineGap | undefined = isLimited
+        ? { limited: true, ...(prevBatch ? { prevBatch } : {}) }
+        : existing.timelineGap;
       const timelineStateEvents = rawTimeline.filter(
         (event) => typeof event.state_key === "string",
       );
@@ -595,6 +631,7 @@ function mergeSyncRooms(
           ...timelineStateEvents,
         ]),
         timelineEvents: mergeTimelineEvents(existing.timelineEvents, rawTimeline),
+        ...(timelineGap ? { timelineGap } : {}),
       };
     }
   }
@@ -669,14 +706,13 @@ function mergeTimelineEvents(
 function mergeAccountData(
   current: Record<string, unknown>,
   body: unknown,
-  incremental: boolean,
 ): Record<string, unknown> {
   const events = accountDataEvents(body);
-  if (incremental && events === undefined) {
+  if (events === undefined) {
     return current;
   }
-  const next = incremental ? { ...current } : {};
-  for (const event of events ?? []) {
+  const next = { ...current };
+  for (const event of events) {
     next[event.type] = event.content;
   }
   return next;
@@ -771,10 +807,10 @@ function reconcilePendingWithSync(
         Array.isArray(roomSync.timeline.events)
       ) {
         const txnIds = new Set<string>();
-        for (const event of roomSync.timeline.events) {
-          if (!isPlainObject(event)) {
-            continue;
-          }
+        const events = roomSync.timeline.events
+          .filter(isPlainObject)
+          .slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM);
+        for (const event of events) {
           const txnId = transactionIdOf(event);
           if (txnId) {
             txnIds.add(txnId);

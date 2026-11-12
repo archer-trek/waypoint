@@ -7957,3 +7957,869 @@ test("点发送后等本地写入成功才离开输入区，服务器发送失�
   expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
   restarted.unmount();
 });
+
+test("断线后保留同步游标，只有服务器不认游标时才丢掉并做不带游标的合并同步而不清空本地时间线与队列", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncStage = 0;
+  let allowSend = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncStage += 1;
+      if (syncStage === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "游标恢复话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-old",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "更早的本地消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-overlap",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "重叠消息旧版" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncStage === 2) {
+        expect(input.url).toContain("since=batch-1");
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (syncStage === 3) {
+        expect(input.url).toContain("since=batch-1");
+        return {
+          type: "response",
+          status: 502,
+          body: { errcode: "M_UNKNOWN", error: "Bad gateway" },
+        };
+      }
+      if (syncStage === 4) {
+        expect(input.url).toContain("since=batch-1");
+        return {
+          type: "response",
+          status: 429,
+          body: { errcode: "M_LIMIT_EXCEEDED", error: "Too fast" },
+        };
+      }
+      if (syncStage === 5) {
+        expect(input.url).toContain("since=batch-1");
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_UNKNOWN", error: "Invalid since token" },
+        };
+      }
+      if (syncStage === 6) {
+        expect(input.url).toBe("https://matrix.example.com/_matrix/client/v3/sync");
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-recovered",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "游标恢复话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-overlap",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "重叠消息新版" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-new",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4000,
+                        content: { msgtype: "m.text", body: "错过的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      expect(input.url).toContain("since=batch-recovered");
+      return { type: "response", status: 200, body: { next_batch: "batch-recovered-2" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      if (!allowSend) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { event_id: "$ev-sent" } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "游标恢复话题" }));
+
+  // 交出一条未确认消息，保持在重试队列里
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列里的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  // 第2轮：网络错误（保留游标）
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncStage).toBe(2));
+
+  // 第3轮：502 M_UNKNOWN（保留游标）
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncStage).toBe(3));
+
+  // 第4轮：429（保留游标）
+  await act(async () => { clock.advance(2000); });
+  await waitFor(() => expect(syncStage).toBe(4));
+
+  // 第5轮：400 M_UNKNOWN 拒绝游标 -> 立即发起第6轮不带游标的同步
+  await act(async () => { clock.advance(4000); });
+  await waitFor(() => expect(syncStage).toBeGreaterThanOrEqual(6));
+
+  // 已有本地时间线保留、重叠事件按 event_id 合并、新事件追加、队列仍在
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("更早的本地消息");
+  expect(timeline).toHaveTextContent("重叠消息新版");
+  expect(timeline).not.toHaveTextContent("重叠消息旧版");
+  expect(timeline).toHaveTextContent("错过的消息");
+  expect(timeline).toHaveTextContent("队列里的消息");
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(4);
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  // 没有重新登录
+  expect(homeserver.requests.filter((r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"))).toHaveLength(1);
+
+  // 后续同步携带新游标，且重试队列恢复后仍能确认原消息
+  allowSend = true;
+  await act(async () => { clock.advance(30000); });
+  await waitFor(() => {
+    expect(syncStage).toBeGreaterThanOrEqual(7);
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+});
+
+test("limited 缺口先记着不在后台补完且列表照常更新，每房间每轮同步最多处理 20 条时间线事件", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  function makeMessages(start: number, count: number, baseTs: number) {
+    return Array.from({ length: count }, (_, idx) => {
+      const n = start + idx;
+      return {
+        type: "m.room.message",
+        event_id: `$msg-${n}`,
+        sender: "@bot:example.com",
+        origin_server_ts: baseTs + idx * 1000,
+        content: { msgtype: "m.text", body: `消息-${n}` },
+      };
+    });
+  }
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/messages")) {
+      throw new Error(`不应在后台拉取历史消息：${input.url}`);
+    }
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题一" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$msg-0",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "初始消息" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 5000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题二" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-gap-1",
+                    events: makeMessages(1, 25, 10_000),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    limited: false,
+                    events: makeMessages(26, 5, 40_000),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+
+  const topicTitles = () =>
+    Array.from(document.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+
+  await waitFor(() => expect(topicTitles()).toEqual(["话题二", "话题一"]));
+
+  // 第 2 轮同步带来 limited: true 与 25 条事件：列表照常重排，后台不补齐缺口，本轮最多处理 20 条
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(2));
+  await waitFor(() => expect(topicTitles()).toEqual(["话题一", "话题二"]));
+
+  await user.click(screen.getByRole("button", { name: "话题一" }));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(21); // 初始 1 条 + 本轮最多 20 条
+  const bubblesAfterRound2 = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map(
+    (el) => el.textContent,
+  );
+  expect(bubblesAfterRound2[0]).toBe("初始消息");
+  for (let i = 1; i <= 5; i += 1) {
+    expect(bubblesAfterRound2).not.toContain(`消息-${i}`);
+  }
+  expect(bubblesAfterRound2).toContain("消息-6");
+  expect(bubblesAfterRound2).toContain("消息-25");
+
+  // 第 3 轮再带来 5 条增量事件：追加到现有时间线（非全量上限 20）
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncRound).toBe(3));
+  await waitFor(() => expect(timeline.querySelectorAll("[data-side]")).toHaveLength(26));
+  expect(timeline).toHaveTextContent("消息-26");
+  expect(timeline).toHaveTextContent("消息-30");
+
+  // 等待一段时间也不会在后台发 /messages 补齐缺口
+  await act(async () => { clock.advance(10_000); });
+  expect(homeserver.requests.some((r) => r.url.includes("/messages"))).toBe(false);
+});
+
+test("限流留在重试队列退避后再试，其他 4xx 不进入自动重试", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "限流与4xx话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          type: "response",
+          status: 429,
+          body: { errcode: "M_LIMIT_EXCEEDED", error: "Slow down" },
+        };
+      }
+      if (sendCount === 2) {
+        return {
+          type: "response",
+          status: 429,
+          body: { errcode: "M_LIMIT_EXCEEDED", error: "Still slow" },
+        };
+      }
+      if (sendCount === 3) {
+        return { type: "response", status: 200, body: { event_id: "$ev-rate-ok" } };
+      }
+      return {
+        type: "response",
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Not allowed" },
+      };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "限流与4xx话题" }));
+
+  // 1) 限流：第 1 次 429 后退避 1s，第 2 次 429 后退避 2s，第 3 次成功
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被限流的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCount).toBe(1));
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  await act(async () => { clock.advance(999); });
+  expect(sendCount).toBe(1);
+  await act(async () => { clock.advance(1); });
+  await waitFor(() => expect(sendCount).toBe(2));
+
+  await act(async () => { clock.advance(1999); });
+  expect(sendCount).toBe(2);
+  await act(async () => { clock.advance(1); });
+  await waitFor(() => expect(sendCount).toBe(3));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+
+  // 2) 其他 4xx (403)：不自动重试
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被永久拒绝的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCount).toBe(4));
+
+  await act(async () => { clock.advance(60_000); });
+  expect(sendCount).toBe(4);
+});
+
+test("服务器不认 token 时暂停同步和重试队列，不丢队列也不清空本地时间线", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCalls = 0;
+  let rejectTokenOnSend = true;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "Token失效话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-hist",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "已有本地消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 401,
+        body: { errcode: "M_UNKNOWN_TOKEN", error: "Unknown access token" },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      if (rejectTokenOnSend) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Unknown access token" },
+        };
+      }
+      return { type: "response", status: 200, body: { event_id: "$ev-sent" } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "Token失效话题" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "暂停在队列的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBe(1));
+
+  // 不切回密码页，不清空本地时间线与未确认气泡，且已停止后续同步与重试
+  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("已有本地消息");
+  expect(timeline).toHaveTextContent("暂停在队列的消息");
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  const syncsAtPause = syncCalls;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    clock.advance(60_000);
+  });
+  expect(syncCalls).toBe(syncsAtPause);
+  expect(sendCalls).toBe(1);
+});
+
+test("重新连上后同步立刻恢复，重试队列按交出顺序重放且不等这一轮同步做完", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let offline = false;
+  let holdReconnectSync = false;
+  const reconnectSync = deferred<TransportResult>();
+  const sentBodies: string[] = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "重连重放话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (holdReconnectSync) {
+        holdReconnectSync = false;
+        return reconnectSync.promise;
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      const body = (input.body as { body: string }).body;
+      sentBodies.push(body);
+      return { type: "response", status: 200, body: { event_id: `$ev-${sentBodies.length}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "重连重放话题" }));
+
+  // 断线：同步与队列都进入退避等待
+  offline = true;
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBe(2));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+
+  // 推进 1s 让队列再失败一次，进入 2s 退避等待
+  await act(async () => { clock.advance(1000); });
+  const syncsBeforeReconnect = syncCalls;
+
+  // 重新连上：但让这一轮同步挂起不返回，验证同步立刻发出、队列立刻按序重放且不等同步做完
+  offline = false;
+  holdReconnectSync = true;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+  });
+
+  await waitFor(() => {
+    expect(syncCalls).toBe(syncsBeforeReconnect + 1);
+    expect(sentBodies).toEqual(["第一条", "第二条"]);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+
+  // 随后同步完成
+  await act(async () => {
+    reconnectSync.resolve({ type: "response", status: 200, body: { next_batch: "batch-after" } });
+  });
+});
+
+test("进程被回收后重新打开，恢复凭证、游标、本地时间线与重试队列，增量同步同时按序重放且不等初始同步做完", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let offline = false;
+  let holdRestartSync = false;
+  const restartSync = deferred<TransportResult>();
+  const replayedTxns: Array<{ body: string; txnId: string }> = [];
+  const offlineTxns: Array<{ body: string; txnId: string }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      if (holdRestartSync) {
+        expect(input.url).toBe("https://matrix.example.com/_matrix/client/v3/sync?since=batch-1");
+        expect(input.headers?.Authorization).toBe("Bearer tok-1");
+        holdRestartSync = false;
+        return restartSync.promise;
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "进程回收恢复话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ev-hist",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "本地历史消息" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const txnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      const body = (input.body as { body: string }).body;
+      if (offline) {
+        offlineTxns.push({ body, txnId });
+        return { type: "failure", failure: { type: "network" } };
+      }
+      replayedTxns.push({ body, txnId });
+      return { type: "response", status: 200, body: { event_id: `$ev-replay-${replayedTxns.length}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "进程回收恢复话题" }));
+
+  offline = true;
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第一条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第二条");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(offlineTxns.length).toBeGreaterThanOrEqual(1));
+  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+
+  // 模拟进程被系统回收
+  first.unmount();
+
+  // 重新打开且网络恢复，但让重启后的增量 /sync 挂起不返回
+  offline = false;
+  holdRestartSync = true;
+  renderApp(homeserver);
+
+  // 不等初始 /sync 做完，重启后的重试队列已按原顺序、用原 txnId 重放
+  await waitFor(() => {
+    expect(replayedTxns.map((item) => item.body)).toEqual(["离线第一条", "离线第二条"]);
+  });
+  expect(replayedTxns[0].txnId).toBe(offlineTxns[0].txnId);
+  expect(homeserver.requests.filter((r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"))).toHaveLength(1);
+
+  // 初始增量 /sync 随后带回回声：收成各自单一气泡，本地历史也在
+  await act(async () => {
+    restartSync.resolve({
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-2",
+        rooms: {
+          join: {
+            "!t1:example.com": {
+              timeline: {
+                events: [
+                  {
+                    type: "m.room.message",
+                    event_id: "$ev-replay-1",
+                    sender: "@alice:example.com",
+                    origin_server_ts: 5000,
+                    content: { msgtype: "m.text", body: "离线第一条" },
+                    unsigned: { transaction_id: replayedTxns[0].txnId },
+                  },
+                  {
+                    type: "m.room.message",
+                    event_id: "$ev-replay-2",
+                    sender: "@alice:example.com",
+                    origin_server_ts: 6000,
+                    content: { msgtype: "m.text", body: "离线第二条" },
+                    unsigned: { transaction_id: replayedTxns[1].txnId },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  await user.click(await screen.findByRole("button", { name: "进程回收恢复话题" }));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(3);
+  expect(timeline).toHaveTextContent("本地历史消息");
+  expect(timeline).toHaveTextContent("离线第一条");
+  expect(timeline).toHaveTextContent("离线第二条");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+});
+
+test("同步从断线退避中恢复时立刻唤醒处于退避中的重试队列，且重启后游标被拒绝时保留本地时间线合并同步", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCalls = 0;
+  let offline = false;
+  let rejectCursorOnce = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "退避唤醒话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-base",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "已有历史" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (rejectCursorOnce && input.url.includes("since=batch-1")) {
+        rejectCursorOnce = false;
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_INVALID_PARAM", error: "Unknown since token" },
+        };
+      }
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (!input.url.includes("since=")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ev-after-gap",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 9000,
+                        content: { msgtype: "m.text", body: "游标失效后补到的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: "batch-1" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { event_id: `$ev-send-${sendCalls}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "退避唤醒话题" }));
+
+  // 断网后交出消息并使其退避到 4s（1s + 2s 已用完，下一次原本要等 4s）
+  offline = true;
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "退避中的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBe(1));
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => expect(sendCalls).toBe(2));
+  await act(async () => { first.clock.advance(2000); });
+  await waitFor(() => expect(sendCalls).toBe(3));
+  // 此刻队列已进入 4000ms 退避（t=7000 触发），而同步在 t=5000 触发并恢复成功
+  offline = false;
+  await act(async () => { first.clock.advance(2000); });
+  await waitFor(() => {
+    expect(sendCalls).toBe(4);
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+
+  // 重启后若服务器拒绝旧游标，只丢游标并合并新消息，原有本地历史仍保留
+  first.unmount();
+  rejectCursorOnce = true;
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "退避唤醒话题" }));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("已有历史");
+  expect(timeline).toHaveTextContent("退避中的消息");
+  expect(timeline).toHaveTextContent("游标失效后补到的消息");
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(3);
+});

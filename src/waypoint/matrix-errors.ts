@@ -51,6 +51,16 @@ export function isCredentialRejected(result: TransportResult): boolean {
   return code === "M_UNKNOWN_TOKEN" || code === "M_USER_DEACTIVATED";
 }
 
+export function isSyncCursorRejected(incremental: boolean, result: TransportResult): boolean {
+  if (!incremental || result.type !== "response") {
+    return false;
+  }
+  if (isCredentialRejected(result) || isRateLimited(result.status, result.body)) {
+    return false;
+  }
+  return result.status === 400;
+}
+
 export function credentialRejectedMessage(action: string, result: TransportResult): string {
   const body = result.type === "response" ? result.body : undefined;
   const prefix = actionFailedPrefix(action);

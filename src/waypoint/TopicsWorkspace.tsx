@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -10,7 +11,8 @@ import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import type { DraftAttachment, DraftRecord } from "./session-store";
-import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
+import { isCredentialRejected, isSyncCursorRejected } from "./matrix-errors";
+import { RETRY_BACKOFF_MS, RetryQueue } from "./retry-queue";
 import {
   appendDirectRoom,
   buildAddAgentContent,
@@ -28,7 +30,6 @@ import {
 } from "./topics";
 
 const FOREGROUND_SYNC_INTERVAL_MS = 1000;
-const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
 type AgentsFormState =
   | {
@@ -49,16 +50,22 @@ type AgentsFormState =
 export function TopicsWorkspace({
   client,
   clock,
+  retryQueue: providedRetryQueue,
   platform,
   viewportMode = "wide",
   keyboardInsetBottom = 0,
 }: {
   client: MatrixClient;
   clock: Clock;
+  retryQueue?: RetryQueue;
   platform?: PlatformAdapter;
   viewportMode?: ViewportMode;
   keyboardInsetBottom?: number;
 }) {
+  const retryQueue = useMemo(
+    () => providedRetryQueue ?? new RetryQueue(client, clock),
+    [providedRetryQueue, client, clock],
+  );
   const [, setRevision] = useState(0);
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -97,9 +104,8 @@ export function TopicsWorkspace({
   const pausedRef = useRef(false);
   const syncTimerRef = useRef<number | undefined>(undefined);
   const syncBackoffRef = useRef(0);
-  const retryQueueTimerRef = useRef<number | undefined>(undefined);
-  const retryQueueRunningRef = useRef(false);
-  const retryQueueBackoffRef = useRef(0);
+  const syncInFlightRef = useRef(false);
+  const syncWakePendingRef = useRef(false);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -512,11 +518,11 @@ export function TopicsWorkspace({
     }
   }
 
-  function clearRetryQueueTimer() {
-    if (retryQueueTimerRef.current !== undefined) {
-      clock.clearTimeout(retryQueueTimerRef.current);
-      retryQueueTimerRef.current = undefined;
-    }
+  function pauseForCredentialRejection() {
+    pausedRef.current = true;
+    syncWakePendingRef.current = false;
+    clearSyncTimer();
+    retryQueue.pause();
   }
 
   function scheduleForegroundSync(delayMs: number) {
@@ -531,123 +537,85 @@ export function TopicsWorkspace({
   }
 
   async function runForegroundSync() {
-    if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+    if (syncInFlightRef.current || !mountedRef.current || pausedRef.current || !client.hasToken) {
       return;
     }
-    let attempt;
+    syncInFlightRef.current = true;
+    clearSyncTimer();
+    let syncSucceeded = false;
     try {
-      attempt = await client.sync();
-    } catch {
+      let attempt;
+      try {
+        attempt = await client.sync();
+      } catch {
+        if (!mountedRef.current || pausedRef.current) {
+          return;
+        }
+        const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+        syncBackoffRef.current += 1;
+        scheduleForegroundSync(delay);
+        return;
+      }
       if (!mountedRef.current || pausedRef.current) {
+        return;
+      }
+      if (isSyncCursorRejected(attempt.incremental, attempt.result)) {
+        await client.dropSyncCursor();
+        if (!mountedRef.current || pausedRef.current) {
+          return;
+        }
+        try {
+          attempt = await client.sync();
+        } catch {
+          if (!mountedRef.current || pausedRef.current) {
+            return;
+          }
+          const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+          syncBackoffRef.current += 1;
+          scheduleForegroundSync(delay);
+          return;
+        }
+        if (!mountedRef.current || pausedRef.current) {
+          return;
+        }
+      }
+      if (isCredentialRejected(attempt.result)) {
+        pauseForCredentialRejection();
+        return;
+      }
+      if (attempt.result.type === "response" && attempt.result.status === 200) {
+        syncSucceeded = true;
+        const wasBackedOff = syncBackoffRef.current > 0;
+        syncBackoffRef.current = 0;
+        await client.retainSync(attempt);
+        if (!mountedRef.current || pausedRef.current) {
+          return;
+        }
+        setRevision((value) => value + 1);
+        if (wasBackedOff && retryQueue.isActive()) {
+          retryQueue.wake();
+        }
+        scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
         return;
       }
       const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
       syncBackoffRef.current += 1;
       scheduleForegroundSync(delay);
-      return;
-    }
-    if (!mountedRef.current || pausedRef.current) {
-      return;
-    }
-    if (isCredentialRejected(attempt.result)) {
-      pausedRef.current = true;
-      clearSyncTimer();
-      clearRetryQueueTimer();
-      return;
-    }
-    if (attempt.result.type === "response" && attempt.result.status === 200) {
-      syncBackoffRef.current = 0;
-      await client.retainSync(attempt);
-      if (!mountedRef.current || pausedRef.current) {
-        return;
-      }
-      setRevision((value) => value + 1);
-      scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
-      return;
-    }
-    const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
-    syncBackoffRef.current += 1;
-    scheduleForegroundSync(delay);
-  }
-
-  function scheduleRetryQueue() {
-    clearRetryQueueTimer();
-    if (!mountedRef.current || pausedRef.current) {
-      return;
-    }
-    const delay =
-      RETRY_BACKOFF_MS[Math.min(retryQueueBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
-    retryQueueBackoffRef.current += 1;
-    retryQueueTimerRef.current = clock.setTimeout(() => {
-      retryQueueTimerRef.current = undefined;
-      void flushRetryQueue();
-    }, delay);
-  }
-
-  async function flushRetryQueue() {
-    if (
-      retryQueueRunningRef.current ||
-      !mountedRef.current ||
-      pausedRef.current ||
-      !client.hasToken
-    ) {
-      return;
-    }
-    retryQueueRunningRef.current = true;
-    clearRetryQueueTimer();
-    try {
-      while (mountedRef.current && !pausedRef.current && client.hasToken) {
-        const pending = client.pendingRoomEvents();
-        if (pending.length === 0) {
-          retryQueueBackoffRef.current = 0;
-          break;
-        }
-        const head = pending[0];
-        let result;
-        try {
-          result = await client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);
-        } catch {
-          if (mountedRef.current && !pausedRef.current) {
-            scheduleRetryQueue();
-          }
-          break;
-        }
-        if (!mountedRef.current || pausedRef.current) {
-          break;
-        }
-        if (isCredentialRejected(result)) {
-          pausedRef.current = true;
-          clearSyncTimer();
-          clearRetryQueueTimer();
-          break;
-        }
-        if (
-          result.type === "response" &&
-          result.status === 200 &&
-          isRecord(result.body) &&
-          typeof result.body.event_id === "string" &&
-          result.body.event_id !== ""
-        ) {
-          await client.confirmSentRoomEvent(head.roomId, head.txnId, result.body.event_id);
-          retryQueueBackoffRef.current = 0;
-          if (!mountedRef.current) {
-            break;
-          }
-          setRevision((value) => value + 1);
-          continue;
-        }
-        if (
-          result.type === "failure" ||
-          isRateLimited(result.status, result.body) ||
-          result.status >= 500
-        ) {
-          scheduleRetryQueue();
-          break;
-        }
-        break;
-      }
     } finally {
-      retryQueueRunningRef.current = false;
+      syncInFlightRef.current = false;
+      if (
+        syncWakePendingRef.current &&
+        !syncSucceeded &&
+        mountedRef.current &&
+        !pausedRef.current &&
+        client.hasToken
+      ) {
+        syncWakePendingRef.current = false;
+        clearSyncTimer();
+        void runForegroundSync();
+      } else {
+        syncWakePendingRef.current = false;
+      }
     }
   }
 
@@ -701,17 +669,51 @@ export function TopicsWorkspace({
 
   useEffect(() => {
     mountedRef.current = true;
-    pausedRef.current = false;
-    scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
-    if (client.pendingRoomEvents().length > 0) {
-      void flushRetryQueue();
+    pausedRef.current = retryQueue.isPaused;
+    retryQueue.setCallbacks({
+      onConfirmed: () => {
+        if (mountedRef.current) {
+          setRevision((value) => value + 1);
+        }
+      },
+      onCredentialRejected: () => {
+        if (mountedRef.current) {
+          pauseForCredentialRejection();
+        }
+      },
+    });
+    if (!pausedRef.current) {
+      scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+      if (client.pendingRoomEvents().length > 0 && !retryQueue.isActive()) {
+        void retryQueue.flush();
+      }
     }
+    const handleOnline = () => {
+      if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+        return;
+      }
+      syncBackoffRef.current = 0;
+      clearSyncTimer();
+      if (syncInFlightRef.current) {
+        syncWakePendingRef.current = true;
+      } else {
+        void runForegroundSync();
+      }
+      if (retryQueue.isActive()) {
+        retryQueue.wake();
+      }
+    };
+    window.addEventListener("online", handleOnline);
     return () => {
       mountedRef.current = false;
       clearSyncTimer();
-      clearRetryQueueTimer();
+      window.removeEventListener("online", handleOnline);
+      retryQueue.setCallbacks({});
+      if (!providedRetryQueue) {
+        retryQueue.dispose();
+      }
     };
-  }, [client, clock]);
+  }, [client, clock, retryQueue, providedRetryQueue]);
 
   function collapseDescription() {
     setDescriptionExpanded(false);
@@ -828,7 +830,7 @@ export function TopicsWorkspace({
         return next;
       });
       setRevision((value) => value + 1);
-      void flushRetryQueue();
+      void retryQueue.flush();
     } catch {
       setComposerError("消息保存失败，请重试。");
     } finally {

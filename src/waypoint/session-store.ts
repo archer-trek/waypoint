@@ -1,8 +1,14 @@
 export type RawMatrixEvent = Record<string, unknown>;
 
+export type StoredTimelineGap = {
+  limited: true;
+  prevBatch?: string;
+};
+
 export type StoredRoomEvents = {
   stateEvents: RawMatrixEvent[];
   timelineEvents: RawMatrixEvent[];
+  timelineGap?: StoredTimelineGap;
 };
 
 export type PendingRoomEvent = {
