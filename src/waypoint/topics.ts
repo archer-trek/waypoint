@@ -772,6 +772,81 @@ export type TimelineItem =
       confirmed: boolean;
     };
 
+function stripStreamingCursor(body: string): string {
+  return body.replace(/ ?▉$/, "");
+}
+
+function collectLatestEdits(
+  events: RawMatrixEvent[],
+): Map<string, { body: string; ts: number | undefined }> {
+  const targets = new Map<string, { sender: string; msgtype: unknown }>();
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      !isActivityMessageEvent(event) ||
+      typeof event.event_id !== "string" ||
+      event.event_id === "" ||
+      typeof event.sender !== "string" ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    targets.set(event.event_id, {
+      sender: event.sender,
+      msgtype: event.content.msgtype,
+    });
+  }
+
+  const latestEdits = new Map<string, { body: string; ts: number | undefined }>();
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      event.type !== "m.room.message" ||
+      typeof event.sender !== "string" ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    const relatesTo = event.content["m.relates_to"];
+    if (
+      !isRecord(relatesTo) ||
+      relatesTo.rel_type !== "m.replace" ||
+      typeof relatesTo.event_id !== "string" ||
+      relatesTo.event_id === ""
+    ) {
+      continue;
+    }
+    const target = targets.get(relatesTo.event_id);
+    if (!target || target.sender !== event.sender) {
+      continue;
+    }
+    const newContent = event.content["m.new_content"];
+    if (!isRecord(newContent) || typeof newContent.body !== "string") {
+      continue;
+    }
+    const effectiveMsgtype =
+      newContent.msgtype !== undefined ? newContent.msgtype : target.msgtype;
+    if (effectiveMsgtype !== "m.text") {
+      continue;
+    }
+    const editTs = validTimestamp(event.origin_server_ts);
+    const prev = latestEdits.get(relatesTo.event_id);
+    if (
+      prev !== undefined &&
+      prev.ts !== undefined &&
+      editTs !== undefined &&
+      editTs < prev.ts
+    ) {
+      continue;
+    }
+    latestEdits.set(relatesTo.event_id, {
+      body: newContent.body,
+      ts: editTs,
+    });
+  }
+  return latestEdits;
+}
+
 export function deriveRoomTimelineItems(
   room: StoredRoomEvents | undefined,
   pendingEvents: PendingRoomEvent[],
@@ -783,6 +858,7 @@ export function deriveRoomTimelineItems(
   let lastDayKey: string | undefined;
 
   if (room) {
+    const latestEdits = collectLatestEdits(room.timelineEvents);
     room.timelineEvents.forEach((event, index) => {
       if (typeof event.state_key === "string" || !isActivityMessageEvent(event)) {
         return;
@@ -800,15 +876,21 @@ export function deriveRoomTimelineItems(
       if (
         !isRecord(event.content) ||
         event.content.msgtype !== "m.text" ||
-        typeof event.content.body !== "string" ||
-        event.content.body.trim() === ""
+        typeof event.content.body !== "string"
       ) {
         return;
       }
-      const eventId =
+      const rawEventId =
         typeof event.event_id === "string" && event.event_id !== ""
           ? event.event_id
-          : `confirmed-${index}`;
+          : undefined;
+      const edit = rawEventId ? latestEdits.get(rawEventId) : undefined;
+      const rawBody = edit ? edit.body : event.content.body;
+      const body = edit || side === "left" ? stripStreamingCursor(rawBody) : rawBody;
+      if (body.trim() === "") {
+        return;
+      }
+      const eventId = rawEventId ?? `confirmed-${index}`;
       const ts = validTimestamp(event.origin_server_ts);
       if (ts !== undefined) {
         const currentDay = localDayKey(ts);
@@ -825,7 +907,7 @@ export function deriveRoomTimelineItems(
         kind: "message",
         key: eventId,
         side,
-        body: event.content.body,
+        body,
         confirmed: true,
       });
     });

@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -6919,7 +6919,7 @@ test("Agent 消息靠左且气泡无名字头像时刻，只渲染 body（纯文
                         msgtype: "m.text",
                         body: "* 替换后的回退文本",
                         "m.new_content": { msgtype: "m.text", body: "替换后的新内容" },
-                        "m.relates_to": { rel_type: "m.replace", event_id: "$agent-1" },
+                        "m.relates_to": { rel_type: "m.replace", event_id: "$agent-missing" },
                       },
                     },
                   ],
@@ -8822,4 +8822,720 @@ test("同步从断线退避中恢复时立刻唤醒处于退避中的重试队�
   expect(timeline).toHaveTextContent("退避中的消息");
   expect(timeline).toHaveTextContent("游标失效后补到的消息");
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(3);
+});
+
+test("m.replace 编辑就地更新同一条气泡、去掉末尾光标、不画回退星号气泡，且不改变原消息的本地日与日期分隔", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const day1Ts = new Date(2026, 10, 10, 9, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const day3Ts = new Date(2026, 10, 12, 11, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "编辑就地更新" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$bot-d1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day1Ts,
+                        content: { msgtype: "m.text", body: "初始流式输出 ▉" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$owner-d2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: day2Ts,
+                        content: { msgtype: "m.text", body: "昨天的提问" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day2Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "较新活跃话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$t2-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day2Ts + 60_000,
+                        content: { msgtype: "m.text", body: "第二条话题消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day3Ts,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 第一版替换 ▉",
+                          "m.new_content": { msgtype: "m.text", body: "第一版替换 ▉" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$bot-d1" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-forged",
+                        sender: "@alice:example.com",
+                        origin_server_ts: day3Ts + 1000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 冒充他人编辑",
+                          "m.new_content": { msgtype: "m.text", body: "冒充他人编辑" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$bot-d1" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day3Ts + 2000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 最终替换内容（含内嵌▉符号） ▉",
+                          "m.new_content": { body: "最终替换内容（含内嵌▉符号） ▉" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$bot-d1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: `batch-${syncCalls}` },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day3Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "编辑就地更新" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(2);
+  expect(timeline.querySelectorAll("[data-side]")[0]).toHaveTextContent("初始流式输出");
+  expect(timeline).not.toHaveTextContent("▉");
+
+  await act(async () => {
+    clock.advance(1000);
+  });
+
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("最终替换内容（含内嵌▉符号）");
+  });
+
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveAttribute("data-side", "left");
+  expect(rows[0].textContent).toBe("最终替换内容（含内嵌▉符号）");
+  expect(rows[1]).toHaveAttribute("data-side", "right");
+  expect(rows[1]).toHaveTextContent("昨天的提问");
+  expect(timeline).not.toHaveTextContent("* ");
+  expect(timeline).not.toHaveTextContent("冒充他人编辑");
+  expect(timeline).not.toHaveTextContent("第一版替换");
+
+  // 编辑发生在第 3 天，但不改变第 1 天消息的本地日与日期分隔，也不改 Topic 排序
+  const separators = timeline.querySelectorAll('[role="separator"]');
+  expect(separators).toHaveLength(1);
+  expect(separators[0]).toHaveTextContent("昨天");
+
+  const topicButtons = screen
+    .getByRole("complementary", { name: "Topic 列表" })
+    .querySelectorAll(".waypoint-topic-row");
+  expect(topicButtons[0]).toHaveTextContent("较新活跃话题");
+  expect(topicButtons[1]).toHaveTextContent("编辑就地更新");
+});
+
+test("m.room.redaction 撤回事件后从时间线与本机离线时间线消失，并同步更新日期分隔与被撤回的编辑", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const day1Ts = new Date(2026, 10, 10, 9, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const day3Ts = new Date(2026, 10, 12, 11, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "撤回测试话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day1Ts,
+                        content: { msgtype: "m.text", body: "第1天保留消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: day2Ts,
+                        content: { msgtype: "m.text", body: "第2天将被撤回的消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m3",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day2Ts + 1000,
+                        content: { msgtype: "m.text", body: "编辑前的原始文本" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m3-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day2Ts + 2000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 被改写后的文本",
+                          "m.new_content": { msgtype: "m.text", body: "被改写后的文本" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$m3" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m4",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day3Ts,
+                        content: { msgtype: "m.text", body: "第3天将被撤回的消息" },
+                      },
+                    ],
+                  },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day2Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "另一条话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$t2-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day2Ts + 60_000,
+                        content: { msgtype: "m.text", body: "另一条话题的较新消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-m4",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day3Ts + 1000,
+                        redacts: "$m4",
+                        content: {},
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-m2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: day3Ts + 2000,
+                        content: { redacts: "$m2" },
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-m3-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day3Ts + 3000,
+                        content: { redacts: "$m3-edit" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: `batch-${syncCalls}` },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day3Ts;
+  const first = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "撤回测试话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("第3天将被撤回的消息");
+  expect(timeline).toHaveTextContent("第2天将被撤回的消息");
+  expect(timeline).toHaveTextContent("被改写后的文本");
+  expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(2);
+
+  await act(async () => {
+    clock.advance(1000);
+  });
+
+  await waitFor(() => {
+    expect(timeline).not.toHaveTextContent("第3天将被撤回的消息");
+  });
+
+  expect(timeline).not.toHaveTextContent("第2天将被撤回的消息");
+  expect(timeline).toHaveTextContent("第1天保留消息");
+  expect(timeline).toHaveTextContent("编辑前的原始文本");
+  expect(timeline).not.toHaveTextContent("被改写后的文本");
+
+  const separators = timeline.querySelectorAll('[role="separator"]');
+  expect(separators).toHaveLength(1);
+  expect(separators[0]).toHaveTextContent("昨天");
+
+  const topicButtons = screen
+    .getByRole("complementary", { name: "Topic 列表" })
+    .querySelectorAll(".waypoint-topic-row");
+  expect(topicButtons[0]).toHaveTextContent("另一条话题");
+  expect(topicButtons[1]).toHaveTextContent("撤回测试话题");
+
+  // 重新打开应用（增量同步不再包含历史），确认被撤回的事件从这台设备的本地时间线里也已移除
+  first.unmount();
+  const clock2 = new ManualClock();
+  clock2.now = day3Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock2}
+    />,
+  );
+  await user.click(await screen.findByRole("button", { name: "撤回测试话题" }));
+  const reloadedTimeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(reloadedTimeline).toHaveTextContent("第1天保留消息");
+  expect(reloadedTimeline).toHaveTextContent("编辑前的原始文本");
+  expect(reloadedTimeline).not.toHaveTextContent("第3天将被撤回的消息");
+  expect(reloadedTimeline).not.toHaveTextContent("第2天将被撤回的消息");
+  expect(reloadedTimeline).not.toHaveTextContent("被改写后的文本");
+});
+
+test("没有续片关系的多条 Agent 分片不合并，带 m.thread 关系的事件按时间排进同一 Topic 且不另画线程", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const baseTs = new Date(2026, 10, 12, 10, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: baseTs, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "分片与线程话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$chunk-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: baseTs + 1000,
+                      content: { msgtype: "m.text", body: "第一片长回复" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$chunk-2",
+                      sender: "@bot:example.com",
+                      origin_server_ts: baseTs + 1010,
+                      content: { msgtype: "m.text", body: "紧接的第二片回复" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$owner-plain",
+                      sender: "@alice:example.com",
+                      origin_server_ts: baseTs + 2000,
+                      content: { msgtype: "m.text", body: "主时间线追问" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$thread-bot",
+                      sender: "@bot:example.com",
+                      origin_server_ts: baseTs + 3000,
+                      content: {
+                        msgtype: "m.text",
+                        body: "线程里的 Bot 回复",
+                        "m.relates_to": {
+                          rel_type: "m.thread",
+                          event_id: "$chunk-1",
+                          is_falling_back: true,
+                          "m.in_reply_to": { event_id: "$chunk-1" },
+                        },
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$thread-owner",
+                      sender: "@alice:example.com",
+                      origin_server_ts: baseTs + 4000,
+                      content: {
+                        msgtype: "m.text",
+                        body: "线程里的 Owner 回复",
+                        "m.relates_to": {
+                          rel_type: "m.thread",
+                          event_id: "$chunk-1",
+                          is_falling_back: true,
+                          "m.in_reply_to": { event_id: "$thread-bot" },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = baseTs + 5000;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "分片与线程话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(5);
+  expect(rows[0]).toHaveAttribute("data-side", "left");
+  expect(rows[0].textContent).toBe("第一片长回复");
+  expect(rows[1]).toHaveAttribute("data-side", "left");
+  expect(rows[1].textContent).toBe("紧接的第二片回复");
+  expect(rows[2]).toHaveAttribute("data-side", "right");
+  expect(rows[2].textContent).toBe("主时间线追问");
+  expect(rows[3]).toHaveAttribute("data-side", "left");
+  expect(rows[3].textContent).toBe("线程里的 Bot 回复");
+  expect(rows[4]).toHaveAttribute("data-side", "right");
+  expect(rows[4].textContent).toBe("线程里的 Owner 回复");
+
+  const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
+  expect(sidebar.querySelectorAll(".waypoint-topic-row")).toHaveLength(1);
+});
+
+test("Owner 停在底部时编辑跟着往下，已经上翻了就不把视口拉回去", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let mockScrollHeight = 800;
+  const baseTs = new Date(2026, 10, 12, 10, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: baseTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "滚动锚定话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$stream-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: baseTs,
+                        content: { msgtype: "m.text", body: "第一版内容 ▉" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        mockScrollHeight = 1100;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: baseTs + 1000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 第二版更长的内容 ▉",
+                          "m.new_content": { msgtype: "m.text", body: "第二版更长的内容 ▉" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$stream-1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 3) {
+        mockScrollHeight = 1500;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-3",
+                        sender: "@bot:example.com",
+                        origin_server_ts: baseTs + 2000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 第三版超长内容 ▉",
+                          "m.new_content": { msgtype: "m.text", body: "第三版超长内容 ▉" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$stream-1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 4) {
+        mockScrollHeight = 1700;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-4",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$edit-4",
+                        sender: "@bot:example.com",
+                        origin_server_ts: baseTs + 3000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 第四版最终内容",
+                          "m.new_content": { msgtype: "m.text", body: "第四版最终内容" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$stream-1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: `batch-${syncCalls}` },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = baseTs + 4000;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "滚动锚定话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  Object.defineProperty(timeline, "clientHeight", { configurable: true, value: 400 });
+  Object.defineProperty(timeline, "scrollHeight", {
+    configurable: true,
+    get: () => mockScrollHeight,
+  });
+
+  // Owner 停在底部
+  timeline.scrollTop = 400;
+  fireEvent.scroll(timeline);
+
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("第二版更长的内容");
+  });
+  expect(timeline.scrollTop).toBe(700);
+
+  // Owner 向上翻看历史消息
+  timeline.scrollTop = 180;
+  fireEvent.scroll(timeline);
+
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("第三版超长内容");
+  });
+  expect(timeline.scrollTop).toBe(180);
+
+  // Owner 再次回到底部后，后续编辑继续跟着往下
+  timeline.scrollTop = 1100;
+  fireEvent.scroll(timeline);
+
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("第四版最终内容");
+  });
+  expect(timeline.scrollTop).toBe(1300);
 });

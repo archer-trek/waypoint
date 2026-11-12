@@ -668,6 +668,43 @@ function eventIdOf(event: RawMatrixEvent): string | undefined {
   return typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
 }
 
+function redactedEventIdOf(event: RawMatrixEvent): string | undefined {
+  if (event.type !== "m.room.redaction") {
+    return undefined;
+  }
+  if (typeof event.redacts === "string" && event.redacts !== "") {
+    return event.redacts;
+  }
+  if (
+    isPlainObject(event.content) &&
+    typeof event.content.redacts === "string" &&
+    event.content.redacts !== ""
+  ) {
+    return event.content.redacts;
+  }
+  return undefined;
+}
+
+function isRedactedStub(event: RawMatrixEvent): boolean {
+  return isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because);
+}
+
+function replaceTargetIdOf(event: RawMatrixEvent): string | undefined {
+  if (event.type !== "m.room.message" || !isPlainObject(event.content)) {
+    return undefined;
+  }
+  const relatesTo = event.content["m.relates_to"];
+  if (
+    isPlainObject(relatesTo) &&
+    relatesTo.rel_type === "m.replace" &&
+    typeof relatesTo.event_id === "string" &&
+    relatesTo.event_id !== ""
+  ) {
+    return relatesTo.event_id;
+  }
+  return undefined;
+}
+
 function mergeTimelineEvents(
   existing: RawMatrixEvent[],
   incoming: RawMatrixEvent[],
@@ -675,7 +712,36 @@ function mergeTimelineEvents(
   if (incoming.length === 0) {
     return existing.map(cloneObject);
   }
-  const result = existing.map(cloneObject);
+  const redactedIds = new Set<string>();
+  for (const event of [...existing, ...incoming]) {
+    const targetId = redactedEventIdOf(event);
+    if (targetId !== undefined) {
+      redactedIds.add(targetId);
+    }
+    if (isRedactedStub(event)) {
+      const id = eventIdOf(event);
+      if (id !== undefined) {
+        redactedIds.add(id);
+      }
+    }
+  }
+
+  const shouldOmit = (event: RawMatrixEvent): boolean => {
+    if (event.type === "m.room.redaction" || isRedactedStub(event)) {
+      return true;
+    }
+    const id = eventIdOf(event);
+    if (id !== undefined && redactedIds.has(id)) {
+      return true;
+    }
+    const replaceTarget = replaceTargetIdOf(event);
+    if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
+      return true;
+    }
+    return false;
+  };
+
+  const result = existing.filter((event) => !shouldOmit(event)).map(cloneObject);
   const indexByEventId = new Map<string, number>();
   result.forEach((event, index) => {
     const id = eventIdOf(event);
@@ -685,6 +751,9 @@ function mergeTimelineEvents(
   });
 
   for (const rawEvent of incoming) {
+    if (shouldOmit(rawEvent)) {
+      continue;
+    }
     const event = cloneObject(rawEvent);
     const id = eventIdOf(event);
     if (id !== undefined) {

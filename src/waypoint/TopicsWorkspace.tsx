@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -30,6 +31,7 @@ import {
 } from "./topics";
 
 const FOREGROUND_SYNC_INTERVAL_MS = 1000;
+const AT_BOTTOM_THRESHOLD_PX = 24;
 
 type AgentsFormState =
   | {
@@ -106,6 +108,8 @@ export function TopicsWorkspace({
   const syncBackoffRef = useRef(0);
   const syncInFlightRef = useRef(false);
   const syncWakePendingRef = useRef(false);
+  const timelineRef = useRef<HTMLDivElement | null>(null);
+  const isAtBottomRef = useRef(true);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -127,6 +131,25 @@ export function TopicsWorkspace({
         nowMs,
       )
     : [];
+  const timelineContentKey = activeTimelineItems
+    .map((item) =>
+      item.kind === "day-separator"
+        ? `s:${item.key}`
+        : `m:${item.key}:${item.confirmed ? 1 : 0}:${item.body}`,
+    )
+    .join("\0");
+
+  useLayoutEffect(() => {
+    isAtBottomRef.current = true;
+  }, [activeTopic?.roomId]);
+
+  useLayoutEffect(() => {
+    const el = timelineRef.current;
+    if (!el || !isAtBottomRef.current) {
+      return;
+    }
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  }, [activeTopic?.roomId, editing, timelineContentKey]);
 
   useEffect(() => {
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
@@ -717,6 +740,16 @@ export function TopicsWorkspace({
 
   function collapseDescription() {
     setDescriptionExpanded(false);
+  }
+
+  function handleTimelineScroll() {
+    collapseDescription();
+    const el = timelineRef.current;
+    if (!el) {
+      return;
+    }
+    isAtBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX;
   }
 
   function bumpDraftSeq(roomId: string): number {
@@ -1400,10 +1433,11 @@ export function TopicsWorkspace({
                   style={{ paddingBottom: `${safeInset}px` }}
                 >
                   <div
+                    ref={timelineRef}
                     role="log"
                     aria-label="对话时间线"
                     className="waypoint-timeline"
-                    onScroll={collapseDescription}
+                    onScroll={handleTimelineScroll}
                   >
                     {activeTimelineItems.map((item) =>
                       item.kind === "day-separator" ? (
