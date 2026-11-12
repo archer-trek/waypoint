@@ -1,7 +1,6 @@
 import type { Clock } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
-import { deriveRoomAvailability } from "./topics";
 
 export const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
@@ -9,6 +8,7 @@ export type RetryQueueCallbacks = {
   onConfirmed?: () => void;
   onFailed?: () => void;
   onCredentialRejected?: () => void;
+  isRoomUnavailable?: (roomId: string) => boolean;
 };
 
 export class RetryQueue {
@@ -149,9 +149,8 @@ export class RetryQueue {
       return false;
     }
     let anyFailed = false;
-    const rooms = this.client.rooms();
     for (const item of this.client.pendingRoomEvents()) {
-      if (deriveRoomAvailability(rooms[item.roomId], this.client.ownerId).unavailable) {
+      if (this.callbacks.isRoomUnavailable?.(item.roomId)) {
         await this.client.failPendingRoomEvent(item.roomId, item.txnId);
         anyFailed = true;
       }
@@ -181,7 +180,7 @@ export class RetryQueue {
         }
         const head = pending[0];
         const myEpoch = this.runEpoch;
-        if (deriveRoomAvailability(this.client.rooms()[head.roomId], this.client.ownerId).unavailable) {
+        if (this.callbacks.isRoomUnavailable?.(head.roomId)) {
           await this.client.failPendingRoomEvent(head.roomId, head.txnId);
           this.backoffStep = 0;
           if (this.disposed || this.paused || this.runEpoch !== myEpoch) {

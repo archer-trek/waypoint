@@ -136,9 +136,8 @@ function parseKeyboardInsetEvent(event: Event): number | undefined {
 }
 
 export function detectPlatform(): PlatformAdapter {
-  const deviceDisplayName = /Android/i.test(navigator.userAgent)
-    ? "Waypoint Android"
-    : "Waypoint macOS";
+  const isAndroid = /Android/i.test(navigator.userAgent);
+  const deviceDisplayName = isAndroid ? "Waypoint Android" : "Waypoint macOS";
   let navDepth = 0;
   let suppressedPopCount = 0;
   let backInFlight = false;
@@ -201,6 +200,8 @@ export function detectPlatform(): PlatformAdapter {
 
   return {
     deviceDisplayName,
+    suspendSyncInBackground: isAndroid,
+    supportsFileDropAndPaste: !isAndroid,
     viewportMode: currentViewportMode,
     subscribeViewportMode,
     keyboardInsetBottom: measureKeyboardInsetBottom,
@@ -301,22 +302,25 @@ export function detectPlatform(): PlatformAdapter {
         return;
       }
       if (isTauri()) {
-        try {
-          await invoke("plugin:opener|open_url", { url });
-          return;
-        } catch {
-          // fallback to window.open
-        }
+        await invoke("plugin:opener|open_url", { url });
+        return;
       }
       if (typeof window !== "undefined" && typeof window.open === "function") {
         window.open(url, "_blank", "noopener,noreferrer");
       }
     },
-    openMediaFile({ data, mimeType, filename }) {
+    async openMediaFile({ data, mimeType, filename }) {
+      const bytes = new Uint8Array(data);
+      if (isTauri()) {
+        await invoke("open_media_file", {
+          bytes: Array.from(bytes),
+          filename,
+        });
+        return;
+      }
       if (typeof document === "undefined") {
         return;
       }
-      const bytes = new Uint8Array(data);
       const safeMime = mimeType || "application/octet-stream";
       if (typeof URL.createObjectURL === "function") {
         const blob = new Blob([bytes], { type: safeMime });

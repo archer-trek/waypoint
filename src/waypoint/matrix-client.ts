@@ -1,6 +1,5 @@
 import type { HomeserverTransport, TransportResult } from "../adapters/types";
 import { isCredentialRejected } from "./matrix-errors";
-import { isPromptReactionKey } from "./topics";
 import {
   dropCredential,
   dropPreListSession,
@@ -1624,13 +1623,18 @@ function mergeSyncRooms(
         .map(eventIdOf)
         .find((id): id is string => id !== undefined && !existingIds.has(id));
 
+      const overlapsExistingTimeline = rawTimeline.some((event) => {
+        const id = eventIdOf(event);
+        return id !== undefined && existingIds.has(id);
+      });
+
       let nextGaps = reconcileGapsAfterTimelineChange(
         roomTimelineGaps(existing),
         existing.timelineEvents,
         mergedIds,
         firstNewInBatch,
       );
-      if (isLimited) {
+      if (isLimited && !overlapsExistingTimeline) {
         const survivingIncomingAnchor = rawTimeline
           .map(eventIdOf)
           .find((id): id is string => id !== undefined && mergedIds.has(id));
@@ -1890,8 +1894,8 @@ function applyRoomBackfillPage(
     if (!shouldOmit(ev)) {
       return cloneObject(ev);
     }
-    if (shouldPreserveRedactedPromptReaction(ev, redactedIds)) {
-      return markRedactedPromptReaction(ev);
+    if (shouldPreserveRedactedReaction(ev, redactedIds)) {
+      return markRedactedReaction(ev);
     }
     return undefined;
   };
@@ -2216,29 +2220,26 @@ function isRedactedStub(event: RawMatrixEvent): boolean {
   return isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because);
 }
 
-function isPromptReactionEvent(event: RawMatrixEvent): boolean {
+function isAnnotationReactionEvent(event: RawMatrixEvent): boolean {
   if (event.type !== "m.reaction" || !isPlainObject(event.content)) {
     return false;
   }
   const relatesTo = event.content["m.relates_to"];
-  if (
-    !isPlainObject(relatesTo) ||
-    relatesTo.rel_type !== "m.annotation" ||
-    typeof relatesTo.event_id !== "string" ||
-    relatesTo.event_id === "" ||
-    typeof relatesTo.key !== "string" ||
-    relatesTo.key === ""
-  ) {
-    return false;
-  }
-  return isPromptReactionKey(relatesTo.key);
+  return (
+    isPlainObject(relatesTo) &&
+    relatesTo.rel_type === "m.annotation" &&
+    typeof relatesTo.event_id === "string" &&
+    relatesTo.event_id !== "" &&
+    typeof relatesTo.key === "string" &&
+    relatesTo.key !== ""
+  );
 }
 
-function shouldPreserveRedactedPromptReaction(
+function shouldPreserveRedactedReaction(
   event: RawMatrixEvent,
   redactedIds: Set<string>,
 ): boolean {
-  if (!isPromptReactionEvent(event)) {
+  if (!isAnnotationReactionEvent(event)) {
     return false;
   }
   const targetId = reactionTargetIdOf(event);
@@ -2249,7 +2250,7 @@ function shouldPreserveRedactedPromptReaction(
   return isRedactedStub(event) || (id !== undefined && redactedIds.has(id));
 }
 
-function markRedactedPromptReaction(event: RawMatrixEvent): RawMatrixEvent {
+function markRedactedReaction(event: RawMatrixEvent): RawMatrixEvent {
   const copy = cloneObject(event);
   const unsigned = isPlainObject(copy.unsigned) ? { ...copy.unsigned } : {};
   if (!isPlainObject(unsigned.redacted_because)) {
@@ -2336,8 +2337,8 @@ function mergeTimelineEventsWithRedactions(
       if (!shouldOmit(event)) {
         return cloneObject(event);
       }
-      if (shouldPreserveRedactedPromptReaction(event, redactedIds)) {
-        return markRedactedPromptReaction(event);
+      if (shouldPreserveRedactedReaction(event, redactedIds)) {
+        return markRedactedReaction(event);
       }
       return undefined;
     })
@@ -2360,8 +2361,8 @@ function mergeTimelineEventsWithRedactions(
     let event: RawMatrixEvent;
     if (!shouldOmit(rawEvent)) {
       event = cloneObject(rawEvent);
-    } else if (shouldPreserveRedactedPromptReaction(rawEvent, redactedIds)) {
-      event = markRedactedPromptReaction(rawEvent);
+    } else if (shouldPreserveRedactedReaction(rawEvent, redactedIds)) {
+      event = markRedactedReaction(rawEvent);
     } else {
       continue;
     }

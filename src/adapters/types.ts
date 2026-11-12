@@ -27,6 +27,8 @@ export type ViewportMode = "wide" | "narrow";
 
 export interface PlatformAdapter {
   deviceDisplayName: string;
+  suspendSyncInBackground?: boolean;
+  supportsFileDropAndPaste?: boolean;
   viewportMode?: () => ViewportMode;
   subscribeViewportMode?: (onChange: (mode: ViewportMode) => void) => () => void;
   keyboardInsetBottom?: () => number;

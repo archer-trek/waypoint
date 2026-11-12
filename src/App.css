@@ -125,7 +125,7 @@ main {
   font-weight: 700;
 }
 
-.waypoint-topic-row-subtitle {
+.waypoint-topic-row-secondary {
   display: flex;
   align-items: center;
   justify-content: space-between;

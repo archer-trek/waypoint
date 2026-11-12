@@ -24,7 +24,7 @@ import {
   transportFailureMessage,
 } from "./matrix-errors";
 import { TopicsWorkspace } from "./TopicsWorkspace";
-import { isFullUserId, parseRegisteredAgents, validateAgentUserId } from "./topics";
+import { deriveRoomAvailability, isFullUserId, parseRegisteredAgents, validateAgentUserId } from "./topics";
 
 let liveAppInstanceToken: symbol | null = null;
 
@@ -70,9 +70,13 @@ export function WaypointApp({
     return clientRef.current;
   }
 
+  const isRoomUnavailable = (roomId: string) =>
+    deriveRoomAvailability(client().rooms()[roomId], client().ownerId).unavailable;
+
   function retryQueue(): RetryQueue {
     if (!retryQueueRef.current) {
       retryQueueRef.current = new RetryQueue(client(), clock);
+      retryQueueRef.current.setCallbacks({ isRoomUnavailable });
     }
     return retryQueueRef.current;
   }
@@ -88,7 +92,7 @@ export function WaypointApp({
   phaseNameRef.current = phase.name;
   const platformRef = useRef(platform);
   platformRef.current = platform;
-  const isAndroid = platform.deviceDisplayName === "Waypoint Android";
+  const suspendInBackground = shouldSuspendSyncInBackground(platform);
   const readAppVisible = () => {
     const p = platformRef.current;
     if (p.isAppVisible) {
@@ -99,7 +103,7 @@ export function WaypointApp({
     }
     return true;
   };
-  const backgroundSuspendedRef = useRef(isAndroid && !readAppVisible());
+  const backgroundSuspendedRef = useRef(suspendInBackground && !readAppVisible());
 
   useEffect(() => {
     setViewportMode(platform.viewportMode ? platform.viewportMode() : "wide");
@@ -142,10 +146,11 @@ export function WaypointApp({
       const matrix = client();
       if (restored === "sync") {
         setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
-        const suspended = platformRef.current.deviceDisplayName === "Waypoint Android" && !readAppVisible();
+        const suspended = shouldSuspendSyncInBackground(platformRef.current) && !readAppVisible();
         backgroundSuspendedRef.current = suspended;
         if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
           retryQueue().setCallbacks({
+            isRoomUnavailable,
             onCredentialRejected: () => {
               if (!cancelled) {
                 syncGeneration.current += 1;
@@ -197,7 +202,7 @@ export function WaypointApp({
 
   useEffect(() => {
     const handleVisibility = (visible: boolean) => {
-      if (platform.deviceDisplayName !== "Waypoint Android") {
+      if (!shouldSuspendSyncInBackground(platform)) {
         return;
       }
       if (!visible) {
@@ -921,4 +926,8 @@ function loginFailure(result: TransportResult): { message: string; clearPassword
     };
   }
   return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };
+}
+
+function shouldSuspendSyncInBackground(platform: PlatformAdapter): boolean {
+  return platform.suspendSyncInBackground ?? platform.deviceDisplayName === "Waypoint Android";
 }

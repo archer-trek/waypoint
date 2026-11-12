@@ -1719,7 +1719,7 @@ function collectMessagePrompts(
   for (const [targetId, order] of agentMessageOrder.entries()) {
     const approvals = approvalSeeded.get(targetId);
     const selectors = selectorSeeded.get(targetId);
-    if (approvals && approvals.size > 0) {
+    if (approvals && approvals.size >= 2) {
       latestApprovalOrder = Math.max(latestApprovalOrder, order);
     } else if (selectors && selectors.length > 0) {
       latestSelectorOrder = Math.max(latestSelectorOrder, order);
@@ -1732,7 +1732,7 @@ function collectMessagePrompts(
     let kind: "approval" | "selector" | undefined;
     let options: TimelinePromptOption[] = [];
 
-    if (approvals && approvals.size > 0) {
+    if (approvals && approvals.size >= 2) {
       kind = "approval";
       for (const meta of APPROVAL_OPTIONS) {
         const entry = approvals.get(meta.canonicalKey);
@@ -1948,6 +1948,39 @@ function deriveTopicUnreadState(
 }
 
 export type BubbleVisibility = "above" | "visible" | "below";
+
+export function hasLimitedGapAfterReadPosition(room: StoredRoomEvents | undefined): boolean {
+  if (!room || room.timelineEvents.length === 0) {
+    return false;
+  }
+  const events = room.timelineEvents;
+  let startIndex = -1;
+  if (room.readPositionEventId !== undefined) {
+    startIndex = events.findIndex(
+      (event) => !localPlaceholderOf(event) && event.event_id === room.readPositionEventId,
+    );
+    if (startIndex === -1) {
+      return true;
+    }
+  }
+  for (const gap of roomTimelineGaps(room)) {
+    if (!gap.limited) {
+      continue;
+    }
+    if (gap.pendingGapAtEnd) {
+      return true;
+    }
+    if (gap.gapBeforeEventId) {
+      const gapIdx = events.findIndex(
+        (event) => !localPlaceholderOf(event) && event.event_id === gap.gapBeforeEventId,
+      );
+      if (gapIdx > startIndex && !(startIndex === -1 && gapIdx === 0)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 export function computeTargetReadPosition(
   room: StoredRoomEvents | undefined,

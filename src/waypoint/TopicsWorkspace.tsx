@@ -39,6 +39,7 @@ import {
   type BubbleVisibility,
   type TimelineMedia,
   deriveRoomTimelineItems,
+  hasLimitedGapAfterReadPosition,
   deriveTopics,
   formatTopicListTime,
   parseRegisteredAgents,
@@ -128,8 +129,8 @@ export function TopicsWorkspace({
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [pinPendingByRoom, setPinPendingByRoom] = useState<Record<string, boolean>>({});
   const pinPendingRef = useRef<Set<string>>(new Set());
-  const [pinNotice, setPinNotice] = useState<string | undefined>(undefined);
-  const pinNoticeTimerRef = useRef<number | undefined>(undefined);
+  const [toastNotice, setToastNotice] = useState<string | undefined>(undefined);
+  const toastNoticeTimerRef = useRef<number | undefined>(undefined);
   const [draftsByRoom, setDraftsByRoom] = useState<Record<string, DraftRecord>>(() =>
     client.drafts(),
   );
@@ -167,8 +168,9 @@ export function TopicsWorkspace({
     }
     return true;
   };
-  const isAndroid = platform?.deviceDisplayName === "Waypoint Android";
-  const backgroundSuspendedRef = useRef(isAndroid && !readAppVisible());
+  const suspendInBackground =
+    platform?.suspendSyncInBackground ?? platform?.deviceDisplayName === "Waypoint Android";
+  const backgroundSuspendedRef = useRef(suspendInBackground && !readAppVisible());
   const isSyncPaused = () => pausedRef.current || backgroundSuspendedRef.current;
   const syncEpochRef = useRef(0);
   const syncRunIdRef = useRef(0);
@@ -683,23 +685,23 @@ export function TopicsWorkspace({
   }
 
   function clearPinNotice() {
-    if (pinNoticeTimerRef.current !== undefined) {
-      clock.clearTimeout(pinNoticeTimerRef.current);
-      pinNoticeTimerRef.current = undefined;
+    if (toastNoticeTimerRef.current !== undefined) {
+      clock.clearTimeout(toastNoticeTimerRef.current);
+      toastNoticeTimerRef.current = undefined;
     }
-    setPinNotice(undefined);
+    setToastNotice(undefined);
   }
 
-  function showPinNotice(message: string) {
-    if (pinNoticeTimerRef.current !== undefined) {
-      clock.clearTimeout(pinNoticeTimerRef.current);
-      pinNoticeTimerRef.current = undefined;
+  function showToastNotice(message: string) {
+    if (toastNoticeTimerRef.current !== undefined) {
+      clock.clearTimeout(toastNoticeTimerRef.current);
+      toastNoticeTimerRef.current = undefined;
     }
-    setPinNotice(message);
-    pinNoticeTimerRef.current = clock.setTimeout(() => {
-      pinNoticeTimerRef.current = undefined;
+    setToastNotice(message);
+    toastNoticeTimerRef.current = clock.setTimeout(() => {
+      toastNoticeTimerRef.current = undefined;
       if (mountedRef.current) {
-        setPinNotice(undefined);
+        setToastNotice(undefined);
       }
     }, 4000);
   }
@@ -717,7 +719,7 @@ export function TopicsWorkspace({
         return;
       }
       if (!result.ok) {
-        showPinNotice(result.message);
+        showToastNotice(result.message);
         return;
       }
       setRevision((value) => value + 1);
@@ -835,7 +837,7 @@ export function TopicsWorkspace({
   }
 
   function suspendForBackground() {
-    if (!isAndroid || backgroundSuspendedRef.current) {
+    if (!suspendInBackground || backgroundSuspendedRef.current) {
       return;
     }
     backgroundSuspendedRef.current = true;
@@ -1134,9 +1136,11 @@ export function TopicsWorkspace({
           pauseForCredentialRejection();
         }
       },
+      isRoomUnavailable: (roomId) =>
+        deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable,
     });
     if (!pausedRef.current) {
-      if (isAndroid && !readAppVisible()) {
+      if (suspendInBackground && !readAppVisible()) {
         backgroundSuspendedRef.current = true;
         retryQueue.pause();
       } else {
@@ -1154,7 +1158,7 @@ export function TopicsWorkspace({
       if (!mountedRef.current) {
         return;
       }
-      if (isAndroid) {
+      if (suspendInBackground) {
         if (!visible) {
           suspendForBackground();
         } else {
@@ -1194,9 +1198,9 @@ export function TopicsWorkspace({
       syncAbortControllerRef.current?.abort();
       syncAbortControllerRef.current = null;
       clearSyncTimer();
-      if (pinNoticeTimerRef.current !== undefined) {
-        clock.clearTimeout(pinNoticeTimerRef.current);
-        pinNoticeTimerRef.current = undefined;
+      if (toastNoticeTimerRef.current !== undefined) {
+        clock.clearTimeout(toastNoticeTimerRef.current);
+        toastNoticeTimerRef.current = undefined;
       }
       unsubVisibility();
       unsubResume();
@@ -1632,7 +1636,11 @@ export function TopicsWorkspace({
       if (isAtBottomRef.current) {
         const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
         let nextTop = maxScroll;
-        if (activeTopic.firstUnreadEventId) {
+        const currentRoom = rooms[visibleComposerRoomId];
+        if (
+          activeTopic.firstUnreadEventId &&
+          !hasLimitedGapAfterReadPosition(currentRoom)
+        ) {
           const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
           const targetEl = rowEls.find(
             (el) => el.dataset.eventId === activeTopic.firstUnreadEventId,
@@ -1640,14 +1648,17 @@ export function TopicsWorkspace({
           if (targetEl) {
             const containerRect = container.getBoundingClientRect();
             const targetRect = targetEl.getBoundingClientRect();
+            let desiredTop: number | undefined;
             if (containerRect.height > 0 && targetRect.height > 0) {
-              const desiredTop = Math.max(
+              desiredTop = Math.max(
                 0,
                 container.scrollTop + (targetRect.top - containerRect.top),
               );
-              nextTop = Math.min(maxScroll, desiredTop);
             } else if (container.clientHeight > 0) {
-              nextTop = Math.min(maxScroll, Math.max(0, targetEl.offsetTop));
+              desiredTop = Math.max(0, targetEl.offsetTop);
+            }
+            if (desiredTop !== undefined && desiredTop >= container.scrollTop) {
+              nextTop = Math.min(maxScroll, desiredTop);
             }
           }
         }
@@ -1746,7 +1757,11 @@ export function TopicsWorkspace({
   }
 
   async function handleResendFailed(roomId: string, localId: string) {
-    if (resendingLocalIdsRef.current.has(localId) || discardingLocalIdsRef.current.has(localId)) {
+    if (
+      reauthRequiredRef.current ||
+      resendingLocalIdsRef.current.has(localId) ||
+      discardingLocalIdsRef.current.has(localId)
+    ) {
       return;
     }
     setOpenFailedMenuId((prev) => (prev === localId ? null : prev));
@@ -1913,7 +1928,7 @@ export function TopicsWorkspace({
           filename: media.localAttachment.name,
         });
       } catch {
-        showPinNotice("打开附件失败，请重试。");
+        showToastNotice("打开附件失败，请重试。");
       }
       return;
     }
@@ -1931,7 +1946,7 @@ export function TopicsWorkspace({
       try {
         result = await client.downloadMedia(mxcUrl);
       } catch {
-        showPinNotice("打开附件失败，请重试。");
+        showToastNotice("打开附件失败，请重试。");
         return;
       }
       if (!mountedRef.current || !client.hasToken) {
@@ -1949,7 +1964,7 @@ export function TopicsWorkspace({
         if (media.kind === "image") {
           failedImageMxcUrlsRef.current.add(mxcUrl);
         }
-        showPinNotice("打开附件失败，请重试。");
+        showToastNotice("打开附件失败，请重试。");
         return;
       }
       const mimeType = media.mimeType || "application/octet-stream";
@@ -1971,7 +1986,7 @@ export function TopicsWorkspace({
         filename: media.filename,
       });
     } catch {
-      showPinNotice("打开附件失败，请重试。");
+      showToastNotice("打开附件失败，请重试。");
     }
   }
 
@@ -2466,7 +2481,8 @@ export function TopicsWorkspace({
     );
   }
 
-  const allowMacOsFileTransfer = platform?.deviceDisplayName !== "Waypoint Android";
+  const supportsFileDropAndPaste =
+    platform?.supportsFileDropAndPaste ?? platform?.deviceDisplayName !== "Waypoint Android";
   const isNarrow = viewportMode === "narrow";
   const isNarrowPushed = isNarrow && (settingsOpen || creating || Boolean(activeTopic));
   const showSidebar = !isNarrow || !isNarrowPushed;
@@ -2563,7 +2579,7 @@ export function TopicsWorkspace({
                       </span>
                     </span>
                     {(registeredAgents.length > 1 && topic.botDisplayName) || topic.responding ? (
-                      <span className="waypoint-topic-row-subtitle">
+                      <span className="waypoint-topic-row-secondary">
                         {registeredAgents.length > 1 && topic.botDisplayName ? (
                           <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
                         ) : null}
@@ -3069,7 +3085,7 @@ export function TopicsWorkspace({
                   className="waypoint-timeline-container"
                   style={{ paddingBottom: `${safeInset}px` }}
                   onDragOver={(event) => {
-                    if (!allowMacOsFileTransfer) {
+                    if (!supportsFileDropAndPaste) {
                       return;
                     }
                     const hasFiles =
@@ -3080,7 +3096,7 @@ export function TopicsWorkspace({
                     }
                   }}
                   onDrop={(event) => {
-                    if (!allowMacOsFileTransfer) {
+                    if (!supportsFileDropAndPaste) {
                       return;
                     }
                     const files = extractDataTransferFiles(event.dataTransfer);
@@ -3144,6 +3160,7 @@ export function TopicsWorkspace({
                                 type="button"
                                 aria-label="失败"
                                 className="waypoint-failed-button"
+                                disabled={reauthRequired}
                                 onClick={() => {
                                   void handleResendFailed(activeTopic.roomId, item.localId!);
                                 }}
@@ -3376,7 +3393,7 @@ export function TopicsWorkspace({
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                         onPaste={(event) => {
-                          if (!allowMacOsFileTransfer) {
+                          if (!supportsFileDropAndPaste) {
                             return;
                           }
                           const files = extractDataTransferFiles(event.clipboardData);
@@ -3418,9 +3435,9 @@ export function TopicsWorkspace({
           )}
         </div>
       ) : null}
-      {pinNotice ? (
+      {toastNotice ? (
         <div role="status" aria-live="polite" className="waypoint-toast">
-          {pinNotice}
+          {toastNotice}
         </div>
       ) : null}
     </div>

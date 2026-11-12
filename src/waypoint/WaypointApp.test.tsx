@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, expect, test, vi } from "vitest";
 import type { Clock, HomeserverRequest, HomeserverTransport, PlatformAdapter, TransportResult } from "../adapters/types";
+import { detectPlatform } from "../adapters/production";
 import { WaypointApp } from "./WaypointApp";
 
 beforeEach(() => {
@@ -16316,7 +16317,7 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
 
   const row2 = screen.getByRole("button", { name: "仅typing话题" });
   expect(row2).not.toHaveTextContent("正在回应");
-  expect(row2.querySelector(".waypoint-topic-row-subtitle")).toBeNull();
+  expect(row2.querySelector(".waypoint-topic-row-secondary")).toBeNull();
 
   // 撤回第一条 👀，第二条 👀 还在，依然显示一次正在回应
   await act(async () => { clock.advance(1000); });
@@ -16328,7 +16329,7 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   await waitFor(() => {
     expect(row1).not.toHaveTextContent("正在回应");
   });
-  expect(row1.querySelector(".waypoint-topic-row-subtitle")).toBeNull();
+  expect(row1.querySelector(".waypoint-topic-row-secondary")).toBeNull();
 });
 
 test("多 Bot 时列表次行同时显示 Bot 名字与正在回应，并与未读圆点、置顶及发送状态共存，且不认非绑定 Bot 的 👀", async () => {
@@ -20450,4 +20451,521 @@ test("粘贴和拖文件只在 macOS 生效（单文件进草稿、多文件逐�
   );
   expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("android-picker.pdf");
   androidApp.unmount();
+});
+
+test("reauthRequired 期间禁用失败消息的感叹号重发按钮且点击不会转成未确认或入队 (#72)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let revokeToken = false;
+  let sendAttempts = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (revokeToken) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!reauth-fail:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.name", state_key: "", content: { name: "重连期间禁止重发" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendAttempts += 1;
+      return {
+        type: "response",
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "重连期间禁止重发" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条失败消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const failedBtn = await screen.findByRole("button", { name: "失败" });
+  expect(failedBtn).toBeEnabled();
+  expect(sendAttempts).toBe(1);
+
+  revokeToken = true;
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await screen.findByRole("status", { name: "重新验证提示" });
+
+  expect(screen.getByRole("button", { name: "失败" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "失败" }));
+  await act(async () => {
+    clock.advance(1000);
+  });
+
+  expect(screen.getByRole("button", { name: "失败" })).toBeDisabled();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(sendAttempts).toBe(1);
+});
+
+test("Agent 消息上的单个 ✅ 或 ❌ 完成反应保留为普通 reaction 徽章，不劫持成审批按钮 (#56 #57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!single-react:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    {
+                      type: "im.waypoint.topic",
+                      state_key: "",
+                      content: { v: 1, agent_user_id: "@bot:example.com" },
+                    },
+                    { type: "m.room.name", state_key: "", content: { name: "单反应不劫持话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-done-ok",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "任务已完成" },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$rx-single-ok",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2010,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$agent-done-ok", key: "✅" } },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-done-err",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3000,
+                      content: { msgtype: "m.text", body: "任务失败了" },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$rx-single-err",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3010,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$agent-done-err", key: "❌" } },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-real-ap",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 4000,
+                      content: { msgtype: "m.text", body: "需要审批确认" },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$rx-ap-ok",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 4010,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$agent-real-ap", key: "✅" } },
+                    },
+                    {
+                      type: "m.reaction",
+                      event_id: "$rx-ap-no",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 4020,
+                      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$agent-real-ap", key: "❌" } },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "单反应不劫持话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const okRow = timeline.querySelector("[data-event-id=\"$agent-done-ok\"]") as HTMLElement;
+  const errRow = timeline.querySelector("[data-event-id=\"$agent-done-err\"]") as HTMLElement;
+  const apRow = timeline.querySelector("[data-event-id=\"$agent-real-ap\"]") as HTMLElement;
+
+  expect(within(okRow).queryByRole("group", { name: "审批操作" })).not.toBeInTheDocument();
+  expect(within(okRow).queryAllByRole("button")).toHaveLength(0);
+  expect(okRow.querySelector(".waypoint-message-reaction")).toHaveTextContent("✅");
+
+  expect(within(errRow).queryByRole("group", { name: "审批操作" })).not.toBeInTheDocument();
+  expect(within(errRow).queryAllByRole("button")).toHaveLength(0);
+  expect(errRow.querySelector(".waypoint-message-reaction")).toHaveTextContent("❌");
+
+  expect(within(apRow).getByRole("group", { name: "审批操作" })).toBeInTheDocument();
+  expect(within(apRow).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+  expect(within(apRow).getByRole("button", { name: /拒绝/ })).toBeEnabled();
+});
+
+test("已停在存在中间 limited 缺口的 Topic 底部时，新同步消息到达不会把视口向上拉回旧的 firstUnreadEventId (#64 #65)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  const makeAgentMsg = (id: string, body: string, ts: number) => ({
+    type: "m.room.message",
+    event_id: id,
+    sender: "@bot:example.com",
+    origin_server_ts: ts,
+    content: { msgtype: "m.text", body },
+  });
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!mid-gap-stay:example.com": {
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.name", state_key: "", content: { name: "中间缺口底部留驻话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      makeAgentMsg("$m1", "m-1", 2000),
+                      makeAgentMsg("$m2", "m-2", 2100),
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!mid-gap-stay:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-mid-stay",
+                    events: [
+                      makeAgentMsg("$m10", "m-10", 5000),
+                      makeAgentMsg("$m11", "m-11", 5100),
+                      makeAgentMsg("$m12", "m-12", 5200),
+                      makeAgentMsg("$m13", "m-13", 5300),
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!mid-gap-stay:example.com": {
+                  timeline: {
+                    events: [makeAgentMsg("$m14", "m-14", 6000)],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "中间缺口底部留驻话题" });
+    await act(async () => {
+      clock.advance(1000);
+    });
+    await waitFor(() => expect(syncRound).toBe(2));
+
+    await user.click(row);
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(6);
+    });
+
+    // Owner 主动滚到底部 (scrollTop=400, 视口 400..600)
+    await act(async () => {
+      timeline.scrollTop = 400;
+      fireEvent.scroll(timeline);
+    });
+    expect(timeline.scrollTop).toBe(400);
+
+    // 增量 sync 3 带来新消息 $m14：绝不能把视口向上拉回 $m10 (200)
+    await act(async () => {
+      clock.advance(1000);
+    });
+    await waitFor(() => {
+      expect(timeline).toHaveTextContent("m-14");
+    });
+    expect(timeline.scrollTop).toBe(500);
+  });
+});
+
+test("无游标回退 sync 返回 limited: true 且与现有时间线重叠时不伪造断层、不阻断已读位置推进 (#60 #64 #65)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  const makeAgentMsg = (id: string, body: string, ts: number) => ({
+    type: "m.room.message",
+    event_id: id,
+    sender: "@bot:example.com",
+    origin_server_ts: ts,
+    content: { msgtype: "m.text", body },
+  });
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!overlap-sync:example.com": {
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$e2" } }],
+                  },
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.name", state_key: "", content: { name: "回退重叠不伪造缺口" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      makeAgentMsg("$e1", "e-1", 2000),
+                      makeAgentMsg("$e2", "e-2", 2100),
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_UNKNOWN", error: "Invalid since token" },
+        };
+      }
+      if (syncCalls === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-fallback",
+            rooms: {
+              join: {
+                "!overlap-sync:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-overlap",
+                    events: [
+                      makeAgentMsg("$e1", "e-1", 2000),
+                      makeAgentMsg("$e2", "e-2", 2100),
+                      makeAgentMsg("$e3", "e-3", 2200),
+                      makeAgentMsg("$e4", "e-4", 2300),
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 400, async () => {
+    const { clock } = renderApp(homeserver);
+    await login(user);
+
+    const row = await screen.findByRole("button", { name: "回退重叠不伪造缺口" });
+    await act(async () => {
+      clock.advance(1000);
+    });
+    await waitFor(() => expect(syncCalls).toBe(3));
+    expect(row).toHaveAttribute("data-unread", "true");
+
+    await user.click(row);
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(4);
+    });
+
+    await waitFor(() => {
+      expect(readMarkerPosts).toContainEqual({
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!overlap-sync%3Aexample.com/read_markers",
+        body: { "m.fully_read": "$e4", "m.read.private": "$e4" },
+      });
+    });
+    expect(row).not.toHaveAttribute("data-unread", "true");
+  });
+});
+
+test("Tauri 环境下外链打开失败绝不静默回退到 window.open，且打开媒体走系统查看器命令 open_media_file (#48 #62)", async () => {
+  const prevIsTauri = (globalThis as { isTauri?: boolean }).isTauri;
+  const prevInternals = (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+  const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+  const invokeSpy = vi.fn();
+
+  try {
+    (globalThis as { isTauri?: boolean }).isTauri = true;
+    (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+      invoke: (cmd: string, args?: unknown) => invokeSpy(cmd, args),
+    };
+
+    const platform = detectPlatform();
+
+    invokeSpy.mockRejectedValueOnce(new Error("opener failed"));
+    await expect(platform.openExternalUrl!("https://docs.example.com/guide")).rejects.toThrow("opener failed");
+    expect(invokeSpy).toHaveBeenCalledWith("plugin:opener|open_url", {
+      url: "https://docs.example.com/guide",
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+
+    invokeSpy.mockResolvedValueOnce(undefined);
+    await platform.openMediaFile!({
+      data: new Uint8Array([1, 2, 3]),
+      mimeType: "application/pdf",
+      filename: "report.pdf",
+    });
+    expect(invokeSpy).toHaveBeenLastCalledWith("open_media_file", {
+      bytes: [1, 2, 3],
+      filename: "report.pdf",
+    });
+    expect(openSpy).not.toHaveBeenCalled();
+
+    invokeSpy.mockRejectedValueOnce(new Error("open_media_file failed"));
+    await expect(
+      platform.openMediaFile!({
+        data: new Uint8Array([4, 5]),
+        mimeType: "image/png",
+        filename: "shot.png",
+      }),
+    ).rejects.toThrow("open_media_file failed");
+    expect(openSpy).not.toHaveBeenCalled();
+  } finally {
+    openSpy.mockRestore();
+    if (prevIsTauri === undefined) {
+      delete (globalThis as { isTauri?: boolean }).isTauri;
+    } else {
+      (globalThis as { isTauri?: boolean }).isTauri = prevIsTauri;
+    }
+    if (prevInternals === undefined) {
+      delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    } else {
+      (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = prevInternals;
+    }
+  }
 });
