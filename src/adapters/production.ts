@@ -1,15 +1,234 @@
-import type { Clock, HomeserverTransport, PlatformAdapter } from "./types";
+import { normalizeInset } from "./inset";
+import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
+
+const WIDE_VIEWPORT_MEDIA_QUERY = "(min-width: 48em)";
+const KEYBOARD_INSET_EVENT = "waypoint:keyboard-inset";
+
+type VirtualKeyboardLike = EventTarget & {
+  boundingRect?: { height?: number };
+};
 
 export const systemClock: Clock = {
   setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
   clearTimeout: (id) => window.clearTimeout(id),
+  currentTimeMs: () => Date.now(),
 };
 
-export function detectPlatform(): PlatformAdapter {
-  if (/Android/i.test(navigator.userAgent)) {
-    return { deviceDisplayName: "Waypoint Android" };
+function currentViewportMode(): ViewportMode {
+  if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
+    return window.matchMedia(WIDE_VIEWPORT_MEDIA_QUERY).matches ? "wide" : "narrow";
   }
-  return { deviceDisplayName: "Waypoint macOS" };
+  return /Android/i.test(navigator.userAgent) ? "narrow" : "wide";
+}
+
+function subscribeViewportMode(onChange: (mode: ViewportMode) => void): () => void {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    return () => undefined;
+  }
+  const mediaQuery = window.matchMedia(WIDE_VIEWPORT_MEDIA_QUERY);
+  const handleChange = () => {
+    onChange(mediaQuery.matches ? "wide" : "narrow");
+  };
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", handleChange);
+    return () => mediaQuery.removeEventListener("change", handleChange);
+  }
+  mediaQuery.addListener(handleChange);
+  return () => mediaQuery.removeListener(handleChange);
+}
+
+function getVirtualKeyboard(): VirtualKeyboardLike | undefined {
+  if (typeof navigator === "undefined") {
+    return undefined;
+  }
+  return (navigator as Navigator & { virtualKeyboard?: VirtualKeyboardLike }).virtualKeyboard;
+}
+
+function readRootCssKeyboardInset(): number {
+  if (typeof document === "undefined" || !document.documentElement) {
+    return 0;
+  }
+  const inlineValue = document.documentElement.style?.getPropertyValue("--keyboard-inset") ?? "";
+  const raw =
+    inlineValue.trim() !== ""
+      ? inlineValue
+      : typeof window !== "undefined" && typeof window.getComputedStyle === "function"
+        ? window.getComputedStyle(document.documentElement).getPropertyValue("--keyboard-inset")
+        : "";
+  if (!raw.trim()) {
+    return 0;
+  }
+  return normalizeInset(parseFloat(raw));
+}
+
+function parseKeyboardInsetEvent(event: Event): number | undefined {
+  const detail = (event as CustomEvent<unknown>).detail;
+  if (typeof detail === "number") {
+    return normalizeInset(detail);
+  }
+  if (typeof detail === "object" && detail !== null) {
+    const record = detail as { bottom?: unknown; insetBottom?: unknown; height?: unknown };
+    const raw = record.bottom ?? record.insetBottom ?? record.height;
+    if (typeof raw === "number") {
+      return normalizeInset(raw);
+    }
+  }
+  return undefined;
+}
+
+export function detectPlatform(): PlatformAdapter {
+  const deviceDisplayName = /Android/i.test(navigator.userAgent)
+    ? "Waypoint Android"
+    : "Waypoint macOS";
+  let navDepth = 0;
+  let suppressedPopCount = 0;
+  let backInFlight = false;
+  let queuedBacks = 0;
+  let queuedPushes = 0;
+  let hasSystemBackListener = false;
+  let customEventInset = 0;
+
+  function measureKeyboardInsetBottom(): number {
+    if (typeof window === "undefined") {
+      return 0;
+    }
+    const vv = window.visualViewport;
+    const vvInset = vv
+      ? normalizeInset(window.innerHeight - (vv.height + vv.offsetTop))
+      : 0;
+    const vk = getVirtualKeyboard();
+    const vkInset =
+      vk?.boundingRect && typeof vk.boundingRect.height === "number"
+        ? normalizeInset(vk.boundingRect.height)
+        : 0;
+    const cssInset = readRootCssKeyboardInset();
+    return Math.max(vvInset, vkInset, customEventInset, cssInset);
+  }
+
+  function subscribeKeyboardInsetBottom(onChange: (insetBottom: number) => void): () => void {
+    if (typeof window === "undefined") {
+      return () => undefined;
+    }
+    let lastInset = measureKeyboardInsetBottom();
+    const notify = () => {
+      const nextInset = measureKeyboardInsetBottom();
+      if (nextInset !== lastInset) {
+        lastInset = nextInset;
+        onChange(nextInset);
+      }
+    };
+    const handleCustomInset = (event: Event) => {
+      const parsed = parseKeyboardInsetEvent(event);
+      if (parsed !== undefined) {
+        customEventInset = parsed;
+        notify();
+      }
+    };
+    const vv = window.visualViewport;
+    const vk = getVirtualKeyboard();
+    vv?.addEventListener("resize", notify);
+    vv?.addEventListener("scroll", notify);
+    vk?.addEventListener?.("geometrychange", notify);
+    window.addEventListener("resize", notify);
+    window.addEventListener(KEYBOARD_INSET_EVENT, handleCustomInset);
+    return () => {
+      vv?.removeEventListener("resize", notify);
+      vv?.removeEventListener("scroll", notify);
+      vk?.removeEventListener?.("geometrychange", notify);
+      window.removeEventListener("resize", notify);
+      window.removeEventListener(KEYBOARD_INSET_EVENT, handleCustomInset);
+    };
+  }
+
+  return {
+    deviceDisplayName,
+    viewportMode: currentViewportMode,
+    subscribeViewportMode,
+    keyboardInsetBottom: measureKeyboardInsetBottom,
+    subscribeKeyboardInsetBottom,
+    pushNavigationEntry() {
+      navDepth += 1;
+      if (hasSystemBackListener && queuedBacks > 0) {
+        queuedBacks -= 1;
+        suppressedPopCount = Math.max(0, suppressedPopCount - 1);
+        return;
+      }
+      if (hasSystemBackListener && backInFlight) {
+        queuedPushes += 1;
+        return;
+      }
+      if (typeof window !== "undefined" && window.history) {
+        window.history.pushState({ waypointDepth: navDepth }, "");
+      }
+    },
+    popNavigationEntry() {
+      if (navDepth <= 0) {
+        return;
+      }
+      navDepth -= 1;
+      if (hasSystemBackListener && queuedPushes > 0) {
+        queuedPushes -= 1;
+        return;
+      }
+      if (typeof window !== "undefined" && window.history) {
+        suppressedPopCount += 1;
+        if (hasSystemBackListener && backInFlight) {
+          queuedBacks += 1;
+          return;
+        }
+        if (hasSystemBackListener) {
+          backInFlight = true;
+        }
+        window.history.back();
+      }
+    },
+    onSystemBack(handler) {
+      if (typeof window === "undefined") {
+        return () => undefined;
+      }
+      hasSystemBackListener = true;
+      const handlePopState = () => {
+        backInFlight = false;
+        if (suppressedPopCount > 0) {
+          suppressedPopCount -= 1;
+          if (queuedBacks > 0) {
+            queuedBacks -= 1;
+            backInFlight = true;
+            window.history.back();
+            return;
+          }
+          if (queuedPushes > 0) {
+            const toPush = queuedPushes;
+            queuedPushes = 0;
+            const baseDepth = navDepth - toPush;
+            for (let i = 1; i <= toPush; i += 1) {
+              window.history.pushState({ waypointDepth: baseDepth + i }, "");
+            }
+            return;
+          }
+          return;
+        }
+        if (navDepth > 0) {
+          navDepth -= 1;
+        }
+        handler();
+      };
+      window.addEventListener("popstate", handlePopState);
+      return () => {
+        window.removeEventListener("popstate", handlePopState);
+        hasSystemBackListener = false;
+        backInFlight = false;
+        queuedBacks = 0;
+        queuedPushes = 0;
+        suppressedPopCount = 0;
+      };
+    },
+    focusMainWindow() {
+      if (typeof window !== "undefined" && typeof window.focus === "function") {
+        window.focus();
+      }
+    },
+  };
 }
 
 export function createFetchTransport(): HomeserverTransport {

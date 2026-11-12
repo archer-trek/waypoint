@@ -1,18 +1,42 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { normalizeInset } from "../adapters/inset";
 import type {
   Clock,
   HomeserverTransport,
   PlatformAdapter,
   TransportResult,
+  ViewportMode,
 } from "../adapters/types";
 import { MatrixClient } from "./matrix-client";
+import {
+  credentialRejectedMessage,
+  errcode,
+  errorText,
+  formatMatrixActionFailure,
+  isCredentialRejected,
+  isRateLimited,
+  isRecord,
+  sentence,
+  transportFailureMessage,
+} from "./matrix-errors";
+import { TopicsWorkspace } from "./TopicsWorkspace";
+import { isFullUserId, parseRegisteredAgents, serverName } from "./topics";
+
+let liveAppInstanceToken: symbol | null = null;
 
 type Phase =
   | { name: "booting" }
   | { name: "address"; address: string; message?: string }
   | { name: "password"; address: string; userId: string; password: string; message?: string }
   | { name: "syncing"; address: string; userId: string; message?: string }
-  | { name: "holding" }
+  | {
+      name: "register";
+      address: string;
+      userId: string;
+      agentUserId: string;
+      submitting: boolean;
+      message?: string;
+    }
   | { name: "topics" };
 
 export function WaypointApp({
@@ -25,6 +49,13 @@ export function WaypointApp({
   clock: Clock;
 }) {
   const [phase, setPhase] = useState<Phase>({ name: "booting" });
+  const [viewportMode, setViewportMode] = useState<ViewportMode>(() =>
+    platform.viewportMode ? platform.viewportMode() : "wide",
+  );
+  const [keyboardInsetBottom, setKeyboardInsetBottom] = useState<number>(() =>
+    normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+  );
+  const [duplicateInstance, setDuplicateInstance] = useState(false);
   const clientRef = useRef<MatrixClient | undefined>(undefined);
 
   function client(): MatrixClient {
@@ -33,12 +64,47 @@ export function WaypointApp({
     }
     return clientRef.current;
   }
+
   const retryTimer = useRef<number | undefined>(undefined);
   const backoffStep = useRef(0);
   const syncGeneration = useRef(0);
   const epoch = useRef(0);
+  const abandoning = useRef(false);
+  const platformRef = useRef(platform);
+  platformRef.current = platform;
 
   useEffect(() => {
+    setViewportMode(platform.viewportMode ? platform.viewportMode() : "wide");
+    if (!platform.subscribeViewportMode) {
+      return undefined;
+    }
+    return platform.subscribeViewportMode((mode) => {
+      setViewportMode(mode);
+    });
+  }, [platform]);
+
+  useEffect(() => {
+    setKeyboardInsetBottom(
+      normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+    );
+    if (!platform.subscribeKeyboardInsetBottom) {
+      return undefined;
+    }
+    return platform.subscribeKeyboardInsetBottom((inset) => {
+      setKeyboardInsetBottom(normalizeInset(inset));
+    });
+  }, [platform]);
+
+  useEffect(() => {
+    if (liveAppInstanceToken !== null) {
+      setDuplicateInstance(true);
+      platformRef.current.focusMainWindow?.();
+      return;
+    }
+    const myToken = Symbol("waypoint-app-instance");
+    liveAppInstanceToken = myToken;
+    setDuplicateInstance(false);
+
     let cancelled = false;
     void (async () => {
       const restored = await client().restore();
@@ -69,6 +135,9 @@ export function WaypointApp({
         clock.clearTimeout(retryTimer.current);
         retryTimer.current = undefined;
       }
+      if (liveAppInstanceToken === myToken) {
+        liveAppInstanceToken = null;
+      }
     };
   }, [clock]);
 
@@ -87,6 +156,29 @@ export function WaypointApp({
       retryTimer.current = undefined;
       void syncNow();
     }, delay);
+  }
+
+  async function abandon() {
+    if (abandoning.current || (phase.name !== "syncing" && phase.name !== "register")) {
+      return;
+    }
+    abandoning.current = true;
+    const myEpoch = ++epoch.current;
+    syncGeneration.current += 1;
+    clearRetry();
+    backoffStep.current = 0;
+    const matrix = client();
+    const address = matrix.address;
+    const userId = matrix.ownerId;
+    try {
+      await matrix.abandonBeforeList();
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "password", address, userId, password: "" });
+    } finally {
+      abandoning.current = false;
+    }
   }
 
   function syncIsCurrent(myEpoch: number, generation: number): boolean {
@@ -119,10 +211,7 @@ export function WaypointApp({
         address,
         userId,
         password: "",
-        message:
-          errcode(sync.type === "response" ? sync.body : undefined) === "M_USER_DEACTIVATED"
-            ? sentence("同步失败，因为账号已停用", errorText(sync.type === "response" ? sync.body : undefined))
-            : sentence("同步失败，因为服务器不认这台设备的登录", errorText(sync.type === "response" ? sync.body : undefined)),
+        message: credentialRejectedMessage("同步", sync),
       });
       return;
     }
@@ -135,7 +224,13 @@ export function WaypointApp({
       setPhase(
         hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
           ? { name: "topics" }
-          : { name: "holding" },
+          : {
+              name: "register",
+              address: matrix.address,
+              userId: matrix.ownerId,
+              agentUserId: "",
+              submitting: false,
+            },
       );
       return;
     }
@@ -198,6 +293,106 @@ export function WaypointApp({
     void beginLogin(next.address, identifier.user, phase.password);
   }
 
+  function submitRegistration(event: FormEvent) {
+    event.preventDefault();
+    if (phase.name !== "register" || phase.submitting) {
+      return;
+    }
+    const validation = validateAgentUserId(phase.agentUserId, phase.userId);
+    if (!validation.ok) {
+      setPhase({ ...phase, agentUserId: validation.trimmed, message: validation.message });
+      return;
+    }
+    setPhase({
+      ...phase,
+      agentUserId: validation.userId,
+      submitting: true,
+      message: undefined,
+    });
+    void beginRegistration(validation.userId);
+  }
+
+  async function handlePreListCredentialRejection(
+    myEpoch: number,
+    action: string,
+    result: TransportResult,
+  ) {
+    const matrix = client();
+    const address = matrix.address;
+    const userId = matrix.ownerId;
+    await matrix.forgetCredential();
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    setPhase({
+      name: "password",
+      address,
+      userId,
+      password: "",
+      message: credentialRejectedMessage(action, result),
+    });
+  }
+
+  async function beginRegistration(agentUserId: string) {
+    const matrix = client();
+    const myEpoch = epoch.current;
+    const ownerId = matrix.ownerId;
+    const existing = await matrix.getAccountData("im.waypoint.agents");
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    if (isCredentialRejected(existing)) {
+      await handlePreListCredentialRejection(myEpoch, "登记 Bot", existing);
+      return;
+    }
+    if (existing.type === "response" && existing.status === 200 && hasValidAgent(existing.body, ownerId)) {
+      await matrix.retainAccountData("im.waypoint.agents", existing.body);
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "topics" });
+      return;
+    }
+    if (!(existing.type === "response" && (existing.status === 200 || existing.status === 404))) {
+      setPhase((prev) =>
+        prev.name === "register"
+          ? {
+              ...prev,
+              submitting: false,
+              message: formatMatrixActionFailure("读取名册", existing),
+            }
+          : prev,
+      );
+      return;
+    }
+    const nextContent = nextAgentsContent(existing, agentUserId);
+    const written = await matrix.putAccountData("im.waypoint.agents", nextContent);
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    if (isCredentialRejected(written)) {
+      await handlePreListCredentialRejection(myEpoch, "登记 Bot", written);
+      return;
+    }
+    if (written.type === "response" && written.status >= 200 && written.status < 300) {
+      await matrix.retainAccountData("im.waypoint.agents", nextContent);
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "topics" });
+      return;
+    }
+    setPhase((prev) =>
+      prev.name === "register"
+        ? {
+            ...prev,
+            submitting: false,
+            message: formatMatrixActionFailure("登记 Bot", written),
+          }
+        : prev,
+    );
+  }
+
   async function beginLogin(address: string, user: string, password: string) {
     const matrix = client();
     const flows = await matrix.loginFlows();
@@ -242,18 +437,36 @@ export function WaypointApp({
     await syncNow();
   }
 
-  if (phase.name === "topics") {
+  if (duplicateInstance) {
     return (
-      <main>
-        <p>已连接</p>
-        <h1>Topic</h1>
-        <p>暂无 Topic</p>
+      <main className="waypoint-auth-main">
+        <p role="status">Waypoint 已在主窗口中运行，请切回主窗口继续。</p>
       </main>
     );
   }
 
+  if (phase.name === "topics") {
+    return (
+      <TopicsWorkspace
+        client={client()}
+        clock={clock}
+        platform={platform}
+        viewportMode={viewportMode}
+        keyboardInsetBottom={keyboardInsetBottom}
+      />
+    );
+  }
+
   return (
-    <main>
+    <main
+      className="waypoint-auth-main"
+      style={
+        {
+          "--keyboard-inset": `${keyboardInsetBottom}px`,
+          paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
+        } as CSSProperties
+      }
+    >
       <p>尚未进入 Topic 列表</p>
       {phase.name === "address" ? (
         <form onSubmit={submitAddress}>
@@ -262,9 +475,7 @@ export function WaypointApp({
             <input
               name="address"
               value={phase.address}
-              onChange={(event) =>
-                setPhase({ name: "address", address: event.target.value })
-              }
+              onChange={(event) => setPhase({ name: "address", address: event.target.value })}
             />
           </label>
           <button type="submit">继续</button>
@@ -277,9 +488,7 @@ export function WaypointApp({
             <input
               name="user-id"
               value={phase.userId}
-              onChange={(event) =>
-                setPhase({ ...phase, userId: event.target.value })
-              }
+              onChange={(event) => setPhase({ ...phase, userId: event.target.value })}
             />
           </label>
           <label>
@@ -288,15 +497,45 @@ export function WaypointApp({
               name="password"
               type="password"
               value={phase.password}
-              onChange={(event) =>
-                setPhase({ ...phase, password: event.target.value })
-              }
+              onChange={(event) => setPhase({ ...phase, password: event.target.value })}
             />
           </label>
           <button type="submit">用密码登录</button>
+          <button
+            type="button"
+            onClick={() => setPhase({ name: "address", address: phase.address })}
+          >
+            更改地址
+          </button>
         </form>
       ) : phase.name === "syncing" ? (
-        <button type="button" onClick={() => { void syncNow(); }}>立刻再试</button>
+        <>
+          <button type="button" onClick={() => void syncNow()}>
+            立刻再试
+          </button>
+          <button type="button" onClick={() => void abandon()}>
+            放弃
+          </button>
+        </>
+      ) : phase.name === "register" ? (
+        <form onSubmit={submitRegistration}>
+          <h1>登记 Bot</h1>
+          <label>
+            Matrix 用户 ID
+            <input
+              name="agent-user-id"
+              value={phase.agentUserId}
+              disabled={phase.submitting}
+              onChange={(event) => setPhase({ ...phase, agentUserId: event.target.value })}
+            />
+          </label>
+          <button type="submit" disabled={phase.submitting}>
+            登记 Bot
+          </button>
+          <button type="button" onClick={() => void abandon()}>
+            放弃
+          </button>
+        </form>
       ) : null}
       {"message" in phase && phase.message ? <p role="alert">{phase.message}</p> : null}
     </main>
@@ -305,37 +544,11 @@ export function WaypointApp({
 
 const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
-function isCredentialRejected(result: TransportResult): boolean {
-  if (result.type !== "response") {
-    return false;
-  }
-  const code = errcode(result.body);
-  return code === "M_UNKNOWN_TOKEN" || code === "M_USER_DEACTIVATED";
-}
-
 function syncFailureMessage(result: TransportResult): string {
-  if (result.type === "failure") {
-    if (result.failure.type === "timeout") {
-      return "同步失败，因为超时。";
-    }
-    if (result.failure.type === "untrusted-certificate") {
-      return "同步失败，因为到达不了，证书不受信任。";
-    }
-    if (result.failure.type === "hostname-mismatch") {
-      return "同步失败，因为到达不了，主机名对不上。";
-    }
-    if (result.failure.type === "https-unavailable") {
-      return "同步失败，因为到达不了，HTTPS 建不起来。";
-    }
-    return "同步失败，因为到达不了。";
-  }
-  if (isRateLimited(result.status, result.body)) {
-    return sentence("同步失败，因为被限流", errorText(result.body));
-  }
-  if (result.status >= 500) {
-    return sentence("同步失败，因为 Homeserver 暂时不能完成同步", errorText(result.body));
-  }
-  return "同步失败，因为到达不了。";
+  return formatMatrixActionFailure("同步", result, {
+    serverErrorReason: "Homeserver 暂时不能完成同步",
+    fallbackMessage: "同步失败，因为到达不了。",
+  });
 }
 
 function normalizeBaseUrl(raw: string): string | null {
@@ -365,18 +578,7 @@ function hasUsableVersions(body: unknown): boolean {
 
 function versionsOutcome(result: TransportResult): string | undefined {
   if (result.type === "failure") {
-    switch (result.failure.type) {
-      case "untrusted-certificate":
-        return "确认 Homeserver 失败，因为到达不了，证书不受信任。";
-      case "hostname-mismatch":
-        return "确认 Homeserver 失败，因为到达不了，主机名对不上。";
-      case "https-unavailable":
-        return "确认 Homeserver 失败，因为到达不了，HTTPS 建不起来。";
-      case "timeout":
-        return "确认 Homeserver 失败，因为超时。";
-      case "network":
-        return "确认 Homeserver 失败，因为到达不了。";
-    }
+    return transportFailureMessage("确认 Homeserver", result.failure);
   }
   if (isRateLimited(result.status, result.body)) {
     return sentence("确认 Homeserver 失败，因为被限流", errorText(result.body));
@@ -385,33 +587,6 @@ function versionsOutcome(result: TransportResult): string | undefined {
     return undefined;
   }
   return "确认 Homeserver 失败，因为这不是 Matrix Homeserver。";
-}
-
-function isRateLimited(status: number, body: unknown): boolean {
-  return status === 429 || errcode(body) === "M_LIMIT_EXCEEDED";
-}
-
-function errcode(body: unknown): string | undefined {
-  if (!body || typeof body !== "object" || !("errcode" in body)) {
-    return undefined;
-  }
-  const value = (body as { errcode?: unknown }).errcode;
-  return typeof value === "string" ? value : undefined;
-}
-
-function errorText(body: unknown): string | undefined {
-  if (!body || typeof body !== "object" || !("error" in body)) {
-    return undefined;
-  }
-  const value = (body as { error?: unknown }).error;
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function sentence(reason: string, serverError?: string): string {
-  if (serverError) {
-    return `${reason}：${serverError}。`;
-  }
-  return `${reason}。`;
 }
 
 function classifyIdentifier(raw: string):
@@ -426,14 +601,6 @@ function classifyIdentifier(raw: string):
     return { kind: "ok", user };
   }
   return { kind: "rejected" };
-}
-
-function isFullUserId(user: string): boolean {
-  if (!user.startsWith("@")) {
-    return false;
-  }
-  const colon = user.indexOf(":");
-  return colon > 1 && user.slice(colon + 1).trim() !== "" && !/\s/.test(user);
 }
 
 function isLocalpart(user: string): boolean {
@@ -493,37 +660,57 @@ function textField(body: Record<string, unknown>, key: string): string | undefin
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
+function hasValidAgent(content: unknown, ownerUserId: string): boolean {
+  return parseRegisteredAgents(content, ownerUserId).length > 0;
 }
 
-function hasValidAgent(content: unknown, ownerUserId: string): boolean {
-  if (!isRecord(content) || !Array.isArray(content.agents)) {
-    return false;
+function validateAgentUserId(
+  raw: string,
+  ownerUserId: string,
+): { ok: true; userId: string } | { ok: false; trimmed: string; message: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, trimmed, message: "登记 Bot 失败，因为用户 ID 是空的。" };
+  }
+  if (!isFullUserId(trimmed)) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为只接受完整的 Matrix 用户 ID，不自动补 @ 或 server name。",
+    };
   }
   const ownerServer = serverName(ownerUserId);
-  if (!ownerServer) {
-    return false;
+  if (!ownerServer || serverName(trimmed) !== ownerServer) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为 Bot 的 server name 必须与当前账号完全一致。",
+    };
   }
-  return content.agents.some((agent) => {
-    if (!isRecord(agent)) {
-      return false;
-    }
-    const userId = agent.user_id;
-    if (typeof userId !== "string" || !isFullUserId(userId) || userId === ownerUserId) {
-      return false;
-    }
-    return serverName(userId) === ownerServer;
-  });
+  if (trimmed === ownerUserId) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为不能把自己登记成 Bot。",
+    };
+  }
+  return { ok: true, userId: trimmed };
 }
 
-function serverName(userId: string): string | undefined {
-  const colon = userId.indexOf(":");
-  if (colon < 0) {
-    return undefined;
+function nextAgentsContent(existing: TransportResult, agentUserId: string): Record<string, unknown> {
+  if (
+    existing.type === "response" &&
+    existing.status === 200 &&
+    isRecord(existing.body) &&
+    !Array.isArray(existing.body)
+  ) {
+    const prevAgents = Array.isArray(existing.body.agents) ? existing.body.agents : [];
+    return {
+      ...existing.body,
+      agents: [...prevAgents, { user_id: agentUserId }],
+    };
   }
-  const server = userId.slice(colon + 1);
-  return server ? server : undefined;
+  return { agents: [{ user_id: agentUserId }] };
 }
 
 function loginFailure(result: TransportResult): { message: string; clearPassword: boolean } {
@@ -555,19 +742,7 @@ function loginFailure(result: TransportResult): { message: string; clearPassword
     };
   }
   if (result.type === "failure") {
-    if (result.failure.type === "timeout") {
-      return { message: "登录失败，因为超时。", clearPassword: false };
-    }
-    if (result.failure.type === "untrusted-certificate") {
-      return { message: "登录失败，因为到达不了，证书不受信任。", clearPassword: false };
-    }
-    if (result.failure.type === "hostname-mismatch") {
-      return { message: "登录失败，因为到达不了，主机名对不上。", clearPassword: false };
-    }
-    if (result.failure.type === "https-unavailable") {
-      return { message: "登录失败，因为到达不了，HTTPS 建不起来。", clearPassword: false };
-    }
-    return { message: "登录失败，因为到达不了。", clearPassword: false };
+    return { message: transportFailureMessage("登录", result.failure), clearPassword: false };
   }
   if (result.type === "response" && result.status === 200) {
     return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };

@@ -1,3 +1,10 @@
+export type RawMatrixEvent = Record<string, unknown>;
+
+export type StoredRoomEvents = {
+  stateEvents: RawMatrixEvent[];
+  timelineEvents: RawMatrixEvent[];
+};
+
 export type SessionRecord = {
   baseUrl: string;
   userId: string;
@@ -5,6 +12,7 @@ export type SessionRecord = {
   deviceId?: string;
   syncCursor?: string;
   accountData?: Record<string, unknown>;
+  rooms?: Record<string, StoredRoomEvents>;
 };
 
 const DB_NAME = "waypoint";
@@ -41,7 +49,18 @@ export async function dropCredential(): Promise<void> {
   if (current.accountData && Object.keys(current.accountData).length > 0) {
     next.accountData = current.accountData;
   }
+  if (current.rooms && Object.keys(current.rooms).length > 0) {
+    next.rooms = current.rooms;
+  }
   await saveSession(next);
+}
+
+export async function dropPreListSession(): Promise<void> {
+  const current = await loadSession();
+  if (!current) {
+    return;
+  }
+  await saveSession({ baseUrl: current.baseUrl, userId: current.userId });
 }
 
 function openDb(): Promise<IDBDatabase> {
