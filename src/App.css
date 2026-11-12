@@ -178,9 +178,14 @@ main {
   flex-shrink: 0;
 }
 
-.waypoint-topic-edit-button {
+.waypoint-topic-edit-button,
+.waypoint-topic-delete-button {
   margin-top: 0;
   flex-shrink: 0;
+}
+
+.waypoint-delete-dialog {
+  margin: 1rem 1.25rem 0;
 }
 
 .waypoint-topic-header-main {

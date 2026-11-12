@@ -19,6 +19,7 @@ const MAX_SYNC_TIMELINE_EVENTS_PER_ROOM = 20;
 export type SyncAttempt = {
   result: TransportResult;
   incremental: boolean;
+  leaveGeneration?: number;
 };
 
 export class MatrixClient {
@@ -33,6 +34,8 @@ export class MatrixClient {
   private storedPendingReadMarkers: PendingReadMarker[] = [];
   private storedDrafts: Record<string, DraftRecord> = {};
   private txnCounter = 0;
+  private leaveGeneration = 0;
+  private leftAtGeneration = new Map<string, number>();
   private persistTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: HomeserverTransport) {}
@@ -170,6 +173,8 @@ export class MatrixClient {
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
+      this.leaveGeneration = 0;
+      this.leftAtGeneration.clear();
       return saveSession({
         baseUrl: this.baseUrl,
         userId,
@@ -184,6 +189,7 @@ export class MatrixClient {
       return Promise.reject(new Error("没有 access token"));
     }
     const cursor = this.syncCursor;
+    const generation = this.leaveGeneration;
     const url = cursor
       ? `${matrixUrl(this.baseUrl, "/_matrix/client/v3/sync")}?since=${encodeURIComponent(cursor)}`
       : matrixUrl(this.baseUrl, "/_matrix/client/v3/sync");
@@ -193,7 +199,7 @@ export class MatrixClient {
         url,
         headers: { Authorization: `Bearer ${this.accessToken}` },
       })
-      .then((result) => ({ result, incremental: Boolean(cursor) }));
+      .then((result) => ({ result, incremental: Boolean(cursor), leaveGeneration: generation }));
   }
 
   async dropSyncCursor(): Promise<void> {
@@ -216,7 +222,13 @@ export class MatrixClient {
         return Promise.resolve();
       }
       this.storedAccountData = mergeAccountData(this.storedAccountData, body);
-      this.storedRooms = mergeSyncRooms(this.storedRooms, body, this.userId);
+      this.storedRooms = mergeSyncRooms(
+        this.storedRooms,
+        body,
+        this.userId,
+        attempt.leaveGeneration,
+        this.leftAtGeneration,
+      );
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
       this.storedPendingReadMarkers = reconcilePendingReadMarkersWithSync(
         this.storedPendingReadMarkers,
@@ -343,6 +355,36 @@ export class MatrixClient {
         "Content-Type": "application/json",
       },
       body: {},
+    });
+  }
+
+  async removeLeftRoom(roomId: string): Promise<void> {
+    this.leaveGeneration += 1;
+    this.leftAtGeneration.set(roomId, this.leaveGeneration);
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      delete nextRooms[roomId];
+      const nextPending = this.storedPendingEvents.filter((item) => item.roomId !== roomId);
+      const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
+        (item) => item.roomId !== roomId,
+      );
+      const nextDrafts = cloneDrafts(this.storedDrafts);
+      delete nextDrafts[roomId];
+      await saveSession(
+        this.sessionRecord({
+          rooms: nextRooms,
+          pending: nextPending,
+          pendingReadMarkers: nextPendingReadMarkers,
+          drafts: nextDrafts,
+        }),
+      );
+      this.storedRooms = nextRooms;
+      this.storedPendingEvents = nextPending;
+      this.storedPendingReadMarkers = nextPendingReadMarkers;
+      this.storedDrafts = nextDrafts;
     });
   }
 
@@ -641,6 +683,8 @@ export class MatrixClient {
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
+      this.leaveGeneration = 0;
+      this.leftAtGeneration.clear();
       return dropPreListSession();
     });
   }
@@ -784,6 +828,8 @@ function mergeSyncRooms(
   current: Record<string, StoredRoomEvents>,
   body: unknown,
   ownerUserId: string,
+  leaveGeneration?: number,
+  leftAtGeneration?: Map<string, number>,
 ): Record<string, StoredRoomEvents> {
   const next: Record<string, StoredRoomEvents> = cloneStoredRooms(current);
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
@@ -794,6 +840,13 @@ function mergeSyncRooms(
   if (isPlainObject(joinRooms)) {
     for (const [roomId, roomSync] of Object.entries(joinRooms)) {
       if (!isPlainObject(roomSync)) {
+        continue;
+      }
+      if (
+        leaveGeneration !== undefined &&
+        leftAtGeneration !== undefined &&
+        (leftAtGeneration.get(roomId) ?? 0) > leaveGeneration
+      ) {
         continue;
       }
       const existing = next[roomId] ?? { stateEvents: [], timelineEvents: [] };

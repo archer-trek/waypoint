@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { beforeEach, expect, test, vi } from "vitest";
@@ -6013,7 +6013,7 @@ test("发出文字后输入区清空，消息出现在时间线末尾靠右且�
   expect(spinner).toBeInTheDocument();
   expect(spinner.tagName).not.toBe("BUTTON");
   expect(rows[1].contains(spinner)).toBe(true);
-  expect(screen.queryByRole("button", { name: /丢掉|删除|撤回|未确认/ })).not.toBeInTheDocument();
+  expect(within(timeline).queryByRole("button", { name: /丢掉|删除|撤回|未确认/ })).not.toBeInTheDocument();
 
   // 气泡上不显示时刻，也不能点开看时刻
   expect(rows[1]).not.toHaveTextContent(/\d{1,2}:\d{2}/);
@@ -10962,4 +10962,734 @@ test("已读指针指向的消息被撤回并从时间线移除后，回退到�
     });
   });
   expect(row).not.toHaveAttribute("data-unread", "true");
+});
+
+test("空 Topic 与不可用 Topic 都有删除入口（无归档），点删除弹出单次确认说明 home 投递与回到本房间的提醒，点取消不发请求", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "工作助理" },
+                    { user_id: "@bot2:example.com", name: "研究助理" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!empty:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "空 Topic" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!unavail:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 900, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "被加密的 Topic" } },
+                    { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  expect(screen.queryByRole("button", { name: /归档/ })).not.toBeInTheDocument();
+
+  // 打开空 Topic：有删除入口且无归档
+  await user.click(await screen.findByRole("button", { name: /空 Topic/ }));
+  expect(screen.queryByRole("button", { name: /归档/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "删除" }));
+
+  const dialog1 = screen.getByRole("alertdialog", { name: "确认删除 Topic" });
+  expect(dialog1).toBeVisible();
+  expect(dialog1.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+  expect(dialog1).toHaveTextContent("该 Bot");
+  expect(dialog1).not.toHaveTextContent(/所有\s*Hermes|Hermes/);
+  expect(dialog1).toHaveTextContent("看不出这条是不是该 Bot 的 home");
+  expect(dialog1).toHaveTextContent("走 home 的投递会进已离开的房间");
+  expect(dialog1).toHaveTextContent("追不回");
+  expect(dialog1).toHaveTextContent("也不会再提示");
+  expect(dialog1).toHaveTextContent("/sethome");
+  expect(dialog1).toHaveTextContent("Waypoint 不代发 /sethome");
+  expect(dialog1).toHaveTextContent("在这条 Topic 里跟该 Bot 约定的、回到本房间的提醒仍会发进已离开的房间");
+  expect(dialog1).toHaveTextContent("/sethome 不会把它们改投走");
+
+  const reqCountBeforeCancel = homeserver.requests.length;
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(homeserver.requests).toHaveLength(reqCountBeforeCancel);
+
+  // 打开不可用（被加密）Topic：同样有删除入口，且只展示这一次单步确认
+  await user.click(screen.getByRole("button", { name: /被加密的 Topic/ }));
+  expect(screen.queryByRole("button", { name: /归档/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "删除" }));
+
+  const dialog2 = screen.getByRole("alertdialog", { name: "确认删除 Topic" });
+  expect(dialog2).toBeVisible();
+  expect(dialog2.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
+  expect(dialog2).toHaveTextContent("确认删除");
+  expect(dialog2).toHaveTextContent("取消");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+});
+
+test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地时间线、草稿与重试队列都保留且重开仍在，弹窗内可重试成功", async () => {
+  const user = userEvent.setup();
+  const failureCases: Array<{
+    name: string;
+    respond: () => Promise<TransportResult>;
+    expectedAlert: string;
+  }> = [
+    {
+      name: "网络失败",
+      respond: async () => ({ type: "failure", failure: { type: "network" } }),
+      expectedAlert: "删除 Topic 失败，因为到达不了。",
+    },
+    {
+      name: "超时",
+      respond: async () => ({ type: "failure", failure: { type: "timeout" } }),
+      expectedAlert: "删除 Topic 失败，因为超时。",
+    },
+    {
+      name: "500 错误",
+      respond: async () => ({
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "Leave failed" },
+      }),
+      expectedAlert: "删除 Topic 失败，因为 Homeserver 暂时不能完成请求：Leave failed。",
+    },
+    {
+      name: "403 拒绝",
+      respond: async () => ({
+        type: "response",
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Cannot leave" },
+      }),
+      expectedAlert: "删除 Topic 失败，因为 Homeserver 拒绝了请求：Cannot leave。",
+    },
+  ];
+
+  for (const failureCase of failureCases) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    let leaveAttempts = 0;
+
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: { agents: [{ user_id: "@bot:example.com", name: "助理" }] },
+                },
+                {
+                  type: "m.direct",
+                  content: { "@bot:example.com": ["!t1:example.com", "!other:example.com"] },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "保留验证话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$hist-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "已有历史消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/leave")
+      ) {
+        leaveAttempts += 1;
+        if (leaveAttempts === 1) {
+          return failureCase.respond();
+        }
+        return { type: "response", status: 200, body: {} };
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/forget")
+      ) {
+        return { type: "response", status: 200, body: {} };
+      }
+      if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const first = renderApp(homeserver);
+    await login(user);
+
+    await user.click(await screen.findByRole("button", { name: "保留验证话题" }));
+    const composer = screen.getByLabelText("输入消息");
+    await user.type(composer, "未确认排队消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("输入消息"), "还没发出的草稿");
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+    const dialog = await screen.findByRole("alertdialog", { name: "确认删除 Topic" });
+    expect(await screen.findByRole("alert")).toHaveTextContent(failureCase.expectedAlert);
+    expect(dialog).toBeVisible();
+    expect(screen.getByRole("button", { name: "保留验证话题" })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("已有历史消息");
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认排队消息");
+    expect(screen.getByLabelText("输入消息")).toHaveValue("还没发出的草稿");
+    expect(homeserver.requests.some((r) => r.url.endsWith("/forget"))).toBe(false);
+    expect(homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/m.direct"))).toBe(
+      false,
+    );
+
+    // 重启后仍在（sync 继续失败也不丢失本地时间线、草稿和重试队列）
+    first.unmount();
+    const restarted = renderApp(homeserver);
+    await user.click(await screen.findByRole("button", { name: "保留验证话题" }));
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("已有历史消息");
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认排队消息");
+    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+    expect(screen.getByLabelText("输入消息")).toHaveValue("还没发出的草稿");
+
+    // 重试确认删除，leave 成功后立即移除
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "保留验证话题" })).not.toBeInTheDocument();
+    });
+    restarted.unmount();
+  }
+});
+
+test("leave 一成功就立即移除 Topic、清掉本地时间线、草稿与重试队列且不自动打开另一条（宽/窄视口均成立），删后各处不再提警告文案", async () => {
+  const user = userEvent.setup();
+  for (const viewport of ["wide", "narrow"] as const) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    const pendingForget = deferred<TransportResult>();
+    const pendingDirect = deferred<TransportResult>();
+    let allowOtherSend = false;
+    let deletedOnServer = false;
+    const sentBodies: Array<{ url: string; body: unknown }> = [];
+    let pushCount = 0;
+    let popCount = 0;
+
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: { agents: [{ user_id: "@bot:example.com", name: "助理" }] },
+                },
+                {
+                  type: "m.direct",
+                  content: { "@bot:example.com": ["!del:example.com", "!keep:example.com"] },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                ...(deletedOnServer
+                  ? {}
+                  : {
+                      "!del:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "要删掉的 Topic" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$del-m1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        content: { msgtype: "m.text", body: "即将清除的对话" },
+                      },
+                    ],
+                  },
+                },
+                    }),
+                "!keep:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "留下的 Topic" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$keep-m1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "留在列表里的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+        sentBodies.push({ url: input.url, body: input.body });
+        if (!allowOtherSend) {
+          return { type: "failure", failure: { type: "network" } };
+        }
+        return { type: "response", status: 200, body: { event_id: "$sent-ok" } };
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!del%3Aexample.com/leave")
+      ) {
+        deletedOnServer = true;
+        return { type: "response", status: 200, body: {} };
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!del%3Aexample.com/forget")
+      ) {
+        return pendingForget.promise;
+      }
+      if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+        return pendingDirect.promise;
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const clock = new ManualClock();
+    const view = render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{
+          deviceDisplayName: viewport === "narrow" ? "Waypoint Android" : "Waypoint macOS",
+          viewportMode: () => viewport,
+          pushNavigationEntry: () => {
+            pushCount += 1;
+          },
+          popNavigationEntry: () => {
+            popCount += 1;
+          },
+        }}
+        clock={clock}
+      />,
+    );
+    await login(user);
+
+    // 在要删除的 Topic 里产生排队未确认消息 + 草稿
+    await user.click(await screen.findByRole("button", { name: "要删掉的 Topic" }));
+    await user.type(screen.getByLabelText("输入消息"), "将被删掉的未确认消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("输入消息"), "将被删掉的草稿");
+
+    // 另一条留下的 Topic 也放一条未确认消息（仍在重试队列里）
+    if (viewport === "narrow") {
+      await user.click(screen.getByRole("button", { name: "返回" }));
+    }
+    await user.click(screen.getByRole("button", { name: "留下的 Topic" }));
+    await user.type(screen.getByLabelText("输入消息"), "留下来的排队消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    // 回到要删掉的 Topic 并确认删除（forget 和 m.direct 仍处于挂起中）
+    if (viewport === "narrow") {
+      await user.click(screen.getByRole("button", { name: "返回" }));
+    }
+    await user.click(screen.getByRole("button", { name: "要删掉的 Topic" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+    // leave 刚一成功，forget/m.direct 尚未返回时，Topic 已立刻消失且不自动打开留下的 Topic
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "要删掉的 Topic" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("留下的 Topic")).toBeInTheDocument();
+    if (viewport === "wide") {
+      expect(screen.getByText(/选择一条 Topic/)).toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+      expect(popCount).toBe(pushCount);
+    }
+
+    // 删完之后，列表、新建 Topic 与其他 Topic 里都不再提 home/提醒警告
+    expect(document.body).not.toHaveTextContent("/sethome");
+    expect(document.body).not.toHaveTextContent("回到本房间的提醒");
+    await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+    expect(document.body).not.toHaveTextContent("/sethome");
+    expect(document.body).not.toHaveTextContent("回到本房间的提醒");
+    await user.click(screen.getByRole("button", { name: viewport === "narrow" ? "返回" : "取消" }));
+    await user.click(screen.getByRole("button", { name: "留下的 Topic" }));
+    expect(document.body).not.toHaveTextContent("/sethome");
+    expect(document.body).not.toHaveTextContent("回到本房间的提醒");
+
+    // 恢复发送后推进重试队列：只发留下 Topic 的消息，不再重发已删除 Topic 的排队消息
+    sentBodies.length = 0;
+    allowOtherSend = true;
+    await act(async () => {
+      clock.advance(5000);
+    });
+    await waitFor(() => {
+      expect(
+        sentBodies.some((item) => item.url.includes("/rooms/!keep%3Aexample.com/send/")),
+      ).toBe(true);
+    });
+    expect(
+      sentBodies.some((item) => item.url.includes("/rooms/!del%3Aexample.com/send/")),
+    ).toBe(false);
+
+    view.unmount();
+
+    // 重启后已删除 Topic 及其本地时间线、草稿、重试队列都不再出现（即使 sync 把房间从 join 去掉/还没连上）
+    const restarted = renderApp(homeserver);
+    expect(await screen.findByText("留下的 Topic")).toBeInTheDocument();
+    expect(screen.queryByText("要删掉的 Topic")).not.toBeInTheDocument();
+    expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+    restarted.unmount();
+  }
+});
+
+test("leave 成功后按顺序尽力 forget 与清理 m.direct（仅在包含时更新），forget/m.direct 失败不报错不恢复，不踢 Agent/不删消息/不代发 /sethome，且迟到同步不拉回已删 Topic", async () => {
+  const user = userEvent.setup();
+
+  // Case A: m.direct 包含待删房间，且 forget 与 m.direct 均失败；同时验证迟到的增量 sync 不复活已删房间
+  {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    let syncCalls = 0;
+    const staleSync = deferred<TransportResult>();
+    const requestLog: string[] = [];
+
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      requestLog.push(`${input.method} ${input.url}`);
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        syncCalls += 1;
+        if (syncCalls === 1) {
+          return {
+            type: "response",
+            status: 200,
+            body: {
+              next_batch: "batch-1",
+              account_data: {
+                events: [
+                  {
+                    type: "im.waypoint.agents",
+                    content: {
+                      agents: [
+                        { user_id: "@bot1:example.com", name: "一号" },
+                        { user_id: "@bot2:example.com", name: "二号" },
+                      ],
+                    },
+                  },
+                  {
+                    type: "m.direct",
+                    content: {
+                      "@bot1:example.com": ["!del:example.com", "!stay:example.com"],
+                      "@bot2:example.com": ["!other:example.com"],
+                    },
+                  },
+                ],
+              },
+              rooms: {
+                join: {
+                  "!del:example.com": {
+                    state: {
+                      events: [
+                        { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                        { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                        { type: "m.room.name", state_key: "", content: { name: "待删房间" } },
+                      ],
+                    },
+                    timeline: {
+                      events: [
+                        {
+                          type: "m.room.message",
+                          event_id: "$ev1",
+                          sender: "@bot1:example.com",
+                          origin_server_ts: 1500,
+                          content: { msgtype: "m.text", body: "不要撤回我" },
+                        },
+                      ],
+                    },
+                  },
+                  "!stay:example.com": {
+                    state: {
+                      events: [
+                        { type: "m.room.create", state_key: "", origin_server_ts: 900, content: {} },
+                        { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                        { type: "m.room.name", state_key: "", content: { name: "保留房间" } },
+                      ],
+                    },
+                    timeline: { events: [] },
+                  },
+                },
+              },
+            },
+          };
+        }
+        return staleSync.promise;
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!del%3Aexample.com/leave")
+      ) {
+        return { type: "response", status: 200, body: {} };
+      }
+      if (
+        input.method === "POST" &&
+        input.url.endsWith("/_matrix/client/v3/rooms/!del%3Aexample.com/forget")
+      ) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "Forget failed" },
+        };
+      }
+      if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const firstView = renderApp(homeserver);
+    const { clock } = firstView;
+    await login(user);
+
+    await user.click(await screen.findByRole("button", { name: /待删房间/ }));
+    // 发起一次前台同步并停在路上（包含 !del:example.com）
+    await act(async () => {
+      clock.advance(1000);
+    });
+    expect(syncCalls).toBe(2);
+
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /待删房间/ })).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(homeserver.requests.some((r) => r.url.endsWith("/forget"))).toBe(true);
+      expect(
+        homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/account_data/m.direct")),
+      ).toBe(true);
+    });
+
+    // forget 和 m.direct 失败后，不报错、不恢复 Topic
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /待删房间/ })).not.toBeInTheDocument();
+
+    // 顺序验证：leave 在 forget 与 m.direct 之前
+    const leaveIdx = requestLog.findIndex((entry) => entry.endsWith("/leave"));
+    const forgetIdx = requestLog.findIndex((entry) => entry.endsWith("/forget"));
+    const directIdx = requestLog.findIndex((entry) => entry.includes("/account_data/m.direct"));
+    expect(leaveIdx).toBeGreaterThan(-1);
+    expect(forgetIdx).toBeGreaterThan(leaveIdx);
+    expect(directIdx).toBeGreaterThan(leaveIdx);
+
+    const directPut = homeserver.requests.find(
+      (r) => r.method === "PUT" && r.url.includes("/account_data/m.direct"),
+    );
+    expect(directPut?.body).toEqual({
+      "@bot1:example.com": ["!stay:example.com"],
+      "@bot2:example.com": ["!other:example.com"],
+    });
+
+    // 没踢 Agent、没撤回事件、没发任何消息（包括 /sethome 或让 Agent 遗忘）
+    expect(homeserver.requests.some((r) => r.url.includes("/kick"))).toBe(false);
+    expect(homeserver.requests.some((r) => r.url.includes("/redact"))).toBe(false);
+    expect(homeserver.requests.some((r) => r.url.includes("/send/"))).toBe(false);
+
+    // 迟到的增量 sync 带着 !del:example.com 返回时，不能把它拉回列表
+    await act(async () => {
+      staleSync.resolve({
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!del:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "待删房间" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      });
+    });
+    expect(screen.queryByRole("button", { name: /待删房间/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /保留房间/ })).toBeInTheDocument();
+    firstView.unmount();
+  }
+
+  // Case B: m.direct 不包含待删房间时，不发 PUT m.direct，且删掉最后一个房间后 m.direct 移除空 key
+  {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: { agents: [{ user_id: "@bot:example.com", name: "助理" }] },
+                },
+                {
+                  type: "m.direct",
+                  content: { "@bot:example.com": ["!only-direct:example.com"] },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!not-in-direct:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "不在 direct 里" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!only-direct:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "最后一个 direct" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.method === "POST" && (input.url.endsWith("/leave") || input.url.endsWith("/forget"))) {
+        return { type: "response", status: 200, body: {} };
+      }
+      if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const secondView = renderApp(homeserver);
+    await login(user);
+
+    await user.click(await screen.findByRole("button", { name: "不在 direct 里" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(
+        homeserver.requests.some((r) =>
+          r.url.endsWith("/_matrix/client/v3/rooms/!not-in-direct%3Aexample.com/forget"),
+        ),
+      ).toBe(true);
+    });
+    expect(
+      homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/account_data/m.direct")),
+    ).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "最后一个 direct" }));
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(
+        homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/account_data/m.direct")),
+      ).toBe(true);
+    });
+    const directPut = homeserver.requests.find(
+      (r) => r.method === "PUT" && r.url.includes("/account_data/m.direct"),
+    );
+    expect(directPut?.body).toEqual({});
+    expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+    secondView.unmount();
+  }
 });

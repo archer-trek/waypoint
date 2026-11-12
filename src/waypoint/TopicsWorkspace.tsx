@@ -21,6 +21,7 @@ import {
   buildRenameAgentContent,
   computeTargetReadPosition,
   createTopicRoom,
+  deleteTopicRoom,
   type BubbleVisibility,
   deriveRoomTimelineItems,
   deriveTopics,
@@ -98,6 +99,10 @@ export function TopicsWorkspace({
   const [editDescriptionInput, setEditDescriptionInput] = useState("");
   const [editPendingFields, setEditPendingFields] = useState({ name: true, description: true });
   const [editError, setEditError] = useState<string | undefined>(undefined);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const deletingRef = useRef(false);
+  const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [draftsByRoom, setDraftsByRoom] = useState<Record<string, DraftRecord>>(() =>
     client.drafts(),
   );
@@ -156,6 +161,10 @@ export function TopicsWorkspace({
       setDescriptionExpanded(false);
       setEditSubmitting(false);
       resetEditForm();
+      if (!deletingRef.current) {
+        setDeleteConfirmOpen(false);
+        setDeleteError(undefined);
+      }
     }
   }, [activeTopicId, topics]);
 
@@ -208,7 +217,7 @@ export function TopicsWorkspace({
     setEditPendingFields({ name: true, description: true });
   }
 
-  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting;
+  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting;
 
   backHandlerRef.current = () => {
     if (viewportMode !== "narrow") {
@@ -245,8 +254,14 @@ export function TopicsWorkspace({
     }
     if (activeTopic) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      if (deleting) {
+        syncNavigationDepth(targetDepth);
+        return true;
+      }
       setActiveTopicId(null);
       setDescriptionExpanded(false);
+      setDeleteConfirmOpen(false);
+      setDeleteError(undefined);
       return true;
     }
     return false;
@@ -271,6 +286,8 @@ export function TopicsWorkspace({
     }
     resetCreateForm();
     resetEditForm();
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
     resetAgentsForm();
     setExitConfirmOpen(false);
     setSettingsOpen(true);
@@ -464,6 +481,8 @@ export function TopicsWorkspace({
     }
     setSettingsOpen(false);
     resetEditForm();
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
     setCreating(true);
     setSubmitting(false);
     setNameInput("");
@@ -528,6 +547,8 @@ export function TopicsWorkspace({
     if (anyFormSubmitting || !activeTopic) {
       return;
     }
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
     setEditing(true);
     setEditSubmitting(false);
     setEditNameInput(activeTopic.name);
@@ -550,8 +571,67 @@ export function TopicsWorkspace({
     setSettingsOpen(false);
     resetCreateForm();
     resetEditForm();
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
+  }
+
+  function openDeleteConfirm() {
+    if (anyFormSubmitting || !activeTopic || editing) {
+      return;
+    }
+    setDeleteError(undefined);
+    setDeleteConfirmOpen(true);
+  }
+
+  function cancelDeleteConfirm() {
+    if (deleting) {
+      return;
+    }
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
+  }
+
+  async function confirmDeleteTopic() {
+    if (deletingRef.current || !activeTopic) {
+      return;
+    }
+    const targetRoomId = activeTopic.roomId;
+    deletingRef.current = true;
+    setDeleting(true);
+    setDeleteError(undefined);
+    try {
+      const result = await deleteTopicRoom(client, targetRoomId);
+      if (!mountedRef.current) {
+        return;
+      }
+      if (!result.ok) {
+        setDeleteError(result.message);
+        return;
+      }
+      delete lastRequestedReadRef.current[targetRoomId];
+      bumpDraftSeq(targetRoomId);
+      setDraftsByRoom((prev) => {
+        if (!(targetRoomId in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[targetRoomId];
+        return next;
+      });
+      setDeleteConfirmOpen(false);
+      setDeleteError(undefined);
+      setActiveTopicId(null);
+      setDescriptionExpanded(false);
+      resetEditForm();
+      setRevision((value) => value + 1);
+    } finally {
+      deletingRef.current = false;
+      if (mountedRef.current) {
+        setDeleting(false);
+      }
+    }
   }
 
   function goBack() {
@@ -568,8 +648,13 @@ export function TopicsWorkspace({
       return;
     }
     if (activeTopic) {
+      if (deleting) {
+        return;
+      }
       setActiveTopicId(null);
       setDescriptionExpanded(false);
+      setDeleteConfirmOpen(false);
+      setDeleteError(undefined);
     }
   }
 
@@ -1592,7 +1677,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
-                      disabled={editing && editSubmitting}
+                      disabled={(editing && editSubmitting) || deleting}
                       onClick={goBack}
                     >
                       返回
@@ -1607,10 +1692,18 @@ export function TopicsWorkspace({
                   <button
                     type="button"
                     className="waypoint-topic-edit-button"
-                    disabled={editing}
+                    disabled={editing || deleteConfirmOpen || deleting}
                     onClick={openEditForm}
                   >
                     编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="waypoint-topic-delete-button"
+                    disabled={editing || deleteConfirmOpen || deleting}
+                    onClick={openDeleteConfirm}
+                  >
+                    删除
                   </button>
                 </div>
                 {activeTopic.description ? (
@@ -1628,6 +1721,41 @@ export function TopicsWorkspace({
                   </button>
                 ) : null}
               </header>
+              {deleteConfirmOpen ? (
+                <div
+                  role="alertdialog"
+                  aria-label="确认删除 Topic"
+                  className="waypoint-agents-form waypoint-delete-dialog"
+                >
+                  <h4>确认删除 Topic</h4>
+                  <p>
+                    确定要删除「{activeTopic.name}」吗？删除后无法恢复。
+                  </p>
+                  <p>
+                    Waypoint 看不出这条是不是该 Bot 的 home；如果是，之后走 home 的投递会进已离开的房间，追不回，也不会再提示；要改投就在还留着的或新建的 Topic 里自己发一条以 /sethome 开头的消息（Waypoint 不代发 /sethome）。
+                  </p>
+                  <p>
+                    在这条 Topic 里跟该 Bot 约定的、回到本房间的提醒仍会发进已离开的房间，追不回，/sethome 不会把它们改投走（若要取消或重设，需在删除前或在该 Bot 的其他 Topic 里发消息让它处理）。
+                  </p>
+                  {deleteError ? <p role="alert">{deleteError}</p> : null}
+                  <div className="waypoint-form-actions">
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      onClick={() => void confirmDeleteTopic()}
+                    >
+                      {deleting ? "正在删除…" : "确认删除"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={deleting}
+                      onClick={cancelDeleteConfirm}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               {editing ? (
                 <section aria-label="编辑 Topic" className="waypoint-dialog">
                   <div

@@ -29,6 +29,10 @@ export type CreateTopicResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string };
 
+export type DeleteTopicResult =
+  | { ok: true }
+  | { ok: false; message: string };
+
 export type UpdateTopicResult =
   | {
       ok: true;
@@ -42,7 +46,7 @@ export type UpdateTopicResult =
       message: string;
     };
 
-const directAppendQueues = new WeakMap<MatrixClient, Promise<void>>();
+const directWriteQueues = new WeakMap<MatrixClient, Promise<void>>();
 
 export function isFullUserId(user: string): boolean {
   if (!user.startsWith("@")) {
@@ -535,34 +539,92 @@ export async function createTopicRoom(
   return { ok: true, roomId };
 }
 
-export function appendDirectRoom(
+function enqueueDirectAccountDataWrite(
   client: MatrixClient,
-  agentUserId: string,
-  roomId: string,
+  computeNext: (current: unknown) => Record<string, string[]> | undefined,
 ): Promise<void> {
-  const prev = directAppendQueues.get(client) ?? Promise.resolve();
+  const prev = directWriteQueues.get(client) ?? Promise.resolve();
   const next = prev
     .catch(() => undefined)
     .then(async () => {
       if (!client.hasToken || !client.ownerId) {
         return;
       }
-      const nextDirect = appendDirectRoomMapping(
-        client.accountData("m.direct"),
-        agentUserId,
-        roomId,
-      );
+      const nextDirect = computeNext(client.accountData("m.direct"));
+      if (!nextDirect) {
+        return;
+      }
       try {
         const result = await client.putAccountData("m.direct", nextDirect);
         if (result.type === "response" && result.status >= 200 && result.status < 300) {
           await client.retainAccountData("m.direct", nextDirect);
         }
       } catch {
-        // Best-effort per ADR-0023: never fail or roll back created Topic
+        // Best-effort per ADR-0023: never fail or roll back Topic lifecycle
       }
     });
-  directAppendQueues.set(client, next);
+  directWriteQueues.set(client, next);
   return next;
+}
+
+export function appendDirectRoom(
+  client: MatrixClient,
+  agentUserId: string,
+  roomId: string,
+): Promise<void> {
+  return enqueueDirectAccountDataWrite(client, (current) =>
+    appendDirectRoomMapping(current, agentUserId, roomId),
+  );
+}
+
+export function removeDirectRoom(client: MatrixClient, roomId: string): Promise<void> {
+  return enqueueDirectAccountDataWrite(client, (current) => {
+    const { changed, next } = removeDirectRoomMapping(current, roomId);
+    return changed ? next : undefined;
+  });
+}
+
+export async function deleteTopicRoom(
+  client: MatrixClient,
+  roomId: string,
+): Promise<DeleteTopicResult> {
+  if (!client.hasToken) {
+    return { ok: false, message: disconnectedMessage("删除 Topic") };
+  }
+  let leaveResult: TransportResult;
+  try {
+    leaveResult = await client.leaveRoom(roomId);
+  } catch {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure("删除 Topic", {
+        type: "failure",
+        failure: { type: "network" },
+      }),
+    };
+  }
+  if (leaveResult.type !== "response" || leaveResult.status < 200 || leaveResult.status >= 300) {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure("删除 Topic", leaveResult, {
+        serverErrorReason: "Homeserver 暂时不能完成请求",
+        rejectedReason: "Homeserver 拒绝了请求",
+      }),
+    };
+  }
+  await client.removeLeftRoom(roomId);
+  if (client.hasToken) {
+    try {
+      void client.forgetRoom(roomId).then(
+        () => undefined,
+        () => undefined,
+      );
+    } catch {
+      // Best-effort forget
+    }
+    void removeDirectRoom(client, roomId);
+  }
+  return { ok: true };
 }
 
 async function bestEffortLeaveAndForget(client: MatrixClient, roomId: string): Promise<void> {
@@ -669,6 +731,31 @@ export function appendDirectRoomMapping(
     ? existingForAgent
     : [...existingForAgent, roomId];
   return next;
+}
+
+export function removeDirectRoomMapping(
+  current: unknown,
+  roomId: string,
+): { changed: boolean; next: Record<string, string[]> } {
+  if (!isRecord(current)) {
+    return { changed: false, next: {} };
+  }
+  let changed = false;
+  const next: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(current)) {
+    if (!Array.isArray(value)) {
+      continue;
+    }
+    const rooms = value.filter((item): item is string => typeof item === "string");
+    const filtered = rooms.filter((item) => item !== roomId);
+    if (filtered.length !== rooms.length) {
+      changed = true;
+    }
+    if (filtered.length > 0) {
+      next[key] = filtered;
+    }
+  }
+  return { changed, next };
 }
 
 export async function updateTopicDetails(
