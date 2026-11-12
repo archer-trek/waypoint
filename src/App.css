@@ -158,6 +158,11 @@ main {
   flex-shrink: 0;
 }
 
+.waypoint-topic-edit-button {
+  margin-top: 0;
+  flex-shrink: 0;
+}
+
 .waypoint-topic-header-main {
   display: flex;
   align-items: baseline;

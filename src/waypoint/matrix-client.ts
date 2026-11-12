@@ -217,6 +217,28 @@ export class MatrixClient {
     });
   }
 
+  putRoomStateEvent(
+    roomId: string,
+    eventType: string,
+    content: Record<string, unknown>,
+    stateKey = "",
+  ): Promise<TransportResult> {
+    if (!this.accessToken) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    const basePath = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(eventType)}`;
+    const path = stateKey === "" ? basePath : `${basePath}/${encodeURIComponent(stateKey)}`;
+    return this.transport.request({
+      method: "PUT",
+      url: matrixUrl(this.baseUrl, path),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: content,
+    });
+  }
+
   leaveRoom(roomId: string): Promise<TransportResult> {
     if (!this.accessToken) {
       return Promise.reject(new Error("没有 access token"));
@@ -257,12 +279,19 @@ export class MatrixClient {
     roomId: string,
     initialStateEvents: RawMatrixEvent[],
   ): Promise<void> {
+    await this.rememberRoomStateEvents(roomId, initialStateEvents);
+  }
+
+  async rememberRoomStateEvents(
+    roomId: string,
+    stateEvents: RawMatrixEvent[],
+  ): Promise<void> {
     await this.enqueuePersist(() => {
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: {
-          stateEvents: mergeStateEvents(existing.stateEvents, initialStateEvents),
+          stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
           timelineEvents: existing.timelineEvents.map(cloneObject),
         },
       };

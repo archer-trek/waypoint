@@ -13,6 +13,7 @@ import {
   resolveBotName,
   resolvePreselectedBotId,
   saveAgentsRoster,
+  updateTopicDetails,
   validateAgentUserId,
 } from "./topics";
 
@@ -63,6 +64,11 @@ export function TopicsWorkspace({
   const [quickError, setQuickError] = useState<string | undefined>(undefined);
   const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editSubmitting, setEditSubmitting] = useState(false);
+  const [editNameInput, setEditNameInput] = useState("");
+  const [editDescriptionInput, setEditDescriptionInput] = useState("");
+  const [editError, setEditError] = useState<string | undefined>(undefined);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -79,13 +85,19 @@ export function TopicsWorkspace({
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
       setActiveTopicId(null);
       setDescriptionExpanded(false);
+      setEditing(false);
+      setEditSubmitting(false);
+      setEditError(undefined);
     }
   }, [activeTopicId, topics]);
 
   const navDepthRef = useRef(0);
   const targetDepth =
     viewportMode === "narrow"
-      ? (settingsOpen ? 1 : 0) + (creating ? 1 : 0) + (activeTopic ? 1 : 0)
+      ? (settingsOpen ? 1 : 0) +
+        (creating ? 1 : 0) +
+        (activeTopic ? 1 : 0) +
+        (!settingsOpen && !creating && activeTopic && editing ? 1 : 0)
       : 0;
 
   function syncNavigationDepth(desiredDepth: number) {
@@ -133,6 +145,16 @@ export function TopicsWorkspace({
       setQuickError(undefined);
       return true;
     }
+    if (editing && activeTopic) {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      if (editSubmitting) {
+        syncNavigationDepth(targetDepth);
+        return true;
+      }
+      setEditing(false);
+      setEditError(undefined);
+      return true;
+    }
     if (activeTopic) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
       setActiveTopicId(null);
@@ -156,7 +178,7 @@ export function TopicsWorkspace({
   }, [platform]);
 
   function openSettings() {
-    if (submitting || quickSubmitting || rosterSubmitting) {
+    if (submitting || quickSubmitting || rosterSubmitting || editSubmitting) {
       return;
     }
     setCreating(false);
@@ -165,6 +187,8 @@ export function TopicsWorkspace({
     setQuickUserId("");
     setQuickHandwrittenName("");
     setQuickError(undefined);
+    setEditing(false);
+    setEditError(undefined);
     setRosterForm(null);
     setRosterError(undefined);
     setSettingsOpen(true);
@@ -298,10 +322,12 @@ export function TopicsWorkspace({
   }
 
   function openCreateForm() {
-    if (submitting || quickSubmitting || rosterSubmitting) {
+    if (submitting || quickSubmitting || rosterSubmitting || editSubmitting) {
       return;
     }
     setSettingsOpen(false);
+    setEditing(false);
+    setEditError(undefined);
     setCreating(true);
     setSubmitting(false);
     setNameInput("");
@@ -382,8 +408,27 @@ export function TopicsWorkspace({
     setRevision((value) => value + 1);
   }
 
+  function openEditForm() {
+    if (submitting || quickSubmitting || rosterSubmitting || editSubmitting || !activeTopic) {
+      return;
+    }
+    setEditing(true);
+    setEditSubmitting(false);
+    setEditNameInput(activeTopic.name);
+    setEditDescriptionInput(activeTopic.description ?? "");
+    setEditError(undefined);
+  }
+
+  function closeEditForm() {
+    if (editSubmitting) {
+      return;
+    }
+    setEditing(false);
+    setEditError(undefined);
+  }
+
   function openTopic(roomId: string) {
-    if (submitting || quickSubmitting || rosterSubmitting) {
+    if (submitting || quickSubmitting || rosterSubmitting || editSubmitting) {
       return;
     }
     setSettingsOpen(false);
@@ -393,6 +438,8 @@ export function TopicsWorkspace({
     setQuickUserId("");
     setQuickHandwrittenName("");
     setQuickError(undefined);
+    setEditing(false);
+    setEditError(undefined);
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
   }
@@ -404,6 +451,10 @@ export function TopicsWorkspace({
     }
     if (creating) {
       closeCreateForm();
+      return;
+    }
+    if (editing && activeTopic) {
+      closeEditForm();
       return;
     }
     if (activeTopic) {
@@ -451,10 +502,63 @@ export function TopicsWorkspace({
     }
 
     setCreating(false);
+    setEditing(false);
+    setEditError(undefined);
     setActiveTopicId(result.roomId);
     setDescriptionExpanded(false);
     setRevision((value) => value + 1);
     void appendDirectRoom(client, agentUserId, result.roomId);
+  }
+
+  async function handleEditSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (editSubmitting || !activeTopic) {
+      return;
+    }
+    const trimmedName = editNameInput.trim();
+    if (!trimmedName) {
+      setEditError("请输入 Topic 名字。");
+      return;
+    }
+    const trimmedDescription = editDescriptionInput.trim();
+    const currentDescription = activeTopic.description ?? "";
+
+    if (trimmedName === activeTopic.name && trimmedDescription === currentDescription) {
+      setEditing(false);
+      setEditError(undefined);
+      return;
+    }
+
+    setEditSubmitting(true);
+    setEditError(undefined);
+
+    const now = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+    const result = await updateTopicDetails(client, {
+      roomId: activeTopic.roomId,
+      currentName: activeTopic.name,
+      currentDescription,
+      nextName: trimmedName,
+      nextDescription: trimmedDescription,
+      now,
+    });
+
+    setEditSubmitting(false);
+    if (result.nameUpdated) {
+      setEditNameInput(trimmedName);
+    }
+    if (result.descriptionUpdated) {
+      setEditDescriptionInput(trimmedDescription);
+    }
+    if (result.nameUpdated || result.descriptionUpdated) {
+      setRevision((value) => value + 1);
+    }
+    if (!result.ok) {
+      setEditError(result.message);
+      return;
+    }
+
+    setEditing(false);
+    setEditError(undefined);
   }
 
   const isNarrow = viewportMode === "narrow";
@@ -844,6 +948,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
+                      disabled={editing && editSubmitting}
                       onClick={goBack}
                     >
                       返回
@@ -855,6 +960,14 @@ export function TopicsWorkspace({
                       <p className="waypoint-topic-header-bot">{activeTopic.botDisplayName}</p>
                     ) : null}
                   </div>
+                  <button
+                    type="button"
+                    className="waypoint-topic-edit-button"
+                    disabled={editing}
+                    onClick={openEditForm}
+                  >
+                    编辑
+                  </button>
                 </div>
                 {activeTopic.description ? (
                   <button
@@ -871,21 +984,62 @@ export function TopicsWorkspace({
                   </button>
                 ) : null}
               </header>
-              <main
-                className="waypoint-timeline-container"
-                style={{ paddingBottom: `${safeInset}px` }}
-              >
-                <div
-                  role="log"
-                  aria-label="对话时间线"
-                  className="waypoint-timeline"
-                  onScroll={collapseDescription}
-                />
-                <div
-                  className="waypoint-composer-safe-area"
-                  data-keyboard-inset={safeInset}
-                />
-              </main>
+              {editing ? (
+                <section aria-label="编辑 Topic" className="waypoint-dialog">
+                  <div
+                    className="waypoint-dialog-body"
+                    style={{ paddingBottom: safeInset > 0 ? `${safeInset}px` : undefined }}
+                  >
+                    <h2>编辑 Topic</h2>
+                    <form onSubmit={handleEditSubmit}>
+                      <label>
+                        Topic 名字
+                        <input
+                          name="edit-topic-name"
+                          value={editNameInput}
+                          onChange={(event) => setEditNameInput(event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        Description（可选）
+                        <textarea
+                          name="edit-topic-description"
+                          value={editDescriptionInput}
+                          onChange={(event) => setEditDescriptionInput(event.target.value)}
+                        />
+                      </label>
+                      <p className="waypoint-field-hint">
+                        留空表示没有额外上下文；填写后会发给这条 Topic 绑定的 Bot，不是私密备忘。
+                      </p>
+                      {editError ? <p role="alert">{editError}</p> : null}
+                      <div className="waypoint-form-actions">
+                        <button type="submit" disabled={editSubmitting}>
+                          {editSubmitting ? "正在保存…" : "保存"}
+                        </button>
+                        <button type="button" disabled={editSubmitting} onClick={closeEditForm}>
+                          取消
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                </section>
+              ) : (
+                <main
+                  className="waypoint-timeline-container"
+                  style={{ paddingBottom: `${safeInset}px` }}
+                >
+                  <div
+                    role="log"
+                    aria-label="对话时间线"
+                    className="waypoint-timeline"
+                    onScroll={collapseDescription}
+                  />
+                  <div
+                    className="waypoint-composer-safe-area"
+                    data-keyboard-inset={safeInset}
+                  />
+                </main>
+              )}
             </div>
           ) : (
             <section aria-label="Topic 引导" className="waypoint-empty-detail">

@@ -5212,3 +5212,669 @@ test("名册写入失败不进重试队列；两台设备同时改名册时直�
   expect(syncedRoster).toHaveTextContent("@bot3:example.com");
   expect(syncedRoster).not.toHaveTextContent("@bot2:example.com");
 });
+
+test("在 Topic 固定顶栏可编辑名字和 Description：提交期间锁定且不做乐观更新，确认后写入房间状态并持久化（不写 account data、列表不显示 Description）", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const namePutDeferred = deferred<TransportResult>();
+  const topicPutDeferred = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      if (input.url.includes("since=")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "旧名字" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "旧上下文" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.name")) {
+      return namePutDeferred.promise;
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.topic")) {
+      return topicPutDeferred.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  const rowBefore = await screen.findByRole("button", { name: "旧名字" });
+  expect(rowBefore).not.toHaveTextContent("旧上下文");
+  await user.click(rowBefore);
+
+  const headerBefore = screen.getByRole("banner");
+  expect(headerBefore).toHaveTextContent("旧名字");
+  expect(headerBefore).toHaveTextContent("旧上下文");
+
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  const editRegion = screen.getByRole("region", { name: "编辑 Topic" });
+  expect(editRegion).toBeVisible();
+
+  const nameField = screen.getByLabelText("Topic 名字");
+  const descField = screen.getByLabelText(/Description/);
+  expect(nameField).toHaveValue("旧名字");
+  expect(descField).toHaveValue("旧上下文");
+
+  await user.clear(nameField);
+  await user.type(nameField, "  新名字  ");
+  await user.clear(descField);
+  await user.type(descField, "  新上下文  ");
+
+  const saveButton = screen.getByRole("button", { name: "保存" });
+  await user.click(saveButton);
+
+  // 提交期间锁定提交按钮，确认前不做乐观更新
+  await waitFor(() => {
+    expect(saveButton).toBeDisabled();
+  });
+  await user.click(saveButton);
+
+  const namePuts = homeserver.requests.filter(
+    (r) => r.method === "PUT" && r.url.includes("/state/m.room.name"),
+  );
+  const topicPuts = homeserver.requests.filter(
+    (r) => r.method === "PUT" && r.url.includes("/state/m.room.topic"),
+  );
+  expect(namePuts).toHaveLength(1);
+  expect(topicPuts).toHaveLength(1);
+  expect(namePuts[0]?.headers.Authorization).toBe("Bearer tok-1");
+  expect(namePuts[0]?.body).toEqual({ name: "新名字" });
+  expect(topicPuts[0]?.body).toEqual({ topic: "新上下文" });
+  expect(homeserver.requests.some((r) => r.url.includes("/account_data/"))).toBe(false);
+
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("旧名字");
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).not.toHaveTextContent("新名字");
+  expect(screen.getByRole("banner")).toHaveTextContent("旧名字");
+  expect(screen.getByRole("banner")).toHaveTextContent("旧上下文");
+
+  await act(async () => {
+    namePutDeferred.resolve({ type: "response", status: 200, body: { event_id: "$ev-name" } });
+    topicPutDeferred.resolve({ type: "response", status: 200, body: { event_id: "$ev-topic" } });
+  });
+
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+
+  const rowAfter = screen.getByRole("button", { name: "新名字" });
+  expect(rowAfter).not.toHaveTextContent("新上下文");
+  const headerAfter = screen.getByRole("banner");
+  expect(headerAfter).toHaveTextContent("新名字");
+  expect(headerAfter).toHaveTextContent("新上下文");
+
+  // 重启后从本地耐久状态保留更新后的名字与 Description
+  first.unmount();
+  renderApp(homeserver);
+  const persistedRow = await screen.findByRole("button", { name: "新名字" });
+  expect(persistedRow).not.toHaveTextContent("新上下文");
+  await user.click(persistedRow);
+  expect(screen.getByRole("banner")).toHaveTextContent("新名字");
+  expect(screen.getByRole("banner")).toHaveTextContent("新上下文");
+});
+
+test("编辑 Topic 只对实际变更的字段发请求：校验空名字、跳过未改动字段、支持清空 Description 为空串", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      if (input.url.includes("since=")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "初始名" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "初始说明" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.name")) {
+      return { type: "response", status: 200, body: { event_id: "$ev-name" } };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.topic")) {
+      return { type: "response", status: 200, body: { event_id: "$ev-topic" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "初始名" }));
+
+  // 1. 清空名字只填空白时在本地拒绝且保留 Description 输入，不发请求
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), "   ");
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.type(screen.getByLabelText(/Description/), "保留的草稿说明");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("请输入 Topic 名字");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("保留的草稿说明");
+  expect(homeserver.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
+
+  // 2. 填回原值（仅带前后空白）提交时不发送任何请求
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), " 初始名 ");
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.type(screen.getByLabelText(/Description/), " 初始说明 ");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  expect(homeserver.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
+
+  // 3. 只清空 Description（填空白）时只发送 m.room.topic: { topic: "" }，不发 m.room.name
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.type(screen.getByLabelText(/Description/), "   ");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+  const putsAfterClear = homeserver.requests.filter((r) => r.method === "PUT");
+  expect(putsAfterClear).toHaveLength(1);
+  expect(putsAfterClear[0]?.url).toContain("/state/m.room.topic");
+  expect(putsAfterClear[0]?.body).toEqual({ topic: "" });
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
+
+  // 4. Description 已为空时仅改名字，即使 Description 留空白也只发 m.room.name
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  expect(screen.getByLabelText(/Description/)).toHaveValue("");
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), "仅改名字");
+  await user.type(screen.getByLabelText(/Description/), "  ");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+  const putsAfterRename = homeserver.requests.filter((r) => r.method === "PUT");
+  expect(putsAfterRename).toHaveLength(2);
+  expect(putsAfterRename[1]?.url).toContain("/state/m.room.name");
+  expect(putsAfterRename[1]?.body).toEqual({ name: "仅改名字" });
+  expect(screen.getByRole("banner")).toHaveTextContent("仅改名字");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
+
+  // 重启后仍保持新名字且 Description 为空
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "仅改名字" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("仅改名字");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
+});
+
+test("编辑 Topic 全部失败时留在表单并保留所有输入，重试可成功", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let shouldFail = true;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "原话题" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "原说明" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/state/m.room.")) {
+      if (shouldFail) {
+        return { type: "response", status: 500, body: { errcode: "M_UNKNOWN", error: "Server busy" } };
+      }
+      return { type: "response", status: 200, body: { event_id: "$ok" } };
+    }
+    throw new Error(input.url);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "原话题" }));
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), "失败保留名");
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.type(screen.getByLabelText(/Description/), "失败保留说明");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Server busy");
+  expect(alert).not.toHaveTextContent("M_UNKNOWN");
+  expect(alert).not.toHaveTextContent("500");
+  expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("失败保留名");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("失败保留说明");
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("原话题");
+  expect(screen.getByRole("banner")).toHaveTextContent("原说明");
+
+  shouldFail = false;
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("失败保留名");
+  expect(screen.getByRole("banner")).toHaveTextContent("失败保留名");
+  expect(screen.getByRole("banner")).toHaveTextContent("失败保留说明");
+});
+
+test("同时修改名字和 Description 且只有一项成功时，成功的立即生效，失败项留在表单，重试只补发失败的那一项", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let failTopic = true;
+  let failName = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      if (input.url.includes("since=")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "最初名字" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "最初说明" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.name")) {
+      if (failName) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { event_id: "$name-ok" } };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.topic")) {
+      if (failTopic) {
+        return { type: "response", status: 500, body: { errcode: "M_UNKNOWN", error: "Topic write failed" } };
+      }
+      return { type: "response", status: 200, body: { event_id: "$topic-ok" } };
+    }
+    throw new Error(input.url);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "最初名字" }));
+
+  // 子场景 A：名字成功、Description 失败
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), "已成新名");
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.type(screen.getByLabelText(/Description/), "未成新说明");
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  const alertA = await screen.findByRole("alert");
+  expect(alertA).toHaveTextContent("Description");
+  expect(alertA).toHaveTextContent("Topic write failed");
+  expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+  expect(screen.getByLabelText(/Description/)).toHaveValue("未成新说明");
+  // 成功项立即在列表与顶栏生效
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner")).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner")).toHaveTextContent("最初说明");
+
+  // 重试：只补发 m.room.topic，不重发 m.room.name
+  const putCountBeforeRetryA = homeserver.requests.filter((r) => r.method === "PUT").length;
+  expect(putCountBeforeRetryA).toBe(2);
+  failTopic = false;
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+  const putsAfterRetryA = homeserver.requests.filter((r) => r.method === "PUT");
+  expect(putsAfterRetryA).toHaveLength(3);
+  expect(putsAfterRetryA[2]?.url).toContain("/state/m.room.topic");
+  expect(putsAfterRetryA[2]?.body).toEqual({ topic: "未成新说明" });
+  expect(screen.getByRole("banner")).toHaveTextContent("未成新说明");
+
+  // 子场景 B：清空 Description 成功、改名失败
+  failName = true;
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  await user.clear(screen.getByLabelText("Topic 名字"));
+  await user.type(screen.getByLabelText("Topic 名字"), "未成新名二");
+  await user.clear(screen.getByLabelText(/Description/));
+  await user.click(screen.getByRole("button", { name: "保存" }));
+
+  const alertB = await screen.findByRole("alert");
+  expect(alertB).toHaveTextContent("Topic 名字");
+  expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("未成新名二");
+  // 清空 Description 已立即生效，名字仍保持上一步的已成新名
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
+  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner")).toHaveTextContent("已成新名");
+
+  // 重试：只补发 m.room.name，不重发 m.room.topic
+  failName = false;
+  await user.click(screen.getByRole("button", { name: "保存" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+  });
+  const putsAfterRetryB = homeserver.requests.filter((r) => r.method === "PUT");
+  expect(putsAfterRetryB).toHaveLength(6);
+  expect(putsAfterRetryB[5]?.url).toContain("/state/m.room.name");
+  expect(putsAfterRetryB[5]?.body).toEqual({ name: "未成新名二" });
+
+  // 重启后两侧更新均已持久化
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "未成新名二" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("未成新名二");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
+});
+
+test("窄视口下编辑 Topic 支持顶栏返回、系统返回逐级退回，提交中拦截返回并重对齐历史深度", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingPut = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "窄屏编辑话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.endsWith("/_matrix/client/v3/rooms/!t1%3Aexample.com/state/m.room.name")) {
+      return pendingPut.promise;
+    }
+    throw new Error(input.url);
+  });
+
+  const { detectPlatform } = await import("../adapters/production");
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      matches: query === "(min-width: 48em)" ? false : true,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  window.history.replaceState({ testRoot: "narrow-edit" }, "");
+  const pushSpy = vi.spyOn(window.history, "pushState");
+
+  try {
+    const view = render(
+      <WaypointApp homeserver={homeserver} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+
+    await user.click(await screen.findByRole("button", { name: "窄屏编辑话题" }));
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+    expect(window.history.state).toEqual({ waypointDepth: 1 });
+
+    // 打开编辑推入第二层历史项
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+    expect(pushSpy).toHaveBeenCalledTimes(2);
+    expect(window.history.state).toEqual({ waypointDepth: 2 });
+
+    // 顶栏返回回到对话页（而非直接回到列表）
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeVisible();
+    expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
+
+    // 再次进入编辑并提交，在提交期间触发系统返回应停留在编辑页并重对齐深度=2
+    await user.click(screen.getByRole("button", { name: "编辑" }));
+    await user.clear(screen.getByLabelText("Topic 名字"));
+    await user.type(screen.getByLabelText("Topic 名字"), "窄屏改名成功");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(screen.getByRole("button", { name: "正在保存…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "返回" })).toBeDisabled();
+
+    await act(async () => {
+      window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
+    expect(screen.getByLabelText("Topic 名字")).toHaveValue("窄屏改名成功");
+    expect(window.history.state).toEqual({ waypointDepth: 2 });
+
+    await act(async () => {
+      pendingPut.resolve({ type: "response", status: 200, body: { event_id: "$ok" } });
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("banner")).toHaveTextContent("窄屏改名成功");
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeVisible();
+
+    // 等待退回对话页的异步 popstate 完成后，再触发系统返回回到 Topic 列表
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await act(async () => {
+      window.history.back();
+    });
+    expect(await screen.findByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+    expect(screen.getByText("窄屏改名成功")).toBeInTheDocument();
+    expect(window.history.state).toEqual({ testRoot: "narrow-edit" });
+
+    view.unmount();
+  } finally {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    pushSpy.mockRestore();
+  }
+});
+
+test("另一台设备同步更新 Topic 名字与 Description（含清空）后列表与详情一致更新，列表行仍不显示 Description", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "设备A旧名" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.name",
+                        event_id: "$sync-name",
+                        state_key: "",
+                        origin_server_ts: 2000,
+                        content: { name: "设备B新名" },
+                      },
+                      {
+                        type: "m.room.topic",
+                        event_id: "$sync-topic",
+                        state_key: "",
+                        origin_server_ts: 2001,
+                        content: { topic: "设备B新上下文" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-3",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    {
+                      type: "m.room.topic",
+                      event_id: "$sync-topic-clear",
+                      state_key: "",
+                      origin_server_ts: 3000,
+                      content: { topic: "" },
+                    },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  // 设备 B 首次同步
+  const deviceB1 = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByRole("button", { name: "设备A旧名" })).toBeInTheDocument();
+  deviceB1.unmount();
+
+  // 另一台设备改名并填写 Description 后同步回来
+  const deviceB2 = renderApp(homeserver);
+  const updatedRow = await screen.findByRole("button", { name: "设备B新名" });
+  expect(updatedRow).not.toHaveTextContent("设备B新上下文");
+  await user.click(updatedRow);
+  const header2 = screen.getByRole("banner");
+  expect(header2).toHaveTextContent("设备B新名");
+  expect(header2).toHaveTextContent("设备B新上下文");
+  deviceB2.unmount();
+
+  // 另一台设备清空 Description 后同步回来
+  renderApp(homeserver);
+  const row3 = await screen.findByRole("button", { name: "设备B新名" });
+  await user.click(row3);
+  const header3 = screen.getByRole("banner");
+  expect(header3).toHaveTextContent("设备B新名");
+  expect(header3.querySelector(".waypoint-topic-description")).toBeNull();
+});

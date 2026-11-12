@@ -1,6 +1,6 @@
 import type { TransportResult } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
-import { formatMatrixActionFailure, isRecord } from "./matrix-errors";
+import { formatMatrixActionFailure, isRecord, transportFailureMessage } from "./matrix-errors";
 import type { RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
@@ -20,6 +20,19 @@ export type TopicSummary = {
 export type CreateTopicResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string };
+
+export type UpdateTopicResult =
+  | {
+      ok: true;
+      nameUpdated: boolean;
+      descriptionUpdated: boolean;
+    }
+  | {
+      ok: false;
+      nameUpdated: boolean;
+      descriptionUpdated: boolean;
+      message: string;
+    };
 
 const directAppendQueues = new WeakMap<MatrixClient, Promise<void>>();
 
@@ -624,4 +637,98 @@ export function appendDirectRoomMapping(
     ? existingForAgent
     : [...existingForAgent, roomId];
   return next;
+}
+
+export async function updateTopicDetails(
+  client: MatrixClient,
+  input: {
+    roomId: string;
+    currentName: string;
+    currentDescription: string;
+    nextName: string;
+    nextDescription: string;
+    now: number;
+  },
+): Promise<UpdateTopicResult> {
+  const nameChanged = input.nextName !== input.currentName;
+  const descriptionChanged = input.nextDescription !== input.currentDescription;
+  if (!nameChanged && !descriptionChanged) {
+    return { ok: true, nameUpdated: false, descriptionUpdated: false };
+  }
+  if (!client.hasToken) {
+    return {
+      ok: false,
+      nameUpdated: false,
+      descriptionUpdated: false,
+      message: "更新 Topic 失败，因为尚未连接。",
+    };
+  }
+
+  async function sendStateField(
+    eventType: "m.room.name" | "m.room.topic",
+    content: Record<string, unknown>,
+    actionLabel: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> {
+    let result: TransportResult;
+    try {
+      result = await client.putRoomStateEvent(input.roomId, eventType, content);
+    } catch {
+      return {
+        ok: false,
+        message: transportFailureMessage(actionLabel, { type: "network" }),
+      };
+    }
+    if (result.type === "response" && result.status >= 200 && result.status < 300) {
+      const eventId =
+        isRecord(result.body) && typeof result.body.event_id === "string" && result.body.event_id
+          ? result.body.event_id
+          : undefined;
+      await client.rememberRoomStateEvents(input.roomId, [
+        {
+          type: eventType,
+          state_key: "",
+          origin_server_ts: input.now,
+          ...(eventId ? { event_id: eventId } : {}),
+          content,
+        },
+      ]);
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(actionLabel, result, {
+        serverErrorReason: "Homeserver 暂时不能完成请求",
+        rejectedReason: "Homeserver 拒绝了请求",
+      }),
+    };
+  }
+
+  const [nameOutcome, descriptionOutcome] = await Promise.all([
+    nameChanged
+      ? sendStateField("m.room.name", { name: input.nextName }, "更新 Topic 名字")
+      : Promise.resolve(undefined),
+    descriptionChanged
+      ? sendStateField("m.room.topic", { topic: input.nextDescription }, "更新 Description")
+      : Promise.resolve(undefined),
+  ]);
+
+  const nameUpdated = nameOutcome?.ok === true;
+  const descriptionUpdated = descriptionOutcome?.ok === true;
+  const errors: string[] = [];
+  if (nameOutcome && !nameOutcome.ok) {
+    errors.push(nameOutcome.message);
+  }
+  if (descriptionOutcome && !descriptionOutcome.ok) {
+    errors.push(descriptionOutcome.message);
+  }
+
+  if (errors.length === 0) {
+    return { ok: true, nameUpdated, descriptionUpdated };
+  }
+  return {
+    ok: false,
+    nameUpdated,
+    descriptionUpdated,
+    message: errors.join(" "),
+  };
 }
