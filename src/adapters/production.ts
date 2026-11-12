@@ -3,6 +3,7 @@ import type { Clock, HomeserverTransport, PlatformAdapter } from "./types";
 export const systemClock: Clock = {
   setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
   clearTimeout: (id) => window.clearTimeout(id),
+  currentTimeMs: () => Date.now(),
 };
 
 export function detectPlatform(): PlatformAdapter {

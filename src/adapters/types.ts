@@ -27,4 +27,5 @@ export interface PlatformAdapter {
 export interface Clock {
   setTimeout(handler: () => void, timeoutMs: number): number;
   clearTimeout(id: number): void;
+  currentTimeMs?: () => number;
 }

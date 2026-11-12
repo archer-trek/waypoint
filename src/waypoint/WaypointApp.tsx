@@ -7,6 +7,8 @@ import type {
   TransportResult,
 } from "../adapters/types";
 import { MatrixClient } from "./matrix-client";
+import { TopicsWorkspace } from "./TopicsWorkspace";
+import { isFullUserId, isRecord, parseBotRoster, serverName } from "./topics";
 
 type Phase =
   | { name: "booting" }
@@ -368,13 +370,7 @@ export function WaypointApp({
   }
 
   if (phase.name === "topics") {
-    return (
-      <main>
-        <p>已连接</p>
-        <h1>Topic</h1>
-        <p>暂无 Topic</p>
-      </main>
-    );
+    return <TopicsWorkspace client={client()} clock={clock} />;
   }
 
   return (
@@ -603,14 +599,6 @@ function classifyIdentifier(raw: string):
   return { kind: "rejected" };
 }
 
-function isFullUserId(user: string): boolean {
-  if (!user.startsWith("@")) {
-    return false;
-  }
-  const colon = user.indexOf(":");
-  return colon > 1 && !user.slice(1, colon).includes("@") && user.slice(colon + 1).trim() !== "" && !/\s/.test(user);
-}
-
 function isLocalpart(user: string): boolean {
   if (user.includes("@") || user.includes(":") || /\s/.test(user)) {
     return false;
@@ -668,28 +656,8 @@ function textField(body: Record<string, unknown>, key: string): string | undefin
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
 function hasValidAgent(content: unknown, ownerUserId: string): boolean {
-  if (!isRecord(content) || !Array.isArray(content.agents)) {
-    return false;
-  }
-  const ownerServer = serverName(ownerUserId);
-  if (!ownerServer) {
-    return false;
-  }
-  return content.agents.some((agent) => {
-    if (!isRecord(agent)) {
-      return false;
-    }
-    const userId = agent.user_id;
-    if (typeof userId !== "string" || !isFullUserId(userId) || userId === ownerUserId) {
-      return false;
-    }
-    return serverName(userId) === ownerServer;
-  });
+  return parseBotRoster(content, ownerUserId).length > 0;
 }
 
 function validateAgentUserId(
@@ -739,15 +707,6 @@ function nextRosterContent(existing: TransportResult, agentUserId: string): Reco
     };
   }
   return { agents: [{ user_id: agentUserId }] };
-}
-
-function serverName(userId: string): string | undefined {
-  const colon = userId.indexOf(":");
-  if (colon < 0) {
-    return undefined;
-  }
-  const server = userId.slice(colon + 1);
-  return server ? server : undefined;
 }
 
 function loginFailure(result: TransportResult): { message: string; clearPassword: boolean } {

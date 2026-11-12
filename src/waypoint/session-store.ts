@@ -1,3 +1,5 @@
+import type { StoredRoomRecord } from "./topics";
+
 export type SessionRecord = {
   baseUrl: string;
   userId: string;
@@ -5,6 +7,7 @@ export type SessionRecord = {
   deviceId?: string;
   syncCursor?: string;
   accountData?: Record<string, unknown>;
+  rooms?: Record<string, StoredRoomRecord>;
 };
 
 const DB_NAME = "waypoint";
@@ -40,6 +43,9 @@ export async function dropCredential(): Promise<void> {
   }
   if (current.accountData && Object.keys(current.accountData).length > 0) {
     next.accountData = current.accountData;
+  }
+  if (current.rooms && Object.keys(current.rooms).length > 0) {
+    next.rooms = current.rooms;
   }
   await saveSession(next);
 }

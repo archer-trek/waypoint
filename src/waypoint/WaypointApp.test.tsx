@@ -14,6 +14,10 @@ class ManualClock implements Clock {
   private timers = new Map<number, { at: number; handler: () => void }>();
   now = 0;
 
+  currentTimeMs(): number {
+    return this.now;
+  }
+
   setTimeout(handler: () => void, timeoutMs: number): number {
     const id = this.nextId++;
     this.timers.set(id, { at: this.now + timeoutMs, handler });
@@ -2099,4 +2103,1101 @@ test("提交前重读名册时账号已停用，丢掉凭证回到密码步且�
   expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
   expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+});
+
+test("空列表上有新建 Topic 入口，单 Bot 时不显示选择，名字为空不发送请求且保留已填 Description", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "代码助理" }] },
+              },
+            ],
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+
+  const newTopicButton = screen.getByRole("button", { name: "新建 Topic" });
+  await user.click(newTopicButton);
+
+  expect(screen.getByLabelText("Topic 名字")).toBeInTheDocument();
+  const descriptionInput = screen.getByLabelText(/Description/);
+  expect(descriptionInput).toBeInTheDocument();
+  expect(screen.getByText(/不是私密备忘/)).toBeInTheDocument();
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+
+  await user.type(descriptionInput, "这是给 Bot 看的上下文");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("请输入 Topic 名字");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("这是给 Bot 看的上下文");
+  expect(homeserver.requests.some((request) => request.url.includes("/createRoom"))).toBe(false);
+});
+
+test("单 Bot 新建不带 Description 的 Topic，发送一次 createRoom、检查加密、追加 m.direct 并立即打开且持久化", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const createDeferred = deferred<TransportResult>();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: { agents: [{ user_id: "@hermes:example.com", name: "工作助理" }] },
+                },
+                {
+                  type: "m.direct",
+                  content: {
+                    "@other:example.com": ["!old:example.com"],
+                    "@hermes:example.com": ["!prev:example.com"],
+                  },
+                },
+              ],
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return createDeferred.promise;
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!topic1%3Aexample.com/state/m.room.encryption")
+    ) {
+      return {
+        type: "response",
+        status: 404,
+        body: { errcode: "M_NOT_FOUND", error: "Event not found." },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "架构讨论");
+
+  const submitButton = screen.getByRole("button", { name: "创建 Topic" });
+  await user.click(submitButton);
+
+  // 提交期间锁定按钮，不做乐观更新
+  await waitFor(() => {
+    expect(submitButton).toBeDisabled();
+  });
+  await user.click(submitButton);
+  expect(homeserver.requests.filter((r) => r.url.endsWith("/createRoom"))).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: /架构讨论/ })).not.toBeInTheDocument();
+
+  const createReq = homeserver.requests.find((r) => r.url.endsWith("/createRoom"));
+  expect(createReq?.headers.Authorization).toBe("Bearer tok-1");
+  expect(createReq?.body).toEqual({
+    preset: "private_chat",
+    is_direct: true,
+    invite: ["@hermes:example.com"],
+    name: "架构讨论",
+    initial_state: [
+      {
+        type: "im.waypoint.topic",
+        state_key: "",
+        content: { v: 1, agent_user_id: "@hermes:example.com" },
+      },
+      {
+        type: "m.room.history_visibility",
+        state_key: "",
+        content: { history_visibility: "shared" },
+      },
+    ],
+  });
+  expect(createReq?.body).not.toHaveProperty("topic");
+
+  await act(async () => {
+    createDeferred.resolve({
+      type: "response",
+      status: 200,
+      body: { room_id: "!topic1:example.com" },
+    });
+  });
+
+  // 立即打开，同时可见 Topic 名字和 Bot 名字（不显示完整用户 ID）
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("架构讨论");
+  expect(header).toHaveTextContent("工作助理");
+  expect(header).not.toHaveTextContent("@hermes:example.com");
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+
+  // m.direct 保留原有条目并追加新房间
+  await waitFor(() => {
+    const directPut = homeserver.requests.find((r) => r.method === "PUT" && r.url.includes("/account_data/m.direct"));
+    expect(directPut).toBeDefined();
+    expect(directPut?.body).toEqual({
+      "@other:example.com": ["!old:example.com"],
+      "@hermes:example.com": ["!prev:example.com", "!topic1:example.com"],
+    });
+  });
+
+  // 重启后仍在列表里
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("架构讨论")).toBeInTheDocument();
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+});
+
+test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带 Description 创建并支持标题栏展开/收起与滚动收起", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let createCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "一号助理" },
+                    { user_id: "@bot2:example.com" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      createCount += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: { room_id: `!topic${createCount}:example.com` },
+      };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  const botSelect = screen.getByLabelText("绑定 Bot") as HTMLSelectElement;
+  expect(botSelect.value).toBe("");
+  // 不显示完整用户 ID
+  expect(botSelect).not.toHaveTextContent("@bot1:example.com");
+  expect(botSelect).not.toHaveTextContent("@bot2:example.com");
+  expect(botSelect).toHaveTextContent("一号助理");
+  expect(botSelect).toHaveTextContent("bot2");
+
+  await user.type(screen.getByLabelText("Topic 名字"), "重复名字");
+  await user.type(screen.getByLabelText(/Description/), "第一段上下文\n第二行内容");
+
+  // 不选 Bot 提交会被本地挡住
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("请选择要绑定的 Bot");
+  expect(homeserver.requests.some((r) => r.url.endsWith("/createRoom"))).toBe(false);
+
+  // 选择 bot2 后创建
+  await user.selectOptions(botSelect, "@bot2:example.com");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("重复名字");
+  expect(header).toHaveTextContent("bot2");
+  expect(header).not.toHaveTextContent("@bot2:example.com");
+
+  const descButton = screen.getByRole("button", { name: /第一段上下文/ });
+  expect(descButton).toHaveAttribute("aria-expanded", "false");
+  await user.click(descButton);
+  expect(descButton).toHaveAttribute("aria-expanded", "true");
+  await user.click(descButton);
+  expect(descButton).toHaveAttribute("aria-expanded", "false");
+
+  // 再展开并在时间线滚动时收起
+  await user.click(descButton);
+  expect(descButton).toHaveAttribute("aria-expanded", "true");
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const { fireEvent } = await import("@testing-library/react");
+  fireEvent.scroll(timeline, { target: { scrollTop: 120 } });
+  expect(descButton).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getByRole("banner")).toBeInTheDocument();
+
+  const firstCreate = homeserver.requests.find((r) => r.url.endsWith("/createRoom"));
+  expect(firstCreate?.body).toMatchObject({
+    name: "重复名字",
+    topic: "第一段上下文\n第二行内容",
+    invite: ["@bot2:example.com"],
+  });
+
+  // 再次新建：此时有最近活动的 Topic（绑定 bot2），默认预选 bot2，且确认前可以改选 bot1，并允许重名
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  const secondSelect = screen.getByLabelText("绑定 Bot") as HTMLSelectElement;
+  expect(secondSelect.value).toBe("@bot2:example.com");
+  await user.selectOptions(secondSelect, "@bot1:example.com");
+  await user.type(screen.getByLabelText("Topic 名字"), "重复名字");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const secondHeader = await screen.findByRole("banner");
+  expect(secondHeader).toHaveTextContent("重复名字");
+  expect(secondHeader).toHaveTextContent("一号助理");
+  expect(screen.queryByRole("button", { name: /第一段上下文/ })).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: /重复名字/ })).toHaveLength(2);
+});
+
+test("预选最近有活动 Topic 绑定的 Bot；若该 Bot 不在名册则不预选", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  // Case 1: 最新活动在 bot2（消息 ts=2000 > Topic1 建房 ts=1500），默认预选 bot2
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "一号" },
+                    { user_id: "@bot2:example.com", name: "二号" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1500, content: { creator: "@alice:example.com" } },
+                    { type: "im.waypoint.topic", state_key: "", origin_server_ts: 1500, content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "新建空话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: { creator: "@alice:example.com" } },
+                    { type: "im.waypoint.topic", state_key: "", origin_server_ts: 1000, content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "活跃话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$m1",
+                      sender: "@bot2:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "回复" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const view = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  view.unmount();
+
+  // Case 2: 最近有活动的 Topic 绑定的 Bot 已不在名册，不预选
+  globalThis.indexedDB = new IDBFactory();
+  const hs2 = new FakeHomeserver();
+  hs2.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "一号" },
+                    { user_id: "@bot2:example.com", name: "二号" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!t-old:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "老话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t-removed:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1200, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@removed:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "已移除Bot的话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    { type: "m.room.message", event_id: "$m2", sender: "@removed:example.com", origin_server_ts: 3000, content: { msgtype: "m.text", body: "hi" } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  renderApp(hs2);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("");
+});
+
+test("建房失败时表单保持打开且保留输入，不留残留房间，可立即重试成功", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let attempts = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@bot1:example.com", name: "一号" },
+                    { user_id: "@bot2:example.com", name: "二号" },
+                  ],
+                },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      attempts += 1;
+      if (attempts === 1) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "Room creation failed" },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: { room_id: "!retry-ok:example.com" },
+      };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "不丢草稿的话题");
+  await user.type(screen.getByLabelText(/Description/), "保留这些描述");
+  await user.selectOptions(screen.getByLabelText("绑定 Bot"), "@bot2:example.com");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Room creation failed");
+  expect(alert).not.toHaveTextContent("M_UNKNOWN");
+  expect(alert).not.toHaveTextContent("500");
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("不丢草稿的话题");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("保留这些描述");
+  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+  expect(homeserver.requests.some((r) => r.url.includes("/leave") || r.url.includes("/forget"))).toBe(false);
+
+  // 直接点击重试成功
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("不丢草稿的话题");
+  expect(header).toHaveTextContent("二号");
+});
+
+test("服务器在建房时强制开启加密，尽力 leave 再 forget，不进列表并在表单报错", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncs += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncs}`,
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "助手" }] },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { room_id: "!forced-enc:example.com" },
+      };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!forced-enc%3Aexample.com/state/m.room.encryption")
+    ) {
+      return {
+        type: "response",
+        status: 200,
+        body: { algorithm: "m.megolm.v1.aes-sha2" },
+      };
+    }
+    if (
+      input.method === "POST" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!forced-enc%3Aexample.com/leave")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (
+      input.method === "POST" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!forced-enc%3Aexample.com/forget")
+    ) {
+      // 即使 forget 失败也要尽力完成流程且不进列表
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "加密被拒的话题");
+  await user.type(screen.getByLabelText(/Description/), "保留描述");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("加密");
+  expect(screen.getByLabelText("Topic 名字")).toHaveValue("加密被拒的话题");
+  expect(screen.getByLabelText(/Description/)).toHaveValue("保留描述");
+  expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+
+  const cleanupUrls = homeserver.requests
+    .filter((r) => r.method === "POST" && (r.url.endsWith("/leave") || r.url.endsWith("/forget")))
+    .map((r) => r.url);
+  expect(cleanupUrls).toEqual([
+    "https://matrix.example.com/_matrix/client/v3/rooms/!forced-enc%3Aexample.com/leave",
+    "https://matrix.example.com/_matrix/client/v3/rooms/!forced-enc%3Aexample.com/forget",
+  ]);
+  expect(homeserver.requests.some((r) => r.url.includes("/account_data/m.direct"))).toBe(false);
+
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.queryByText("加密被拒的话题")).not.toBeInTheDocument();
+});
+
+test("m.direct 追加失败时不报错也不回滚已建成的 Topic", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "助手" }] },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return { type: "response", status: 200, body: { room_id: "!ok-room:example.com" } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 500, body: { errcode: "M_UNKNOWN", error: "Server error" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "照常打开的话题");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("照常打开的话题");
+  expect(header).toHaveTextContent("助手");
+
+  await waitFor(() => {
+    expect(homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/m.direct"))).toBe(true);
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("banner")).toHaveTextContent("照常打开的话题");
+
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("照常打开的话题")).toBeInTheDocument();
+});
+
+test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，按手写名、显示名、localpart 解析 Bot 名字且启动不自动打开", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncs += 1;
+      if (syncs === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [
+                      { user_id: "@bot1:example.com", name: "手写一号" },
+                      { user_id: "@bot2:example.com" },
+                      { user_id: "@bot3:example.com" },
+                    ],
+                  },
+                },
+                {
+                  type: "m.direct",
+                  content: {
+                    "@bot1:example.com": ["!legacy-dm:example.com"],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题一" } },
+                      { type: "m.room.member", state_key: "@bot1:example.com", content: { membership: "join", displayname: "服务器显示名不应覆盖手写" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题二" } },
+                      { type: "m.room.topic", state_key: "", content: { topic: "话题二说明" } },
+                      { type: "m.room.member", state_key: "@bot2:example.com", content: { membership: "join", displayname: "小赫显示名" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t3:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot3:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题三" } },
+                      { type: "m.room.member", state_key: "@bot3:example.com", content: { membership: "invite" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!legacy-dm:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.name", state_key: "", content: { name: "历史旧私聊" } },
+                      { type: "m.room.member", state_key: "@bot1:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!legacy-encrypted:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.name", state_key: "", content: { name: "旧加密房间" } },
+                      { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+              leave: {
+                "!left-topic:example.com": {
+                  state: {
+                    events: [
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "已离开房间" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+              invite: {
+                "!invited-topic:example.com": {
+                  state: {
+                    events: [
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "仅被邀请房间" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            leave: {
+              "!t3:example.com": {},
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  expect(await screen.findByText("话题一")).toBeInTheDocument();
+  expect(screen.getByText("话题二")).toBeInTheDocument();
+  expect(screen.getByText("话题三")).toBeInTheDocument();
+  // 启动后不自动打开第一条 Topic，且列表行不放 Description
+  expect(screen.queryByRole("banner")).not.toBeInTheDocument();
+  expect(screen.queryByText("话题二说明")).not.toBeInTheDocument();
+
+  // 不认领历史房间、旧私聊、旧加密房间、已离开或仅邀请的房间
+  expect(screen.queryByText("历史旧私聊")).not.toBeInTheDocument();
+  expect(screen.queryByText("旧加密房间")).not.toBeInTheDocument();
+  expect(screen.queryByText("已离开房间")).not.toBeInTheDocument();
+  expect(screen.queryByText("仅被邀请房间")).not.toBeInTheDocument();
+
+  // 不显示任何完整用户 ID
+  expect(document.body).not.toHaveTextContent("@bot1:example.com");
+  expect(document.body).not.toHaveTextContent("@bot2:example.com");
+  expect(document.body).not.toHaveTextContent("@bot3:example.com");
+
+  // 逐条打开并检查 Bot 名字解析顺序
+  await user.click(screen.getByRole("button", { name: /话题一/ }));
+  expect(screen.getByRole("banner")).toHaveTextContent("手写一号");
+  expect(screen.getByRole("banner")).not.toHaveTextContent("服务器显示名不应覆盖手写");
+
+  await user.click(screen.getByRole("button", { name: /话题二/ }));
+  expect(screen.getByRole("banner")).toHaveTextContent("小赫显示名");
+  expect(screen.getByRole("banner")).toHaveTextContent("话题二说明");
+
+  await user.click(screen.getByRole("button", { name: /话题三/ }));
+  expect(screen.getByRole("banner")).toHaveTextContent("bot3");
+  expect(screen.getByRole("banner")).not.toHaveTextContent("@bot3:example.com");
+
+  // 重启后收到 rooms.leave 时，离开的房间从列表移除
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("话题一")).toBeInTheDocument();
+  expect(screen.queryByText("话题三")).not.toBeInTheDocument();
+});
+
+test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时不显示选择与列表副标题，但打开后标题栏仍同时显示 Topic 与 Bot 名字且空 Description 不占元素", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [
+                    { user_id: "@alice:example.com", name: "自己" },
+                    { user_id: "@foreign:other.example", name: "跨服" },
+                    { user_id: "@solo:example.com", name: "唯一助理" },
+                    { user_id: "@solo:example.com", name: "重复" },
+                  ],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!existing:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@solo:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "已有话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return { type: "response", status: 200, body: { room_id: "!created:example.com" } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/state/m.room.encryption")) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/account_data/m.direct")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(input.url);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  const existingRow = await screen.findByRole("button", { name: "已有话题" });
+  expect(existingRow).not.toHaveTextContent("唯一助理");
+
+  await user.click(existingRow);
+  const header1 = screen.getByRole("banner");
+  expect(header1).toHaveTextContent("已有话题");
+  expect(header1).toHaveTextContent("唯一助理");
+  expect(header1.querySelector(".waypoint-topic-description")).toBeNull();
+
+  // 打开新建表单后取消，回到原打开的 Topic
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.getByRole("banner")).toHaveTextContent("已有话题");
+
+  // 仅填空白 Description 时不发送 topic 字段且标题栏不渲染 Description
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "无上下文话题");
+  await user.type(screen.getByLabelText(/Description/), "   ");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const header2 = await screen.findByRole("banner");
+  expect(header2).toHaveTextContent("无上下文话题");
+  expect(header2).toHaveTextContent("唯一助理");
+  expect(header2.querySelector(".waypoint-topic-description")).toBeNull();
+
+  const createReq = homeserver.requests.find((r) => r.url.endsWith("/createRoom"));
+  expect(createReq?.body).not.toHaveProperty("topic");
+});
+
+test("createRoom 响应本身带加密标记时立即尽力 leave 并 forget，不进列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: { agents: [{ user_id: "@bot:example.com", name: "助手" }] },
+              },
+            ],
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          room_id: "!enc-inline:example.com",
+          state: [{ type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } }],
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/leave")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.endsWith("/forget")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+  await user.type(screen.getByLabelText("Topic 名字"), "响应带加密");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("加密");
+  expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
+  expect(homeserver.requests.filter((r) => r.url.endsWith("/leave") || r.url.endsWith("/forget")).map((r) => r.url)).toEqual([
+    "https://matrix.example.com/_matrix/client/v3/rooms/!enc-inline%3Aexample.com/leave",
+    "https://matrix.example.com/_matrix/client/v3/rooms/!enc-inline%3Aexample.com/forget",
+  ]);
+});
+
+test("完成首次登记后进入工作区可看到已同步的 Topic 并立即新建 Topic；进列表前放弃会清掉未进列表前同步到的房间", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let phaseStep: "first-login" | "second-login" = "first-login";
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          user_id: "@alice:example.com",
+          access_token: phaseStep === "first-login" ? "tok-1" : "tok-2",
+          device_id: phaseStep === "first-login" ? "DEV1" : "DEV2",
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      if (phaseStep === "first-login") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            rooms: {
+              join: {
+                "!prelist:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "m.room.name", state_key: "", content: { name: "旧会话残留 Topic" } },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!synced:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "m.room.name", state_key: "", content: { name: "同步到的 Topic" } },
+                    {
+                      type: "im.waypoint.topic",
+                      state_key: "",
+                      content: { v: 1, agent_user_id: "@bot:example.com" },
+                    },
+                    { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                    { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/createRoom")) {
+      return { type: "response", status: 200, body: { room_id: "!created:example.com" } };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/rooms/!created%3Aexample.com/state/m.room.encryption")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/m.direct")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  renderApp(homeserver);
+  await login(user);
+  await screen.findByLabelText("Matrix 用户 ID");
+  await user.click(screen.getByRole("button", { name: "放弃" }));
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+
+  phaseStep = "second-login";
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "用密码登录" }));
+
+  const regInput = await screen.findByLabelText("Matrix 用户 ID");
+  await user.type(regInput, "@bot:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  expect(await screen.findByText("同步到的 Topic")).toBeInTheDocument();
+  expect(screen.queryByText("旧会话残留 Topic")).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Topic 名字"), "登记后首条 Topic");
+  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+
+  const header = await screen.findByRole("banner");
+  expect(header).toHaveTextContent("登记后首条 Topic");
+  expect(header).toHaveTextContent("bot");
 });
