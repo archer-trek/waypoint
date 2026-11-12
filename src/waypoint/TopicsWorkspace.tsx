@@ -213,11 +213,15 @@ export function TopicsWorkspace({
       )
     : [];
   const timelineContentKey = activeTimelineItems
-    .map((item) =>
-      item.kind === "day-separator"
-        ? `s:${item.key}`
-        : `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${item.body}`,
-    )
+    .map((item) => {
+      if (item.kind === "day-separator") {
+        return `s:${item.key}`;
+      }
+      const promptSig = item.prompt
+        ? `${item.prompt.kind}:${item.prompt.answered ? 1 : 0}:${item.prompt.superseded ? 1 : 0}:${item.prompt.queuedKey ?? ""}:${item.prompt.options.map((o) => `${o.key}${o.redacted ? "!" : ""}`).join(",")}`
+        : "";
+      return `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${promptSig}:${item.body}`;
+    })
     .join("\0");
 
   useLayoutEffect(() => {
@@ -1743,6 +1747,21 @@ export function TopicsWorkspace({
     }
   }
 
+  async function handleSelectPromptOption(roomId: string, targetEventId: string, key: string) {
+    if (reauthRequiredRef.current || exiting) {
+      return;
+    }
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
+      return;
+    }
+    await client.enqueueOrReplacePromptReaction(roomId, targetEventId, key);
+    if (!mountedRef.current) {
+      return;
+    }
+    setRevision((value) => value + 1);
+    retryQueue.wakeEvents();
+  }
+
   async function handleDiscardFailed(roomId: string, localId: string) {
     if (resendingLocalIdsRef.current.has(localId) || discardingLocalIdsRef.current.has(localId)) {
       return;
@@ -2826,6 +2845,52 @@ export function TopicsWorkspace({
                                     {key}
                                   </span>
                                 ))}
+                              </div>
+                            ) : null}
+                            {item.prompt && item.eventId ? (
+                              <div
+                                className="waypoint-message-prompt"
+                                role="group"
+                                aria-label={item.prompt.kind === "approval" ? "审批操作" : "选择操作"}
+                              >
+                                {item.prompt.options.map((option) => {
+                                  const isSelected = item.prompt!.selectedKey === option.key;
+                                  const isDisabled =
+                                    Boolean(option.redacted) ||
+                                    item.prompt!.answered ||
+                                    item.prompt!.superseded ||
+                                    item.prompt!.queuedKey === option.key ||
+                                    activeTopic.unavailable ||
+                                    reauthRequired;
+                                  return (
+                                    <button
+                                      key={option.key}
+                                      type="button"
+                                      className={`waypoint-prompt-button${isSelected ? " selected" : ""}`}
+                                      aria-pressed={isSelected}
+                                      disabled={isDisabled}
+                                      onClick={() => {
+                                        void handleSelectPromptOption(
+                                          activeTopic.roomId,
+                                          item.eventId!,
+                                          option.key,
+                                        );
+                                      }}
+                                    >
+                                      <span className="waypoint-prompt-button-label">
+                                        {option.label}
+                                      </span>
+                                      {option.scope ? (
+                                        <>
+                                          {" "}
+                                          <span className="waypoint-prompt-button-scope">
+                                            {option.scope}
+                                          </span>
+                                        </>
+                                      ) : null}
+                                    </button>
+                                  );
+                                })}
                               </div>
                             ) : null}
                             {item.responding ? (

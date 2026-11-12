@@ -18734,3 +18734,865 @@ test("生产适配器 createFetchTransport 与 detectPlatform 正确透传并中
     }
   }
 });
+
+test("审批按钮只认 Agent 预种 reaction 且不猜正文，明确展示会话内与跨 Topic 范围，点选后代发并藏起预种与代发反应 (#57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const sentReactions: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!ap-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "审批话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$prose-only",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "请选择：\n1. 仅此次\n2. 会话内允许\n3. 始终允许\n4. 拒绝",
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-full",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "确认执行 rm -rf /tmp/demo ?" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$seed-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-full", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$seed-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-full", key: "🌀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$seed-3",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3030,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-full", key: "♾️" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$seed-4",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3040,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-full", key: "❌" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-partial",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4000,
+                        content: { msgtype: "m.text", body: "只种了两档的确认" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$pseed-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-partial", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$pseed-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-partial", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!ap-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.reaction",
+                        event_id: "$owner-rx-echo",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 5000,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-partial", key: "✅" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.reaction/")) {
+      sentReactions.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: { event_id: "$owner-rx-echo" } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "审批话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const proseRow = timeline.querySelector('[data-event-id="$prose-only"]') as HTMLElement;
+  const fullRow = timeline.querySelector('[data-event-id="$ap-full"]') as HTMLElement;
+  const partialRow = timeline.querySelector('[data-event-id="$ap-partial"]') as HTMLElement;
+
+  // 正文写着 1/2/3/4 也不猜按钮
+  expect(within(proseRow).queryAllByRole("button")).toHaveLength(0);
+
+  // $ap-full 是旧审批（因为 $ap-partial 是更新的同一种审批提示），$ap-partial 只有 ✅ 和 ❌
+  expect(within(fullRow).getAllByRole("button")).toHaveLength(4);
+  expect(within(fullRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+  const sessionBtn = within(fullRow).getByRole("button", { name: /会话内允许/ });
+  expect(sessionBtn).toHaveTextContent(/当前会话/);
+  const alwaysBtn = within(fullRow).getByRole("button", { name: /始终允许/ });
+  expect(alwaysBtn).toHaveTextContent(/该 Bot 的其他 Topic/);
+  expect(within(fullRow).getByRole("button", { name: /拒绝/ })).toBeDisabled();
+
+  // $ap-partial 只渲染实际种下的两档，且预种表情不作为角标显示
+  expect(within(partialRow).getAllByRole("button")).toHaveLength(2);
+  expect(within(partialRow).queryByRole("button", { name: /会话内允许/ })).not.toBeInTheDocument();
+  expect(within(partialRow).queryByRole("button", { name: /始终允许/ })).not.toBeInTheDocument();
+  expect(within(partialRow).queryByText("✅")).not.toBeInTheDocument();
+  expect(within(partialRow).queryByText("❌")).not.toBeInTheDocument();
+
+  const onceBtn = within(partialRow).getByRole("button", { name: /仅此次/ });
+  const denyBtn = within(partialRow).getByRole("button", { name: /拒绝/ });
+  expect(onceBtn).toBeEnabled();
+  expect(denyBtn).toBeEnabled();
+
+  // 点击「仅此次」，代发 ✅ 并藏起预种与代发表情，按钮停用
+  await user.click(onceBtn);
+  await waitFor(() => expect(sentReactions).toHaveLength(1));
+  expect(sentReactions[0].url).toContain("/rooms/!ap-1%3Aexample.com/send/m.reaction/");
+  expect(sentReactions[0].body).toEqual({
+    "m.relates_to": {
+      rel_type: "m.annotation",
+      event_id: "$ap-partial",
+      key: "✅",
+    },
+  });
+  await waitFor(() => {
+    expect(within(partialRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+    expect(within(partialRow).getByRole("button", { name: /拒绝/ })).toBeDisabled();
+  });
+  expect(within(partialRow).queryByText("✅")).not.toBeInTheDocument();
+
+  // 同步回声到达后依然隐藏且按钮停用
+  await act(async () => { clock.advance(1000); });
+  expect(within(partialRow).queryByText("✅")).not.toBeInTheDocument();
+  expect(within(partialRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+});
+
+test("选择器按预种顺序渲染 1 到 10 与 A/B 按钮，点选代发原 reaction 并藏起预种与代发表情 (#57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const sentReactions: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!sel-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "选择器话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$sel-num",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "选一个方案" },
+                      },
+                      ...["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"].map((key, idx) => ({
+                        type: "m.reaction",
+                        event_id: `$snum-${idx}`,
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2010 + idx,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$sel-num", key } },
+                      })),
+                      {
+                        type: "m.room.message",
+                        event_id: "$sel-ab",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "逆序 A/B 选择" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$sab-b",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$sel-ab", key: "🅱️" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$sab-a",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$sel-ab", key: "🅰️" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.reaction/")) {
+      sentReactions.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: { event_id: `$rx-${sentReactions.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "选择器话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const numRow = timeline.querySelector('[data-event-id="$sel-num"]') as HTMLElement;
+  const abRow = timeline.querySelector('[data-event-id="$sel-ab"]') as HTMLElement;
+
+  // $sel-num 是旧选择器（被 $sel-ab 顶掉），仍保留 1..10 顺序且停用
+  const numButtons = within(numRow).getAllByRole("button");
+  expect(numButtons.map((b) => b.textContent)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
+  for (const btn of numButtons) {
+    expect(btn).toBeDisabled();
+  }
+  expect(within(numRow).queryByText("1️⃣")).not.toBeInTheDocument();
+  expect(within(numRow).queryByText("🔟")).not.toBeInTheDocument();
+
+  // $sel-ab 按种下顺序显示 B, A
+  const abButtons = within(abRow).getAllByRole("button");
+  expect(abButtons.map((b) => b.textContent)).toEqual(["B", "A"]);
+  expect(abButtons[0]).toBeEnabled();
+  expect(abButtons[1]).toBeEnabled();
+  expect(within(abRow).queryByText("🅱️")).not.toBeInTheDocument();
+  expect(within(abRow).queryByText("🅰️")).not.toBeInTheDocument();
+
+  await user.click(abButtons[0]);
+  await waitFor(() => expect(sentReactions).toHaveLength(1));
+  expect(sentReactions[0].body).toEqual({
+    "m.relates_to": {
+      rel_type: "m.annotation",
+      event_id: "$sel-ab",
+      key: "🅱️",
+    },
+  });
+  await waitFor(() => {
+    expect(within(abRow).getByRole("button", { name: "B" })).toBeDisabled();
+    expect(within(abRow).getByRole("button", { name: "A" })).toBeDisabled();
+  });
+  expect(within(abRow).queryByText("🅱️")).not.toBeInTheDocument();
+});
+
+test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、且 👀 与原消息 ✅ ❌ 保留原样不变成按钮 (#57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!stale-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "停用条件话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$owner-task",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "跑一下构建" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$owner-eyes",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$owner-task", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$owner-done-ok",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$owner-task", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$owner-done-err",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2030,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$owner-task", key: "❌" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "需要审批一" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap1-ok",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-1", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap1-no",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-1", key: "❌" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$sel-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4000,
+                        content: { msgtype: "m.text", body: "请选其一" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$sel1-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$sel-1", key: "1️⃣" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$sel1-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 4020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$sel-1", key: "2️⃣" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        // 撤回 $sel-1 的全部预种 reaction（同时测试撤回其中一条或全部）
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!stale-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-sel1-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 5000,
+                        redacts: "$sel1-1",
+                        content: {},
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-sel1-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 5010,
+                        redacts: "$sel1-2",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        // 新的审批到达，旧审批 $ap-1 才停用
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!stale-1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 6000,
+                        content: { msgtype: "m.text", body: "新的审批二" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap2-ok",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 6010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-2", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap2-no",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 6020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-2", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "停用条件话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const ownerTaskRow = timeline.querySelector('[data-event-id="$owner-task"]') as HTMLElement;
+  const ap1Row = timeline.querySelector('[data-event-id="$ap-1"]') as HTMLElement;
+  const sel1Row = timeline.querySelector('[data-event-id="$sel-1"]') as HTMLElement;
+
+  // Owner 消息上的 👀、✅、❌ 保留原样，绝不变成按钮
+  expect(ownerTaskRow).toHaveTextContent("正在回应");
+  expect(within(ownerTaskRow).getByText("✅")).toBeInTheDocument();
+  expect(within(ownerTaskRow).getByText("❌")).toBeInTheDocument();
+  expect(within(ownerTaskRow).queryAllByRole("button")).toHaveLength(0);
+
+  // 即使有了更新的 selector ($sel-1)，不同种类的 approval ($ap-1) 仍然可用
+  expect(within(ap1Row).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+  expect(within(sel1Row).getByRole("button", { name: "1" })).toBeEnabled();
+  expect(within(sel1Row).getByRole("button", { name: "2" })).toBeEnabled();
+
+  // 推进时间 1 小时（假设只有空 sync）：不猜超时，按钮依然可用
+  for (let i = 0; i < 1; i += 1) {
+    // 下一轮 sync 2 撤回 $sel-1 的预种表情
+    await act(async () => { first.clock.advance(1000); });
+  }
+  await waitFor(() => {
+    expect(within(sel1Row).getByRole("button", { name: "1" })).toBeDisabled();
+    expect(within(sel1Row).getByRole("button", { name: "2" })).toBeDisabled();
+  });
+  // $ap-1 仍可用
+  expect(within(ap1Row).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+
+  // sync 3 带来更新的审批 $ap-2 -> $ap-1 停用，$ap-2 可用
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => {
+    expect(within(ap1Row).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+    expect(within(ap1Row).getByRole("button", { name: /拒绝/ })).toBeDisabled();
+  });
+  const ap2Row = timeline.querySelector('[data-event-id="$ap-2"]') as HTMLElement;
+  expect(within(ap2Row).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+
+  // 长时间没有新事件也不猜超时（推进 3600s）
+  await act(async () => { first.clock.advance(3600_000); });
+  expect(within(ap2Row).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+
+  // 重启恢复后，被撤回的 $sel-1 按钮依然保持停用，且 $ap-2 依然可用
+  first.unmount();
+  const second = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "停用条件话题" }));
+  const timeline2 = screen.getByRole("log", { name: "对话时间线" });
+  const sel1Row2 = timeline2.querySelector('[data-event-id="$sel-1"]') as HTMLElement;
+  const ap2Row2 = timeline2.querySelector('[data-event-id="$ap-2"]') as HTMLElement;
+  expect(within(sel1Row2).getByRole("button", { name: "1" })).toBeDisabled();
+  expect(within(sel1Row2).getByRole("button", { name: "2" })).toBeDisabled();
+  expect(within(ap2Row2).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+  second.unmount();
+});
+
+test("代发进队列未成功时可点另一档原地替换不双发，永久 4xx 失败不生成失败气泡只恢复按钮且列表无转圈叹号 (#57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let reactionSendMode: "offline" | "reject-403" | "ok" = "offline";
+  const attemptedReactions: Array<{ txnId: string; key: string }> = [];
+  const acceptedReactions: Array<{ txnId: string; key: string }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!rq-1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "队列替换与恢复话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-q",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "是否允许写入配置？" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$q-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-q", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$q-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-q", key: "🌀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$q-3",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2030,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-q", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.reaction/")) {
+      const txnId = input.url.split("/").pop() ?? "";
+      const rel = (input.body as Record<string, Record<string, string>>)["m.relates_to"];
+      const key = rel.key;
+      attemptedReactions.push({ txnId, key });
+      if (reactionSendMode === "offline") {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (reactionSendMode === "reject-403") {
+        return { type: "response", status: 403, body: { errcode: "M_FORBIDDEN", error: "Forbidden" } };
+      }
+      acceptedReactions.push({ txnId, key });
+      return { type: "response", status: 200, body: { event_id: `$rx-${acceptedReactions.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  const topicRow = await screen.findByRole("button", { name: "队列替换与恢复话题" });
+  await user.click(topicRow);
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const promptRow = timeline.querySelector('[data-event-id="$ap-q"]') as HTMLElement;
+
+  // 1. 断网状态下点「仅此次」，进入重试队列并触发一次失败后退避
+  await user.click(within(promptRow).getByRole("button", { name: /仅此次/ }));
+  await waitFor(() => expect(attemptedReactions).toHaveLength(1));
+  expect(attemptedReactions[0].key).toBe("✅");
+
+  // 列表行绝不出现未确认转圈或失败红叹号
+  expect(within(topicRow).queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(within(topicRow).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+
+  // 当前已排队的「仅此次」呈已选/停用，但其他两档仍可点击以替换队列
+  expect(within(promptRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+  expect(within(promptRow).getByRole("button", { name: /会话内允许/ })).toBeEnabled();
+  const denyBtn = within(promptRow).getByRole("button", { name: /拒绝/ });
+  expect(denyBtn).toBeEnabled();
+
+  // 2. 仍在退避队列里时，Owner 改点「拒绝」并把下次请求设为 403 永久拒绝
+  reactionSendMode = "reject-403";
+  await user.click(denyBtn);
+  await waitFor(() => expect(attemptedReactions).toHaveLength(2));
+  expect(attemptedReactions[1].key).toBe("❌");
+  expect(attemptedReactions[1].txnId).not.toBe(attemptedReactions[0].txnId);
+
+  // 403 永久失败：不生成失败消息气泡、列表无红叹号、三个按钮全部恢复可点
+  await waitFor(() => {
+    expect(within(promptRow).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+    expect(within(promptRow).getByRole("button", { name: /会话内允许/ })).toBeEnabled();
+    expect(within(promptRow).getByRole("button", { name: /拒绝/ })).toBeEnabled();
+  });
+  expect(within(timeline).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(within(topicRow).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+
+  // 3. 再次断网点「仅此次」-> 在队列中改点「会话内允许」-> 恢复网络 -> 只把「会话内允许」发出去，绝不双发
+  reactionSendMode = "offline";
+  await user.click(within(promptRow).getByRole("button", { name: /仅此次/ }));
+  await waitFor(() => expect(attemptedReactions).toHaveLength(3));
+  expect(attemptedReactions[2].key).toBe("✅");
+
+  await user.click(within(promptRow).getByRole("button", { name: /会话内允许/ }));
+  await waitFor(() => expect(attemptedReactions).toHaveLength(4));
+  expect(attemptedReactions[3].key).toBe("🌀");
+
+  reactionSendMode = "ok";
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(acceptedReactions).toHaveLength(1));
+  expect(acceptedReactions[0].key).toBe("🌀");
+  expect(acceptedReactions[0].txnId).toBe(attemptedReactions[3].txnId);
+
+  // 确认后按钮停用且无角标
+  await waitFor(() => {
+    expect(within(promptRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+    expect(within(promptRow).getByRole("button", { name: /会话内允许/ })).toBeDisabled();
+    expect(within(promptRow).getByRole("button", { name: /拒绝/ })).toBeDisabled();
+  });
+  expect(within(promptRow).queryByText("🌀")).not.toBeInTheDocument();
+});
+
+test("单档预种撤回仅停用该档、非提示 reaction 仍可见、且 Topic 不可用时队列中 reaction 静默清理无失败气泡 (#57)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!unavail-rx:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "局部撤回与不可用话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-mix",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "含普通表情与局部撤回的审批" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$mix-thumb",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2005,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-mix", key: "👍" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$mix-once",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2010,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-mix", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$mix-always",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2020,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-mix", key: "♾️" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$mix-deny",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2030,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-mix", key: "❌" } },
+                      },
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-mix-always",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2040,
+                        redacts: "$mix-always",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!unavail-rx:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.reaction/")) {
+      return { type: "failure", failure: { type: "network" } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  const topicRow = await screen.findByRole("button", { name: "局部撤回与不可用话题" });
+  const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
+  await user.click(topicRow);
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const promptRow = timeline.querySelector('[data-event-id="$ap-mix"]') as HTMLElement;
+
+  // 普通表情 👍 仍留在气泡下，预种表情不显示为角标
+  expect(within(promptRow).getByText("👍")).toBeInTheDocument();
+  expect(within(promptRow).queryByText("✅")).not.toBeInTheDocument();
+
+  // 单档 ♾️ 被撤回 -> 仅「始终允许」停用，其余两档仍可点击
+  expect(within(promptRow).getByRole("button", { name: /始终允许/ })).toBeDisabled();
+  expect(within(promptRow).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+  expect(within(promptRow).getByRole("button", { name: /拒绝/ })).toBeEnabled();
+
+  // 点「仅此次」进入退避队列，随后 sync 2 使 Topic 变为不可用 -> 队列内 reaction 静默失败清理，无失败气泡与红叹号
+  await user.click(within(promptRow).getByRole("button", { name: /仅此次/ }));
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(screen.getByRole("status", { name: "Topic 不可用" })).toBeInTheDocument();
+  });
+  await act(async () => { clock.advance(1000); });
+
+  expect(within(promptRow).getByRole("button", { name: /仅此次/ })).toBeDisabled();
+  expect(within(promptRow).getByRole("button", { name: /拒绝/ })).toBeDisabled();
+  expect(within(timeline).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(within(sidebar).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+});

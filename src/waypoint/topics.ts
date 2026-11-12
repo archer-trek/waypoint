@@ -1102,6 +1102,22 @@ export async function updateTopicDetails(
   };
 }
 
+export type TimelinePromptOption = {
+  key: string;
+  label: string;
+  scope?: string;
+  redacted?: boolean;
+};
+
+export type TimelinePrompt = {
+  kind: "approval" | "selector";
+  options: TimelinePromptOption[];
+  queuedKey?: string;
+  selectedKey?: string;
+  answered: boolean;
+  superseded: boolean;
+};
+
 export type TimelineItem =
   | {
       kind: "day-separator";
@@ -1118,6 +1134,7 @@ export type TimelineItem =
       localId?: string;
       responding?: boolean;
       reactions?: string[];
+      prompt?: TimelinePrompt;
     };
 
 function stripStreamingCursor(body: string): string {
@@ -1216,11 +1233,20 @@ export function deriveRoomTimelineItems(
     const redactedIds = collectRedactedEventIds(room.timelineEvents);
     const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
     const eyesTargetIds = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId);
+    const { promptsByEventId, hiddenReactionKeysByEventId } = collectMessagePrompts(
+      room.timelineEvents,
+      redactedIds,
+      latestEdits,
+      pendingEvents,
+      ownerUserId,
+      agentUserId,
+    );
     const reactionsByEventId = collectMessageReactions(
       room.timelineEvents,
       redactedIds,
       ownerUserId,
       agentUserId,
+      hiddenReactionKeysByEventId,
     );
     room.timelineEvents.forEach((event, index) => {
       if (
@@ -1292,6 +1318,7 @@ export function deriveRoomTimelineItems(
         lastDayKey = currentDay;
       }
       const reactions = rawEventId ? reactionsByEventId.get(rawEventId) : undefined;
+      const prompt = rawEventId ? promptsByEventId.get(rawEventId) : undefined;
       items.push({
         kind: "message",
         key: eventId,
@@ -1301,6 +1328,7 @@ export function deriveRoomTimelineItems(
         status: "confirmed",
         ...(rawEventId && eyesTargetIds.has(rawEventId) ? { responding: true } : {}),
         ...(reactions && reactions.length > 0 ? { reactions } : {}),
+        ...(prompt ? { prompt } : {}),
       });
     });
   }
@@ -1416,11 +1444,249 @@ function collectActiveEyesTargetIds(
   return targets;
 }
 
+const APPROVAL_OPTIONS: ReadonlyArray<{
+  canonicalKey: string;
+  label: string;
+  scope?: string;
+}> = [
+  { canonicalKey: "✅", label: "仅此次" },
+  { canonicalKey: "🌀", label: "会话内允许", scope: "仅当前会话" },
+  { canonicalKey: "♾", label: "始终允许", scope: "含该 Bot 的其他 Topic" },
+  { canonicalKey: "❌", label: "拒绝" },
+];
+
+const APPROVAL_BY_KEY = new Map(APPROVAL_OPTIONS.map((opt) => [opt.canonicalKey, opt]));
+
+const SELECTOR_LABELS: ReadonlyMap<string, string> = new Map([
+  ["1\u20E3", "1"],
+  ["2\u20E3", "2"],
+  ["3\u20E3", "3"],
+  ["4\u20E3", "4"],
+  ["5\u20E3", "5"],
+  ["6\u20E3", "6"],
+  ["7\u20E3", "7"],
+  ["8\u20E3", "8"],
+  ["9\u20E3", "9"],
+  ["🔟", "10"],
+  ["🅰", "A"],
+  ["🅱", "B"],
+]);
+
+export function normalizePromptReactionKey(key: string): string {
+  return key.replace(/\uFE0F/g, "");
+}
+
+export function isPromptReactionKey(key: string): boolean {
+  const canonical = normalizePromptReactionKey(key);
+  return APPROVAL_BY_KEY.has(canonical) || SELECTOR_LABELS.has(canonical);
+}
+
+function collectMessagePrompts(
+  events: RawMatrixEvent[],
+  redactedIds: Set<string>,
+  latestEdits: Map<string, { body: string; ts: number | undefined }>,
+  pendingEvents: PendingRoomEvent[],
+  ownerUserId: string,
+  agentUserId: string | undefined,
+): {
+  promptsByEventId: Map<string, TimelinePrompt>;
+  hiddenReactionKeysByEventId: Map<string, Set<string>>;
+} {
+  const promptsByEventId = new Map<string, TimelinePrompt>();
+  const hiddenReactionKeysByEventId = new Map<string, Set<string>>();
+  if (!agentUserId) {
+    return { promptsByEventId, hiddenReactionKeysByEventId };
+  }
+
+  const agentMessageOrder = new Map<string, number>();
+  events.forEach((event, index) => {
+    if (event.sender !== agentUserId) {
+      return;
+    }
+    if (!isRenderableTextBubbleEvent(event, redactedIds, latestEdits, agentUserId)) {
+      return;
+    }
+    if (typeof event.event_id === "string" && event.event_id !== "") {
+      agentMessageOrder.set(event.event_id, index);
+    }
+  });
+
+  if (agentMessageOrder.size === 0) {
+    return { promptsByEventId, hiddenReactionKeysByEventId };
+  }
+
+  type SeededEntry = { canonicalKey: string; rawKey: string; redacted: boolean };
+  const approvalSeeded = new Map<string, Map<string, SeededEntry>>();
+  const selectorSeeded = new Map<string, SeededEntry[]>();
+  const ownerConfirmedByTarget = new Map<string, string[]>();
+
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
+      event.type !== "m.reaction" ||
+      !isRecord(event.content)
+    ) {
+      continue;
+    }
+    const sender = typeof event.sender === "string" ? event.sender : undefined;
+    const relatesTo = event.content["m.relates_to"];
+    if (
+      !isRecord(relatesTo) ||
+      relatesTo.rel_type !== "m.annotation" ||
+      typeof relatesTo.event_id !== "string" ||
+      relatesTo.event_id === "" ||
+      redactedIds.has(relatesTo.event_id) ||
+      !agentMessageOrder.has(relatesTo.event_id) ||
+      typeof relatesTo.key !== "string" ||
+      relatesTo.key === ""
+    ) {
+      continue;
+    }
+    const targetId = relatesTo.event_id;
+    const rawKey = relatesTo.key;
+    const canonicalKey = normalizePromptReactionKey(rawKey);
+    const redacted = isRedactedEvent(event, redactedIds);
+
+    if (sender === agentUserId) {
+      if (APPROVAL_BY_KEY.has(canonicalKey)) {
+        let map = approvalSeeded.get(targetId);
+        if (!map) {
+          map = new Map();
+          approvalSeeded.set(targetId, map);
+        }
+        map.set(canonicalKey, { canonicalKey, rawKey, redacted });
+      } else if (SELECTOR_LABELS.has(canonicalKey)) {
+        let list = selectorSeeded.get(targetId);
+        if (!list) {
+          list = [];
+          selectorSeeded.set(targetId, list);
+        }
+        const existing = list.find((entry) => entry.canonicalKey === canonicalKey);
+        if (existing) {
+          existing.rawKey = rawKey;
+          existing.redacted = redacted;
+        } else {
+          list.push({ canonicalKey, rawKey, redacted });
+        }
+      }
+    } else if (sender === ownerUserId && !redacted) {
+      let list = ownerConfirmedByTarget.get(targetId);
+      if (!list) {
+        list = [];
+        ownerConfirmedByTarget.set(targetId, list);
+      }
+      list.push(canonicalKey);
+    }
+  }
+
+  const queuedCanonicalByTarget = new Map<string, string>();
+  for (const pending of pendingEvents) {
+    if (pending.type !== "m.reaction" || pending.sender !== ownerUserId) {
+      continue;
+    }
+    const relatesTo = pending.content["m.relates_to"];
+    if (
+      !isRecord(relatesTo) ||
+      relatesTo.rel_type !== "m.annotation" ||
+      typeof relatesTo.event_id !== "string" ||
+      !agentMessageOrder.has(relatesTo.event_id) ||
+      typeof relatesTo.key !== "string" ||
+      relatesTo.key === ""
+    ) {
+      continue;
+    }
+    queuedCanonicalByTarget.set(relatesTo.event_id, normalizePromptReactionKey(relatesTo.key));
+  }
+
+  let latestApprovalOrder = -1;
+  let latestSelectorOrder = -1;
+
+  for (const [targetId, order] of agentMessageOrder.entries()) {
+    const approvals = approvalSeeded.get(targetId);
+    const selectors = selectorSeeded.get(targetId);
+    if (approvals && approvals.size > 0) {
+      latestApprovalOrder = Math.max(latestApprovalOrder, order);
+    } else if (selectors && selectors.length > 0) {
+      latestSelectorOrder = Math.max(latestSelectorOrder, order);
+    }
+  }
+
+  for (const [targetId, order] of agentMessageOrder.entries()) {
+    const approvals = approvalSeeded.get(targetId);
+    const selectors = selectorSeeded.get(targetId);
+    let kind: "approval" | "selector" | undefined;
+    let options: TimelinePromptOption[] = [];
+
+    if (approvals && approvals.size > 0) {
+      kind = "approval";
+      for (const meta of APPROVAL_OPTIONS) {
+        const entry = approvals.get(meta.canonicalKey);
+        if (entry) {
+          options.push({
+            key: entry.rawKey,
+            label: meta.label,
+            ...(meta.scope ? { scope: meta.scope } : {}),
+            ...(entry.redacted ? { redacted: true } : {}),
+          });
+        }
+      }
+    } else if (selectors && selectors.length > 0) {
+      kind = "selector";
+      options = selectors.map((entry) => ({
+        key: entry.rawKey,
+        label: SELECTOR_LABELS.get(entry.canonicalKey)!,
+        ...(entry.redacted ? { redacted: true } : {}),
+      }));
+    }
+
+    if (!kind || options.length === 0) {
+      continue;
+    }
+
+    const optionByCanonical = new Map(
+      options.map((opt) => [normalizePromptReactionKey(opt.key), opt]),
+    );
+    const hiddenSet = new Set(optionByCanonical.keys());
+    hiddenReactionKeysByEventId.set(targetId, hiddenSet);
+
+    const confirmedKeys = ownerConfirmedByTarget.get(targetId) ?? [];
+    let confirmedOption: TimelinePromptOption | undefined;
+    for (const canonical of confirmedKeys) {
+      const match = optionByCanonical.get(canonical);
+      if (match) {
+        confirmedOption = match;
+      }
+    }
+
+    const queuedCanonical = queuedCanonicalByTarget.get(targetId);
+    const queuedOption = queuedCanonical ? optionByCanonical.get(queuedCanonical) : undefined;
+    const answered = confirmedOption !== undefined;
+    const superseded =
+      kind === "approval" ? order < latestApprovalOrder : order < latestSelectorOrder;
+
+    promptsByEventId.set(targetId, {
+      kind,
+      options,
+      ...(confirmedOption !== undefined
+        ? { selectedKey: confirmedOption.key }
+        : queuedOption
+          ? { queuedKey: queuedOption.key, selectedKey: queuedOption.key }
+          : {}),
+      answered,
+      superseded,
+    });
+  }
+
+  return { promptsByEventId, hiddenReactionKeysByEventId };
+}
+
 function collectMessageReactions(
   events: RawMatrixEvent[],
   redactedIds: Set<string>,
   ownerUserId: string,
   agentUserId: string | undefined,
+  hiddenReactionKeysByEventId: Map<string, Set<string>>,
 ): Map<string, string[]> {
   const byTarget = new Map<string, string[]>();
   for (const event of events) {
@@ -1448,6 +1714,10 @@ function collectMessageReactions(
       relatesTo.key === "" ||
       relatesTo.key === "👀"
     ) {
+      continue;
+    }
+    const hiddenKeys = hiddenReactionKeysByEventId.get(relatesTo.event_id);
+    if (hiddenKeys?.has(normalizePromptReactionKey(relatesTo.key))) {
       continue;
     }
     const list = byTarget.get(relatesTo.event_id) ?? [];

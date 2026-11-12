@@ -195,6 +195,10 @@ export class RetryQueue {
           result = await this.client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);
         } catch {
           if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
+            if (!this.client.pendingRoomEvents().some((item) => item.txnId === head.txnId)) {
+              this.backoffStep = 0;
+              continue;
+            }
             this.scheduleRetry();
           }
           break;
@@ -227,6 +231,10 @@ export class RetryQueue {
           isRateLimited(result.status, result.body) ||
           result.status >= 500
         ) {
+          if (!this.client.pendingRoomEvents().some((item) => item.txnId === head.txnId)) {
+            this.backoffStep = 0;
+            continue;
+          }
           this.scheduleRetry();
           break;
         }

@@ -1,5 +1,6 @@
 import type { HomeserverTransport, TransportResult } from "../adapters/types";
 import { isCredentialRejected } from "./matrix-errors";
+import { isPromptReactionKey } from "./topics";
 import {
   dropCredential,
   dropPreListSession,
@@ -674,6 +675,58 @@ export class MatrixClient {
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
       this.storedDrafts = nextDrafts;
+    });
+    return clonePendingEvent(item);
+  }
+
+  async enqueueOrReplacePromptReaction(
+    roomId: string,
+    targetEventId: string,
+    key: string,
+  ): Promise<PendingRoomEvent> {
+    if (!this.accessToken || !this.userId) {
+      throw new Error("没有 access token");
+    }
+    const item: PendingRoomEvent = {
+      txnId: this.nextTxnId(),
+      roomId,
+      type: "m.reaction",
+      sender: this.userId,
+      content: {
+        "m.relates_to": {
+          rel_type: "m.annotation",
+          event_id: targetEventId,
+          key,
+        },
+      },
+    };
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken || !this.userId) {
+        throw new Error("没有 access token");
+      }
+      const existingIndex = this.storedPendingEvents.findIndex((pending) => {
+        if (
+          pending.roomId !== roomId ||
+          pending.type !== "m.reaction" ||
+          pending.sender !== this.userId
+        ) {
+          return false;
+        }
+        const relatesTo = pending.content["m.relates_to"];
+        return (
+          isPlainObject(relatesTo) &&
+          relatesTo.rel_type === "m.annotation" &&
+          relatesTo.event_id === targetEventId
+        );
+      });
+      const nextPending = [...this.storedPendingEvents];
+      if (existingIndex !== -1) {
+        nextPending[existingIndex] = item;
+      } else {
+        nextPending.push(item);
+      }
+      await saveSession(this.sessionRecord({ pending: nextPending }));
+      this.storedPendingEvents = nextPending;
     });
     return clonePendingEvent(item);
   }
@@ -1723,23 +1776,37 @@ function applyRoomBackfillPage(
       return id !== undefined && beforeIds.has(id);
     });
 
-  const filteredBefore = beforeSlice.filter((ev) => !shouldOmit(ev)).map(cloneObject);
-  const filteredAfter = afterSlice.filter((ev) => !shouldOmit(ev)).map(cloneObject);
+  const filterPreserveRedactedPrompt = (ev: RawMatrixEvent): RawMatrixEvent | undefined => {
+    if (!shouldOmit(ev)) {
+      return cloneObject(ev);
+    }
+    if (shouldPreserveRedactedPromptReaction(ev, redactedIds)) {
+      return markRedactedPromptReaction(ev);
+    }
+    return undefined;
+  };
+  const filteredBefore = beforeSlice
+    .map(filterPreserveRedactedPrompt)
+    .filter((ev): ev is RawMatrixEvent => ev !== undefined);
+  const filteredAfter = afterSlice
+    .map(filterPreserveRedactedPrompt)
+    .filter((ev): ev is RawMatrixEvent => ev !== undefined);
 
   const seenIncomingIds = new Set<string>();
   const dedupedIncoming: RawMatrixEvent[] = [];
   for (const rawEvent of incomingChronological) {
-    if (shouldOmit(rawEvent)) {
+    const transformed = filterPreserveRedactedPrompt(rawEvent);
+    if (!transformed) {
       continue;
     }
-    const id = eventIdOf(rawEvent);
+    const id = eventIdOf(transformed);
     if (id !== undefined) {
       if (beforeIds.has(id) || afterIds.has(id) || seenIncomingIds.has(id)) {
         continue;
       }
       seenIncomingIds.add(id);
     }
-    dedupedIncoming.push(cloneObject(rawEvent));
+    dedupedIncoming.push(transformed);
   }
 
   const mergedTimeline = [...filteredBefore, ...dedupedIncoming, ...filteredAfter];
@@ -2039,6 +2106,49 @@ function isRedactedStub(event: RawMatrixEvent): boolean {
   return isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because);
 }
 
+function isPromptReactionEvent(event: RawMatrixEvent): boolean {
+  if (event.type !== "m.reaction" || !isPlainObject(event.content)) {
+    return false;
+  }
+  const relatesTo = event.content["m.relates_to"];
+  if (
+    !isPlainObject(relatesTo) ||
+    relatesTo.rel_type !== "m.annotation" ||
+    typeof relatesTo.event_id !== "string" ||
+    relatesTo.event_id === "" ||
+    typeof relatesTo.key !== "string" ||
+    relatesTo.key === ""
+  ) {
+    return false;
+  }
+  return isPromptReactionKey(relatesTo.key);
+}
+
+function shouldPreserveRedactedPromptReaction(
+  event: RawMatrixEvent,
+  redactedIds: Set<string>,
+): boolean {
+  if (!isPromptReactionEvent(event)) {
+    return false;
+  }
+  const targetId = reactionTargetIdOf(event);
+  if (targetId === undefined || redactedIds.has(targetId)) {
+    return false;
+  }
+  const id = eventIdOf(event);
+  return isRedactedStub(event) || (id !== undefined && redactedIds.has(id));
+}
+
+function markRedactedPromptReaction(event: RawMatrixEvent): RawMatrixEvent {
+  const copy = cloneObject(event);
+  const unsigned = isPlainObject(copy.unsigned) ? { ...copy.unsigned } : {};
+  if (!isPlainObject(unsigned.redacted_because)) {
+    unsigned.redacted_because = {};
+  }
+  copy.unsigned = unsigned;
+  return copy;
+}
+
 function reactionTargetIdOf(event: RawMatrixEvent): string | undefined {
   if (event.type !== "m.reaction" || !isPlainObject(event.content)) {
     return undefined;
@@ -2111,7 +2221,17 @@ function mergeTimelineEventsWithRedactions(
     return false;
   };
 
-  const result = existing.filter((event) => !shouldOmit(event)).map(cloneObject);
+  const result = existing
+    .map((event) => {
+      if (!shouldOmit(event)) {
+        return cloneObject(event);
+      }
+      if (shouldPreserveRedactedPromptReaction(event, redactedIds)) {
+        return markRedactedPromptReaction(event);
+      }
+      return undefined;
+    })
+    .filter((event): event is RawMatrixEvent => event !== undefined);
   const indexByEventId = new Map<string, number>();
   const indexByLocalTxnId = new Map<string, number>();
   result.forEach((event, index) => {
@@ -2127,10 +2247,14 @@ function mergeTimelineEventsWithRedactions(
   });
 
   for (const rawEvent of incoming) {
-    if (shouldOmit(rawEvent)) {
+    let event: RawMatrixEvent;
+    if (!shouldOmit(rawEvent)) {
+      event = cloneObject(rawEvent);
+    } else if (shouldPreserveRedactedPromptReaction(rawEvent, redactedIds)) {
+      event = markRedactedPromptReaction(rawEvent);
+    } else {
       continue;
     }
-    const event = cloneObject(rawEvent);
     const id = eventIdOf(event);
     const txnId = transactionIdOf(event);
     if (id !== undefined && indexByEventId.has(id)) {
