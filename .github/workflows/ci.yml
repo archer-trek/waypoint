@@ -17,7 +17,8 @@ concurrency:
 jobs:
   test:
     name: Test and build
-    runs-on: ubuntu-latest
+    # ubuntu-latest is moving to 26.04 through 2026-11-19.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Checkout
