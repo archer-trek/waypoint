@@ -21,6 +21,7 @@ import type { DraftAttachment, DraftRecord } from "./session-store";
 import {
   classifyLoginFailure,
   extractLoginSession,
+  isAbortedFailure,
   isCredentialRejected,
   isDeviceIdRejected,
   isSyncCursorRejected,
@@ -155,11 +156,25 @@ export function TopicsWorkspace({
   const reauthSubmittingRef = useRef(false);
   const [reauthError, setReauthError] = useState<string | undefined>(undefined);
   const pausedRef = useRef(initialReauthRequired || retryQueue.isPaused);
+  const readAppVisible = () => {
+    if (platform?.isAppVisible) {
+      return platform.isAppVisible();
+    }
+    if (typeof document !== "undefined") {
+      return document.visibilityState !== "hidden";
+    }
+    return true;
+  };
+  const isAndroid = platform?.deviceDisplayName === "Waypoint Android";
+  const backgroundSuspendedRef = useRef(isAndroid && !readAppVisible());
+  const isSyncPaused = () => pausedRef.current || backgroundSuspendedRef.current;
   const syncEpochRef = useRef(0);
+  const syncRunIdRef = useRef(0);
   const syncTimerRef = useRef<number | undefined>(undefined);
   const syncBackoffRef = useRef(0);
   const syncInFlightRef = useRef(false);
   const syncWakePendingRef = useRef(false);
+  const syncAbortControllerRef = useRef<AbortController | null>(null);
   const isAtBottomRef = useRef(true);
   const prevTimelineKeyRef = useRef<string>("");
   const activeVisibleRoomRef = useRef<string | null>(null);
@@ -378,7 +393,12 @@ export function TopicsWorkspace({
     }
     setExiting(true);
     pausedRef.current = true;
+    syncEpochRef.current += 1;
+    syncRunIdRef.current += 1;
+    syncInFlightRef.current = false;
     syncWakePendingRef.current = false;
+    syncAbortControllerRef.current?.abort();
+    syncAbortControllerRef.current = null;
     clearSyncTimer();
     retryQueue.pause();
     syncNavigationDepth(0);
@@ -776,8 +796,12 @@ export function TopicsWorkspace({
 
   function pauseForCredentialRejection() {
     syncEpochRef.current += 1;
+    syncRunIdRef.current += 1;
     pausedRef.current = true;
+    syncInFlightRef.current = false;
     syncWakePendingRef.current = false;
+    syncAbortControllerRef.current?.abort();
+    syncAbortControllerRef.current = null;
     clearSyncTimer();
     retryQueue.pause();
     if (mountedRef.current) {
@@ -787,7 +811,7 @@ export function TopicsWorkspace({
 
   function scheduleForegroundSync(delayMs: number) {
     clearSyncTimer();
-    if (!mountedRef.current || pausedRef.current) {
+    if (!mountedRef.current || isSyncPaused()) {
       return;
     }
     syncTimerRef.current = clock.setTimeout(() => {
@@ -796,20 +820,92 @@ export function TopicsWorkspace({
     }, delayMs);
   }
 
-  async function runForegroundSync() {
-    if (syncInFlightRef.current || !mountedRef.current || pausedRef.current || !client.hasToken) {
+  function suspendForBackground() {
+    if (!isAndroid || backgroundSuspendedRef.current) {
       return;
     }
+    backgroundSuspendedRef.current = true;
+    syncEpochRef.current += 1;
+    syncRunIdRef.current += 1;
+    syncInFlightRef.current = false;
+    syncWakePendingRef.current = false;
+    syncAbortControllerRef.current?.abort();
+    syncAbortControllerRef.current = null;
+    clearSyncTimer();
+    retryQueue.pause();
+  }
+
+  function resumeFromBackground() {
+    const wasSuspended = backgroundSuspendedRef.current;
+    backgroundSuspendedRef.current = false;
+    if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+      return;
+    }
+    if (!wasSuspended) {
+      if (!syncInFlightRef.current && syncBackoffRef.current > 0) {
+        syncBackoffRef.current = 0;
+        clearSyncTimer();
+        void runForegroundSync();
+        retryQueue.resume();
+        retryQueue.wake();
+      }
+      if (activeVisibleRoomRef.current) {
+        setRevision((value) => value + 1);
+      }
+      return;
+    }
+    syncBackoffRef.current = 0;
+    clearSyncTimer();
+    void runForegroundSync();
+    retryQueue.resume();
+    retryQueue.wake();
+    if (activeVisibleRoomRef.current) {
+      setBackfillTick((value) => value + 1);
+      setRevision((value) => value + 1);
+    }
+  }
+
+  function handleNetworkResume() {
+    if (!mountedRef.current || isSyncPaused() || !client.hasToken) {
+      return;
+    }
+    if (syncInFlightRef.current) {
+      syncEpochRef.current += 1;
+      syncRunIdRef.current += 1;
+      syncInFlightRef.current = false;
+      syncAbortControllerRef.current?.abort();
+      syncAbortControllerRef.current = null;
+    }
+    syncWakePendingRef.current = false;
+    syncBackoffRef.current = 0;
+    clearSyncTimer();
+    void runForegroundSync();
+    retryQueue.resume();
+    retryQueue.wake();
+  }
+
+  async function runForegroundSync() {
+    if (syncInFlightRef.current || !mountedRef.current || isSyncPaused() || !client.hasToken) {
+      return;
+    }
+    const myRunId = ++syncRunIdRef.current;
     const mySyncEpoch = syncEpochRef.current;
     syncInFlightRef.current = true;
     clearSyncTimer();
+    const controller = new AbortController();
+    syncAbortControllerRef.current = controller;
     let syncSucceeded = false;
     try {
       let attempt;
       try {
-        attempt = await client.sync();
+        attempt = await client.sync({ signal: controller.signal });
       } catch {
-        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
+        if (
+          !mountedRef.current ||
+          isSyncPaused() ||
+          syncEpochRef.current !== mySyncEpoch ||
+          controller.signal.aborted
+        ) {
           return;
         }
         const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
@@ -817,18 +913,34 @@ export function TopicsWorkspace({
         scheduleForegroundSync(delay);
         return;
       }
-      if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
+      if (
+        !mountedRef.current ||
+        isSyncPaused() ||
+        syncEpochRef.current !== mySyncEpoch ||
+        controller.signal.aborted ||
+        isAbortedFailure(attempt.result)
+      ) {
         return;
       }
       if (isSyncCursorRejected(attempt.incremental, attempt.result)) {
         await client.dropSyncCursor();
-        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
+        if (
+          !mountedRef.current ||
+          isSyncPaused() ||
+          syncEpochRef.current !== mySyncEpoch ||
+          controller.signal.aborted
+        ) {
           return;
         }
         try {
-          attempt = await client.sync();
+          attempt = await client.sync({ signal: controller.signal });
         } catch {
-          if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
+          if (
+            !mountedRef.current ||
+            isSyncPaused() ||
+            syncEpochRef.current !== mySyncEpoch ||
+            controller.signal.aborted
+          ) {
             return;
           }
           const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
@@ -836,7 +948,13 @@ export function TopicsWorkspace({
           scheduleForegroundSync(delay);
           return;
         }
-        if (!mountedRef.current || pausedRef.current || syncEpochRef.current !== mySyncEpoch) {
+        if (
+          !mountedRef.current ||
+          isSyncPaused() ||
+          syncEpochRef.current !== mySyncEpoch ||
+          controller.signal.aborted ||
+          isAbortedFailure(attempt.result)
+        ) {
           return;
         }
       }
@@ -849,15 +967,15 @@ export function TopicsWorkspace({
         const wasBackedOff = syncBackoffRef.current > 0;
         syncBackoffRef.current = 0;
         await client.retainSync(attempt);
-        if (!mountedRef.current || pausedRef.current) {
+        if (!mountedRef.current || isSyncPaused() || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
         await retryQueue.failUnavailablePendingEvents();
-        if (!mountedRef.current || pausedRef.current) {
+        if (!mountedRef.current || isSyncPaused() || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
         setRevision((value) => value + 1);
-        if (wasBackedOff && retryQueue.isActive()) {
+        if (wasBackedOff && (retryQueue.isActive() || client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0)) {
           retryQueue.wake();
         }
         scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
@@ -867,19 +985,24 @@ export function TopicsWorkspace({
       syncBackoffRef.current += 1;
       scheduleForegroundSync(delay);
     } finally {
-      syncInFlightRef.current = false;
-      if (
-        syncWakePendingRef.current &&
-        !syncSucceeded &&
-        mountedRef.current &&
-        !pausedRef.current &&
-        client.hasToken
-      ) {
-        syncWakePendingRef.current = false;
-        clearSyncTimer();
-        void runForegroundSync();
-      } else {
-        syncWakePendingRef.current = false;
+      if (syncRunIdRef.current === myRunId) {
+        syncInFlightRef.current = false;
+        if (syncAbortControllerRef.current === controller) {
+          syncAbortControllerRef.current = null;
+        }
+        if (
+          syncWakePendingRef.current &&
+          !syncSucceeded &&
+          mountedRef.current &&
+          !isSyncPaused() &&
+          client.hasToken
+        ) {
+          syncWakePendingRef.current = false;
+          clearSyncTimer();
+          void runForegroundSync();
+        } else {
+          syncWakePendingRef.current = false;
+        }
       }
     }
   }
@@ -999,45 +1122,77 @@ export function TopicsWorkspace({
       },
     });
     if (!pausedRef.current) {
-      scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
-      if (
-        (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
-        !retryQueue.isActive()
-      ) {
-        void retryQueue.flush();
+      if (isAndroid && !readAppVisible()) {
+        backgroundSuspendedRef.current = true;
+        retryQueue.pause();
+      } else {
+        backgroundSuspendedRef.current = false;
+        scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+        if (
+          (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
+          !retryQueue.isActive()
+        ) {
+          void retryQueue.flush();
+        }
       }
     }
-    const handleOnline = () => {
-      if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+    const handleVisibility = (visible: boolean) => {
+      if (!mountedRef.current) {
         return;
       }
-      syncBackoffRef.current = 0;
-      clearSyncTimer();
-      if (syncInFlightRef.current) {
-        syncWakePendingRef.current = true;
-      } else {
-        void runForegroundSync();
-      }
-      if (retryQueue.isActive()) {
-        retryQueue.wake();
+      if (isAndroid) {
+        if (!visible) {
+          suspendForBackground();
+        } else {
+          resumeFromBackground();
+        }
+      } else if (visible) {
+        resumeFromBackground();
       }
     };
-    window.addEventListener("online", handleOnline);
+    let unsubVisibility: () => void;
+    if (platform?.subscribeAppVisibility) {
+      unsubVisibility = platform.subscribeAppVisibility(handleVisibility);
+    } else {
+      const onVis = () =>
+        handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
+      const onHide = () => handleVisibility(false);
+      const onShow = () =>
+        handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
+      document?.addEventListener("visibilitychange", onVis);
+      window?.addEventListener("pagehide", onHide);
+      window?.addEventListener("pageshow", onShow);
+      unsubVisibility = () => {
+        document?.removeEventListener("visibilitychange", onVis);
+        window?.removeEventListener("pagehide", onHide);
+        window?.removeEventListener("pageshow", onShow);
+      };
+    }
+    let unsubResume: () => void;
+    if (platform?.subscribeNetworkResume) {
+      unsubResume = platform.subscribeNetworkResume(handleNetworkResume);
+    } else {
+      window.addEventListener("online", handleNetworkResume);
+      unsubResume = () => window.removeEventListener("online", handleNetworkResume);
+    }
     return () => {
       mountedRef.current = false;
+      syncAbortControllerRef.current?.abort();
+      syncAbortControllerRef.current = null;
       clearSyncTimer();
       if (pinNoticeTimerRef.current !== undefined) {
         clock.clearTimeout(pinNoticeTimerRef.current);
         pinNoticeTimerRef.current = undefined;
       }
-      window.removeEventListener("online", handleOnline);
+      unsubVisibility();
+      unsubResume();
       client.setCredentialRejectedHandler(undefined);
       retryQueue.setCallbacks({});
       if (!providedRetryQueue) {
         retryQueue.dispose();
       }
     };
-  }, [client, clock, retryQueue, providedRetryQueue]);
+  }, [client, clock, retryQueue, providedRetryQueue, platform]);
 
   function setTimelineScrollTop(container: HTMLElement, nextTop: number) {
     programmaticScrollRef.current = { active: true, top: nextTop };
@@ -1321,7 +1476,13 @@ export function TopicsWorkspace({
   }
 
   function evaluateVisibleReadPosition(roomId: string) {
-    if (!client.hasToken || exiting || reauthRequiredRef.current) {
+    if (
+      !client.hasToken ||
+      exiting ||
+      reauthRequiredRef.current ||
+      backgroundSuspendedRef.current ||
+      !readAppVisible()
+    ) {
       return;
     }
     const container = timelineRef.current;
@@ -1356,7 +1517,7 @@ export function TopicsWorkspace({
           return;
         }
         setRevision((value) => value + 1);
-        if (!pausedRef.current) {
+        if (!isSyncPaused()) {
           retryQueue.wakeReadMarkers();
         }
       })
@@ -1447,10 +1608,31 @@ export function TopicsWorkspace({
     } else if (prevTimelineKeyRef.current !== timelineContentKey) {
       prevTimelineKeyRef.current = timelineContentKey;
       if (isAtBottomRef.current) {
-        setTimelineScrollTop(
-          container,
-          Math.max(0, container.scrollHeight - container.clientHeight),
-        );
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        let nextTop = maxScroll;
+        if (activeTopic.firstUnreadEventId) {
+          const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
+          const targetEl = rowEls.find(
+            (el) => el.dataset.eventId === activeTopic.firstUnreadEventId,
+          );
+          if (targetEl) {
+            const containerRect = container.getBoundingClientRect();
+            const targetRect = targetEl.getBoundingClientRect();
+            if (containerRect.height > 0 && targetRect.height > 0) {
+              const desiredTop = Math.max(
+                0,
+                container.scrollTop + (targetRect.top - containerRect.top),
+              );
+              nextTop = Math.min(maxScroll, desiredTop);
+            } else if (container.clientHeight > 0) {
+              nextTop = Math.min(maxScroll, Math.max(0, targetEl.offsetTop));
+            }
+          }
+        }
+        setTimelineScrollTop(container, nextTop);
+        isAtBottomRef.current =
+          container.scrollHeight - container.scrollTop - container.clientHeight <=
+          AT_BOTTOM_THRESHOLD_PX;
       }
     }
     evaluateVisibleReadPosition(visibleComposerRoomId);

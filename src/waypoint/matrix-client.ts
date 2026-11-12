@@ -232,10 +232,14 @@ export class MatrixClient {
     url: string;
     body?: unknown;
     json?: boolean;
+    signal?: AbortSignal;
   }): Promise<TransportResult> {
     const requestToken = this.accessToken;
     if (!requestToken) {
       return Promise.reject(new Error("没有 access token"));
+    }
+    if (input.signal?.aborted) {
+      return Promise.resolve({ type: "failure", failure: { type: "aborted" } });
     }
     const generation = this.tokenGeneration;
     const headers: Record<string, string> = {
@@ -244,14 +248,15 @@ export class MatrixClient {
     if (input.json) {
       headers["Content-Type"] = "application/json";
     }
-    return this.transport
-      .request({
-        method: input.method,
-        url: input.url,
-        headers,
-        ...(input.body !== undefined ? { body: input.body } : {}),
-      })
-      .then((result) => {
+    const requestPromise = this.transport.request({
+      method: input.method,
+      url: input.url,
+      headers,
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    if (!input.signal) {
+      return requestPromise.then((result) => {
         if (
           isCredentialRejected(result) &&
           this.tokenGeneration === generation &&
@@ -261,9 +266,43 @@ export class MatrixClient {
         }
         return result;
       });
+    }
+    const signal = input.signal;
+    requestPromise.catch(() => undefined);
+    return new Promise<TransportResult>((resolve, reject) => {
+      const onAbort = () => {
+        resolve({ type: "failure", failure: { type: "aborted" } });
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      requestPromise.then(
+        (result) => {
+          signal.removeEventListener("abort", onAbort);
+          if (signal.aborted) {
+            resolve({ type: "failure", failure: { type: "aborted" } });
+            return;
+          }
+          if (
+            isCredentialRejected(result) &&
+            this.tokenGeneration === generation &&
+            this.accessToken === requestToken
+          ) {
+            this.credentialRejectedHandler?.(result);
+          }
+          resolve(result);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          if (signal.aborted) {
+            resolve({ type: "failure", failure: { type: "aborted" } });
+            return;
+          }
+          reject(error);
+        },
+      );
+    });
   }
 
-  sync(): Promise<SyncAttempt> {
+  sync(options?: { signal?: AbortSignal }): Promise<SyncAttempt> {
     if (!this.accessToken) {
       return Promise.reject(new Error("没有 access token"));
     }
@@ -273,7 +312,7 @@ export class MatrixClient {
     const url = cursor
       ? `${matrixUrl(this.baseUrl, "/_matrix/client/v3/sync")}?since=${encodeURIComponent(cursor)}`
       : matrixUrl(this.baseUrl, "/_matrix/client/v3/sync");
-    return this.authedRequest({ method: "GET", url }).then((result) => ({
+    return this.authedRequest({ method: "GET", url, signal: options?.signal }).then((result) => ({
       result,
       incremental: Boolean(cursor),
       leaveGeneration: generation,

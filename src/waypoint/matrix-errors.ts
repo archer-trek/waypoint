@@ -43,6 +43,10 @@ export function isRateLimited(status: number, body: unknown): boolean {
   return status === 429 || errcode(body) === "M_LIMIT_EXCEEDED";
 }
 
+export function isAbortedFailure(result: TransportResult): boolean {
+  return result.type === "failure" && result.failure.type === "aborted";
+}
+
 export function isCredentialRejected(result: TransportResult): boolean {
   if (result.type !== "response") {
     return false;
@@ -82,6 +86,8 @@ export function transportFailureMessage(action: string, failure: TransportFailur
       return `${prefix}，因为到达不了，HTTPS 建不起来。`;
     case "network":
       return `${prefix}，因为到达不了。`;
+    case "aborted":
+      return `${prefix}，因为已中止。`;
   }
 }
 

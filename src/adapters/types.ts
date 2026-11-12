@@ -3,7 +3,8 @@ export type TransportFailure =
   | { type: "hostname-mismatch" }
   | { type: "https-unavailable" }
   | { type: "network" }
-  | { type: "timeout" };
+  | { type: "timeout" }
+  | { type: "aborted" };
 
 export type TransportResult =
   | { type: "response"; status: number; body: unknown }
@@ -14,6 +15,7 @@ export type HomeserverRequest = {
   url: string;
   headers?: Record<string, string>;
   body?: unknown;
+  signal?: AbortSignal;
 };
 
 export interface HomeserverTransport {
@@ -32,6 +34,9 @@ export interface PlatformAdapter {
   pushNavigationEntry?: () => void;
   popNavigationEntry?: () => void;
   focusMainWindow?: () => void;
+  isAppVisible?: () => boolean;
+  subscribeAppVisibility?: (onChange: (visible: boolean) => void) => () => void;
+  subscribeNetworkResume?: (onResume: () => void) => () => void;
 }
 
 export interface Clock {

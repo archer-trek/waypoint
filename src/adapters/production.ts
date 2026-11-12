@@ -14,6 +14,64 @@ export const systemClock: Clock = {
   currentTimeMs: () => Date.now(),
 };
 
+function currentAppVisible(): boolean {
+  if (typeof document === "undefined") {
+    return true;
+  }
+  return document.visibilityState !== "hidden";
+}
+
+function subscribeAppVisibility(onChange: (visible: boolean) => void): () => void {
+  if (typeof document === "undefined" && typeof window === "undefined") {
+    return () => undefined;
+  }
+  let lastVisible = currentAppVisible();
+  const notify = (nextVisible: boolean) => {
+    if (nextVisible !== lastVisible) {
+      lastVisible = nextVisible;
+      onChange(nextVisible);
+    }
+  };
+  const handleVisibilityChange = () => {
+    notify(currentAppVisible());
+  };
+  const handlePageHide = () => {
+    notify(false);
+  };
+  const handlePageShow = () => {
+    notify(currentAppVisible());
+  };
+  document?.addEventListener("visibilitychange", handleVisibilityChange);
+  window?.addEventListener("pagehide", handlePageHide);
+  window?.addEventListener("pageshow", handlePageShow);
+  return () => {
+    document?.removeEventListener("visibilitychange", handleVisibilityChange);
+    window?.removeEventListener("pagehide", handlePageHide);
+    window?.removeEventListener("pageshow", handlePageShow);
+  };
+}
+
+function subscribeNetworkResume(onResume: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => undefined;
+  }
+  const handleOnline = () => {
+    onResume();
+  };
+  window.addEventListener("online", handleOnline);
+  return () => {
+    window.removeEventListener("online", handleOnline);
+  };
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
 function currentViewportMode(): ViewportMode {
   if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
     return window.matchMedia(WIDE_VIEWPORT_MEDIA_QUERY).matches ? "wide" : "narrow";
@@ -228,6 +286,9 @@ export function detectPlatform(): PlatformAdapter {
         window.focus();
       }
     },
+    isAppVisible: currentAppVisible,
+    subscribeAppVisibility,
+    subscribeNetworkResume,
   };
 }
 
@@ -240,6 +301,7 @@ export function createFetchTransport(): HomeserverTransport {
           headers: input.headers,
           body: input.body === undefined ? undefined : JSON.stringify(input.body),
           redirect: "manual",
+          ...(input.signal ? { signal: input.signal } : {}),
         });
         if (
           response.type === "opaqueredirect" ||
@@ -256,7 +318,10 @@ export function createFetchTransport(): HomeserverTransport {
         } catch {
           return { type: "response", status: response.status, body: text };
         }
-      } catch {
+      } catch (error) {
+        if (input.signal?.aborted || isAbortError(error)) {
+          return { type: "failure", failure: { type: "aborted" } };
+        }
         return { type: "failure", failure: { type: "network" } };
       }
     },

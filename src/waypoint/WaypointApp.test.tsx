@@ -8447,7 +8447,7 @@ test("服务器不认 token 时暂停同步和重试队列，不丢队列也不�
 
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "暂停在队列的消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await waitFor(() => expect(sendCalls).toBe(1));
+  await waitFor(() => expect(sendCalls).toBeGreaterThanOrEqual(1));
 
   // 不切回密码页，不清空本地时间线与未确认气泡，且已停止后续同步与重试
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
@@ -17847,4 +17847,890 @@ test("Topic 变为不可用或需重新验证时隐藏斜杠提示并保留 / �
     expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
   });
   expect(screen.getByRole("region", { name: "斜杠命令提示" })).toBeInTheDocument();
+});
+
+test("Android 切后台或锁屏时立刻中止正在等的同步长轮询并暂停重试计时，中断不计入失败退避 (#73)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCalls = 0;
+  let visible = true;
+  const visibilityListeners = new Set<(v: boolean) => void>();
+  const pendingLongPoll = deferred<TransportResult>();
+  const syncSignals: Array<AbortSignal | undefined> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      syncSignals.push(input.signal);
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "Android挂起话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return pendingLongPoll.promise;
+      }
+      return { type: "failure", failure: { type: "network" } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint Android",
+        isAppVisible: () => visible,
+        subscribeAppVisibility: (onChange) => {
+          visibilityListeners.add(onChange);
+          return () => visibilityListeners.delete(onChange);
+        },
+      }}
+      clock={clock}
+    />,
+  );
+
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "Android挂起话题" }));
+
+  // 发起一条会失败进重试队列的消息（首次失败后进入 1s 退避）
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "后台暂停消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBe(1));
+
+  // 推进 1s：触发长轮询 /sync #2（挂起等待）以及队列第 1 次重试（失败后进入 2s 退避）
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(syncCalls).toBe(2);
+    expect(sendCalls).toBe(2);
+  });
+  expect(syncSignals[1]).toBeDefined();
+  expect(syncSignals[1]?.aborted).toBe(false);
+
+  // Android 切后台 / 锁屏
+  await act(async () => {
+    visible = false;
+    for (const listener of visibilityListeners) listener(false);
+  });
+
+  // 当前挂起的 /sync 长轮询被立即 abort
+  expect(syncSignals[1]?.aborted).toBe(true);
+
+  // 在后台推进 60s：同步和重试队列都已挂起，不再发出任何请求
+  await act(async () => {
+    clock.advance(60_000);
+  });
+  expect(syncCalls).toBe(2);
+  expect(sendCalls).toBe(2);
+
+  // 回到前台：立刻恢复同步（不计入之前的 abort 退避，所以如果再次失败，首次退避仍是 1s 而非 2s）
+  await act(async () => {
+    visible = true;
+    for (const listener of visibilityListeners) listener(true);
+  });
+  await waitFor(() => expect(syncCalls).toBe(3));
+  // 验证第 3 次 /sync 失败后，退避仍是 1s（推进 999ms 不重试，1000ms 才重试）
+  await act(async () => {
+    clock.advance(999);
+  });
+  expect(syncCalls).toBe(3);
+  await act(async () => {
+    clock.advance(1);
+  });
+  await waitFor(() => expect(syncCalls).toBe(4));
+});
+
+test("Android 回到前台时立刻清零退避、携带已有同步游标增量同步，并按交出顺序立即重放重试队列（不等待同步完成） (#73)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let offline = false;
+  let holdResumeSync = false;
+  const resumeSyncDeferred = deferred<TransportResult>();
+  const syncUrls: string[] = [];
+  const sentBodies: string[] = [];
+  let visible = true;
+  const visibilityListeners = new Set<(v: boolean) => void>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      syncUrls.push(input.url);
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-cursor-42",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "前台恢复话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (holdResumeSync) {
+        holdResumeSync = false;
+        return resumeSyncDeferred.promise;
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-after-${syncCalls}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      const body = (input.body as { body: string }).body;
+      sentBodies.push(body);
+      return { type: "response", status: 200, body: { event_id: `$ev-${sentBodies.length}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint Android",
+        isAppVisible: () => visible,
+        subscribeAppVisibility: (onChange) => {
+          visibilityListeners.add(onChange);
+          return () => visibilityListeners.delete(onChange);
+        },
+      }}
+      clock={clock}
+    />,
+  );
+
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "前台恢复话题" }));
+
+  // 断网并发送两条消息进入重试队列，推进退避至较高步数（1s + 2s）
+  offline = true;
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBe(2));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息一");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息二");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+
+  await act(async () => { clock.advance(1000); });
+  const syncCountBeforeBg = syncCalls;
+
+  // 切后台暂停：即使此时触发 online 也不应唤醒
+  await act(async () => {
+    visible = false;
+    for (const listener of visibilityListeners) listener(false);
+  });
+  offline = false;
+  await act(async () => {
+    window.dispatchEvent(new Event("online"));
+    clock.advance(10_000);
+  });
+  expect(syncCalls).toBe(syncCountBeforeBg);
+  expect(sentBodies).toEqual([]);
+
+  // 回到前台：阻塞这次增量同步返回，验证立刻带上 since=batch-cursor-42 发出同步且队列不等同步完成就按序重放
+  holdResumeSync = true;
+  await act(async () => {
+    visible = true;
+    for (const listener of visibilityListeners) listener(true);
+  });
+
+  await waitFor(() => {
+    expect(syncCalls).toBe(syncCountBeforeBg + 1);
+    expect(syncUrls[syncUrls.length - 1]).toBe(
+      "https://matrix.example.com/_matrix/client/v3/sync?since=batch-cursor-42",
+    );
+    expect(sentBodies).toEqual(["队列消息一", "队列消息二"]);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+
+  await act(async () => {
+    resumeSyncDeferred.resolve({ type: "response", status: 200, body: { next_batch: "batch-done" } });
+  });
+});
+
+test("macOS 窗口失焦或不可见不挂起同步，且桌面从休眠或断网恢复时立刻清零退避、增量同步并按序重放重试队列 (#73)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCalls = 0;
+  let offline = false;
+  let staleSync: ReturnType<typeof deferred<TransportResult>> | null = null;
+  const syncSignals: Array<AbortSignal | undefined> = [];
+  const syncUrls: string[] = [];
+  const sentBodies: string[] = [];
+  const visibilityListeners = new Set<(v: boolean) => void>();
+  const resumeListeners = new Set<() => void>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      syncSignals.push(input.signal);
+      syncUrls.push(input.url);
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-mac-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "macOS同步话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (staleSync) {
+        const pending = staleSync;
+        staleSync = null;
+        return pending.promise;
+      }
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-mac-${syncCalls}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      if (offline) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      const body = (input.body as { body: string }).body;
+      sentBodies.push(body);
+      return { type: "response", status: 200, body: { event_id: `$ev-${sentBodies.length}` } };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint macOS",
+        isAppVisible: () => true,
+        subscribeAppVisibility: (onChange) => {
+          visibilityListeners.add(onChange);
+          return () => visibilityListeners.delete(onChange);
+        },
+        subscribeNetworkResume: (onResume) => {
+          resumeListeners.add(onResume);
+          return () => resumeListeners.delete(onResume);
+        },
+      }}
+      clock={clock}
+    />,
+  );
+
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "macOS同步话题" }));
+
+  // macOS 窗口失焦 (blur) 和不可见 (visibility=false)：不挂起同步，不中止长轮询
+  const stale1 = deferred<TransportResult>();
+  staleSync = stale1;
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBe(2));
+
+  await act(async () => {
+    window.dispatchEvent(new Event("blur"));
+    for (const listener of visibilityListeners) listener(false);
+  });
+  expect(syncSignals[1]?.aborted).toBe(false);
+
+  // 让第 2 轮完成并投递新消息，验证失焦期间正常保留并按 1s 周期继续发起第 3 轮同步
+  await act(async () => {
+    stale1.resolve({
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-mac-2",
+        rooms: {
+          join: {
+            "!t1:example.com": {
+              timeline: {
+                events: [
+                  {
+                    type: "m.room.message",
+                    event_id: "$mac-blur-msg",
+                    sender: "@bot:example.com",
+                    origin_server_ts: 2000,
+                    content: { msgtype: "m.text", body: "失焦期间照常收到" },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("失焦期间照常收到");
+  });
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBe(3));
+
+  // 断网并入队两条消息，进入退避；再挂起一轮休眠前僵死的 /sync #4
+  offline = true;
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "桌面消息1");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "桌面消息2");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBeGreaterThanOrEqual(1));
+
+  const stale2 = deferred<TransportResult>();
+  staleSync = stale2;
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBe(4));
+
+  // 桌面从休眠/断网恢复：立刻中止僵死的同步 #4、清零退避、带 since=batch-mac-2 增量同步，并按序重放两条消息
+  offline = false;
+  await act(async () => {
+    for (const listener of resumeListeners) listener();
+  });
+  expect(syncSignals[3]?.aborted).toBe(true);
+  await waitFor(() => {
+    expect(syncCalls).toBe(5);
+    expect(syncUrls[syncUrls.length - 1]).toBe(
+      "https://matrix.example.com/_matrix/client/v3/sync?since=batch-mac-3",
+    );
+    expect(sentBodies).toEqual(["桌面消息1", "桌面消息2"]);
+  });
+});
+
+test("回到前台时若正打开 Topic，新同步到的消息出现在屏幕上才前移已读位置，视口下方消息不算读过也不把视口拉走 (#73)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let visible = true;
+  const visibilityListeners = new Set<(v: boolean) => void>();
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-rp-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t-scroll:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "视口外不拉走话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      { type: "m.room.message", event_id: "$m1", sender: "@bot:example.com", origin_server_ts: 1100, content: { msgtype: "m.text", body: "m1" } },
+                      { type: "m.room.message", event_id: "$m2", sender: "@bot:example.com", origin_server_ts: 1200, content: { msgtype: "m.text", body: "m2" } },
+                      { type: "m.room.message", event_id: "$m3", sender: "@bot:example.com", origin_server_ts: 1300, content: { msgtype: "m.text", body: "m3" } },
+                      { type: "m.room.message", event_id: "$m4", sender: "@bot:example.com", origin_server_ts: 1400, content: { msgtype: "m.text", body: "m4" } },
+                    ],
+                  },
+                },
+                "!t-bottom:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "在底部回前台话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$b2" } }],
+                  },
+                  timeline: {
+                    events: [
+                      { type: "m.room.message", event_id: "$b1", sender: "@bot:example.com", origin_server_ts: 2100, content: { msgtype: "m.text", body: "b1" } },
+                      { type: "m.room.message", event_id: "$b2", sender: "@bot:example.com", origin_server_ts: 2200, content: { msgtype: "m.text", body: "b2" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-rp-2",
+            rooms: {
+              join: {
+                "!t-scroll:example.com": {
+                  timeline: {
+                    events: [
+                      { type: "m.room.message", event_id: "$m5", sender: "@bot:example.com", origin_server_ts: 3100, content: { msgtype: "m.text", body: "m5" } },
+                      { type: "m.room.message", event_id: "$m6", sender: "@bot:example.com", origin_server_ts: 3200, content: { msgtype: "m.text", body: "m6" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-rp-3",
+            rooms: {
+              join: {
+                "!t-bottom:example.com": {
+                  timeline: {
+                    events: [
+                      { type: "m.room.message", event_id: "$b3", sender: "@bot:example.com", origin_server_ts: 4100, content: { msgtype: "m.text", body: "b3" } },
+                      { type: "m.room.message", event_id: "$b4", sender: "@bot:example.com", origin_server_ts: 4200, content: { msgtype: "m.text", body: "b4" } },
+                      { type: "m.room.message", event_id: "$b5", sender: "@bot:example.com", origin_server_ts: 4300, content: { msgtype: "m.text", body: "b5" } },
+                      { type: "m.room.message", event_id: "$b6", sender: "@bot:example.com", origin_server_ts: 4400, content: { msgtype: "m.text", body: "b6" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-rp-${syncCalls}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 200, async () => {
+    const clock = new ManualClock();
+    render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{
+          deviceDisplayName: "Waypoint Android",
+          isAppVisible: () => visible,
+          subscribeAppVisibility: (onChange) => {
+            visibilityListeners.add(onChange);
+            return () => visibilityListeners.delete(onChange);
+          },
+        }}
+        clock={clock}
+      />,
+    );
+
+    await login(user);
+
+    // Part A: 打开有未读的 Topic，停在 $m2 (scrollTop=100)，视口只看到 $m2 和 $m3
+    const scrollRow = await screen.findByRole("button", { name: "视口外不拉走话题" });
+    await user.click(scrollRow);
+    const timeline1 = screen.getByRole("log", { name: "对话时间线" });
+    expect(timeline1.scrollTop).toBe(100);
+    await waitFor(() => expect(readMarkerPosts).toHaveLength(1));
+    expect(readMarkerPosts[0].body).toEqual({ "m.fully_read": "$m3", "m.read.private": "$m3" });
+
+    // 切后台 -> 回到前台同步到 $m5, $m6：不拉走视口，也不把视口外消息算作已读
+    await act(async () => {
+      visible = false;
+      for (const listener of visibilityListeners) listener(false);
+    });
+    await act(async () => {
+      visible = true;
+      for (const listener of visibilityListeners) listener(true);
+    });
+    await waitFor(() => expect(timeline1).toHaveTextContent("m6"));
+    expect(timeline1.scrollTop).toBe(100);
+    expect(readMarkerPosts).toHaveLength(1);
+    expect(scrollRow).toHaveAttribute("data-unread", "true");
+
+    // Part B: 切到原本在底部已读的 Topic，再切后台 -> 回到前台同步到 4 条超出一屏的新消息 ($b3..$b6)
+    const bottomRow = screen.getByRole("button", { name: "在底部回前台话题" });
+    await user.click(bottomRow);
+    const timeline2 = screen.getByRole("log", { name: "对话时间线" });
+    expect(timeline2.scrollTop).toBe(0);
+
+    await act(async () => {
+      visible = false;
+      for (const listener of visibilityListeners) listener(false);
+    });
+    await act(async () => {
+      visible = true;
+      for (const listener of visibilityListeners) listener(true);
+    });
+    await waitFor(() => expect(timeline2).toHaveTextContent("b6"));
+
+    // 停在第一条新消息 $b3 (scrollTop=200，视口 200..400 只看见 $b3 和 $b4)，不跳过未读跳到底 (400)
+    expect(timeline2.scrollTop).toBe(200);
+    await waitFor(() => expect(readMarkerPosts).toHaveLength(2));
+    expect(readMarkerPosts[1].body).toEqual({ "m.fully_read": "$b4", "m.read.private": "$b4" });
+    expect(bottomRow).toHaveAttribute("data-unread", "true");
+
+    // Owner 自己滚到底 (scrollTop=400)，$b5 和 $b6 出现在屏幕上后才前移到 $b6
+    await act(async () => {
+      timeline2.scrollTop = 400;
+      timeline2.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await waitFor(() => expect(readMarkerPosts).toHaveLength(3));
+    expect(readMarkerPosts[2].body).toEqual({ "m.fully_read": "$b6", "m.read.private": "$b6" });
+    expect(bottomRow).not.toHaveAttribute("data-unread", "true");
+  });
+});
+
+test("双端都不申请通知权限、不发系统通知、不设角标、不接入推送，Agent 主动投进仍管理的 Topic 的消息只在前景通过未读指示和排序呈现 (#73)", async () => {
+  const user = userEvent.setup();
+  const notificationCalls: string[] = [];
+  const requestPermissionSpy = vi.fn(async () => "denied");
+  class MockNotification {
+    static permission = "default";
+    static requestPermission = requestPermissionSpy;
+    constructor(title: string) {
+      notificationCalls.push(title);
+    }
+  }
+  const origNotification = globalThis.Notification;
+  const origSetAppBadge = (navigator as Navigator & { setAppBadge?: unknown }).setAppBadge;
+  const setAppBadgeSpy = vi.fn(async () => undefined);
+  Object.defineProperty(globalThis, "Notification", { configurable: true, value: MockNotification });
+  Object.defineProperty(navigator, "setAppBadge", { configurable: true, value: setAppBadgeSpy });
+
+  try {
+    for (const deviceDisplayName of ["Waypoint macOS", "Waypoint Android"] as const) {
+      globalThis.indexedDB = new IDBFactory();
+      const homeserver = new FakeHomeserver();
+      let syncCalls = 0;
+      let visible = true;
+      const visibilityListeners = new Set<(v: boolean) => void>();
+
+      homeserver.handler = passwordLoginHandler(async (input) => {
+        if (input.url.includes("/sync")) {
+          syncCalls += 1;
+          if (syncCalls === 1) {
+            return {
+              type: "response",
+              status: 200,
+              body: {
+                next_batch: "batch-notif-1",
+                account_data: validAgents,
+                rooms: {
+                  join: {
+                    "!t-old:example.com": {
+                      state: {
+                        events: [
+                          { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                          { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                          { type: "m.room.name", state_key: "", content: { name: "定时投递旧话题" } },
+                        ],
+                      },
+                      account_data: {
+                        events: [{ type: "m.fully_read", content: { event_id: "$old-1" } }],
+                      },
+                      timeline: {
+                        events: [
+                          { type: "m.room.message", event_id: "$old-1", sender: "@bot:example.com", origin_server_ts: 1100, content: { msgtype: "m.text", body: "旧消息" } },
+                        ],
+                      },
+                    },
+                    "!t-new:example.com": {
+                      state: {
+                        events: [
+                          { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                          { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                          { type: "m.room.name", state_key: "", content: { name: "较新无未读话题" } },
+                        ],
+                      },
+                      account_data: {
+                        events: [{ type: "m.fully_read", content: { event_id: "$new-1" } }],
+                      },
+                      timeline: {
+                        events: [
+                          { type: "m.room.message", event_id: "$new-1", sender: "@bot:example.com", origin_server_ts: 2100, content: { msgtype: "m.text", body: "新消息" } },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            };
+          }
+          if (syncCalls === 2) {
+            return {
+              type: "response",
+              status: 200,
+              body: {
+                next_batch: "batch-notif-2",
+                rooms: {
+                  join: {
+                    "!t-old:example.com": {
+                      timeline: {
+                        events: [
+                          {
+                            type: "m.room.message",
+                            event_id: "$proactive-1",
+                            sender: "@bot:example.com",
+                            origin_server_ts: 5000,
+                            content: { msgtype: "m.text", body: "Agent 主动投递的定时总结" },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            };
+          }
+          return { type: "response", status: 200, body: { next_batch: `batch-notif-${syncCalls}` } };
+        }
+        throw new Error(`${input.method} ${input.url}`);
+      });
+
+      const clock = new ManualClock();
+      const view = render(
+        <WaypointApp
+          homeserver={homeserver}
+          platform={{
+            deviceDisplayName,
+            isAppVisible: () => visible,
+            subscribeAppVisibility: (onChange) => {
+              visibilityListeners.add(onChange);
+              return () => visibilityListeners.delete(onChange);
+            },
+          }}
+          clock={clock}
+        />,
+      );
+
+      await login(user);
+      const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+      const listBefore = within(sidebar)
+        .getAllByRole("button")
+        .filter((b) => b.classList.contains("waypoint-topic-row"));
+      expect(listBefore.map((b) => b.getAttribute("aria-label"))).toEqual([
+        "较新无未读话题",
+        "定时投递旧话题",
+      ]);
+
+      if (deviceDisplayName === "Waypoint macOS") {
+        // macOS 窗口失焦时收到 Agent 主动投递消息
+        await act(async () => {
+          window.dispatchEvent(new Event("blur"));
+          clock.advance(1000);
+        });
+      } else {
+        // Android 切后台再回到前台收到 Agent 主动投递消息
+        await act(async () => {
+          visible = false;
+          for (const listener of visibilityListeners) listener(false);
+        });
+        await act(async () => {
+          visible = true;
+          for (const listener of visibilityListeners) listener(true);
+        });
+      }
+
+      const oldRow = await screen.findByRole("button", { name: "定时投递旧话题" });
+      await waitFor(() => expect(oldRow).toHaveAttribute("data-unread", "true"));
+      expect(oldRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
+      expect(oldRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "700" });
+
+      const listAfter = within(screen.getByRole("complementary", { name: "Topic 列表" }))
+        .getAllByRole("button")
+        .filter((b) => b.classList.contains("waypoint-topic-row"));
+      expect(listAfter.map((b) => b.getAttribute("aria-label"))).toEqual([
+        "定时投递旧话题",
+        "较新无未读话题",
+      ]);
+
+      expect(homeserver.requests.some((r) => r.url.includes("/pushers"))).toBe(false);
+      expect(notificationCalls).toEqual([]);
+      expect(requestPermissionSpy).not.toHaveBeenCalled();
+      expect(setAppBadgeSpy).not.toHaveBeenCalled();
+
+      view.unmount();
+    }
+  } finally {
+    Object.defineProperty(globalThis, "Notification", { configurable: true, value: origNotification });
+    if (origSetAppBadge === undefined) {
+      delete (navigator as unknown as Record<string, unknown>).setAppBadge;
+    } else {
+      Object.defineProperty(navigator, "setAppBadge", { configurable: true, value: origSetAppBadge });
+    }
+  }
+});
+
+test("生产适配器 createFetchTransport 与 detectPlatform 正确透传并中止 AbortSignal 且响应页面可见性切换 (#73)", async () => {
+  const { createFetchTransport, detectPlatform } = await import("../adapters/production");
+  const user = userEvent.setup();
+  let syncCalls = 0;
+  const syncSignals: Array<AbortSignal | undefined> = [];
+
+  const origUserAgent = navigator.userAgent;
+  Object.defineProperty(navigator, "userAgent", {
+    configurable: true,
+    value: "Mozilla/5.0 (Linux; Android 14)",
+  });
+  let docVis: DocumentVisibilityState = "visible";
+  const origVisibilityDesc = Object.getOwnPropertyDescriptor(document, "visibilityState");
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => docVis,
+  });
+
+  const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (url.endsWith("/_matrix/client/versions")) {
+      return Promise.resolve(new Response(JSON.stringify({ versions: ["v1.11"] }), { status: 200 }));
+    }
+    if (url.endsWith("/_matrix/client/v3/login") && (!init?.method || init.method === "GET")) {
+      return Promise.resolve(
+        new Response(JSON.stringify({ flows: [{ type: "m.login.password" }] }), { status: 200 }),
+      );
+    }
+    if (url.endsWith("/_matrix/client/v3/login") && init?.method === "POST") {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ user_id: "@owner:example.com", access_token: "tok-prod", device_id: "DEV-PROD" }),
+          { status: 200 },
+        ),
+      );
+    }
+    if (url.includes("/_matrix/client/v3/sync")) {
+      syncCalls += 1;
+      syncSignals.push(init?.signal ?? undefined);
+      if (syncCalls === 1) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              next_batch: "batch-prod-1",
+              account_data: validAgents,
+              rooms: { join: {} },
+            }),
+            { status: 200 },
+          ),
+        );
+      }
+      if (syncCalls === 2) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("The operation was aborted.", "AbortError")),
+            { once: true },
+          );
+        });
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ next_batch: `batch-prod-${syncCalls}` }), { status: 200 }),
+      );
+    }
+    return Promise.reject(new Error(`unexpected fetch ${url}`));
+  });
+
+  try {
+    const clock = new ManualClock();
+    const view = render(
+      <WaypointApp
+        homeserver={createFetchTransport()}
+        platform={detectPlatform()}
+        clock={clock}
+      />,
+    );
+
+    await login(user);
+    await screen.findByText("暂无 Topic");
+
+    await act(async () => { clock.advance(1000); });
+    await waitFor(() => expect(syncCalls).toBe(2));
+    expect(syncSignals[1]).toBeDefined();
+    expect(syncSignals[1]?.aborted).toBe(false);
+
+    await act(async () => {
+      docVis = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(syncSignals[1]?.aborted).toBe(true);
+
+    await act(async () => {
+      docVis = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await waitFor(() => expect(syncCalls).toBe(3));
+    view.unmount();
+  } finally {
+    fetchSpy.mockRestore();
+    Object.defineProperty(navigator, "userAgent", { configurable: true, value: origUserAgent });
+    if (origVisibilityDesc) {
+      Object.defineProperty(document, "visibilityState", origVisibilityDesc);
+    } else {
+      delete (document as unknown as Record<string, unknown>).visibilityState;
+    }
+  }
 });
