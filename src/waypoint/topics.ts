@@ -797,25 +797,30 @@ export function deriveRoomTimelineItems(
       if (!side) {
         return;
       }
-      if (!isRecord(event.content) || typeof event.content.body !== "string") {
+      if (
+        !isRecord(event.content) ||
+        event.content.msgtype !== "m.text" ||
+        typeof event.content.body !== "string" ||
+        event.content.body.trim() === ""
+      ) {
         return;
       }
+      const eventId =
+        typeof event.event_id === "string" && event.event_id !== ""
+          ? event.event_id
+          : `confirmed-${index}`;
       const ts = validTimestamp(event.origin_server_ts);
       if (ts !== undefined) {
         const currentDay = localDayKey(ts);
         if (lastDayKey !== undefined && currentDay !== lastDayKey) {
           items.push({
             kind: "day-separator",
-            key: `day-${currentDay}-${index}`,
+            key: `day-${currentDay}-${eventId}`,
             label: formatDaySeparator(ts, nowMs),
           });
         }
         lastDayKey = currentDay;
       }
-      const eventId =
-        typeof event.event_id === "string" && event.event_id !== ""
-          ? event.event_id
-          : `confirmed-${index}`;
       items.push({
         kind: "message",
         key: eventId,
@@ -827,7 +832,12 @@ export function deriveRoomTimelineItems(
   }
 
   for (const pending of pendingEvents) {
-    if (pending.type !== "m.room.message" || typeof pending.content.body !== "string") {
+    if (
+      pending.type !== "m.room.message" ||
+      pending.content.msgtype !== "m.text" ||
+      typeof pending.content.body !== "string" ||
+      pending.content.body.trim() === ""
+    ) {
       continue;
     }
     items.push({

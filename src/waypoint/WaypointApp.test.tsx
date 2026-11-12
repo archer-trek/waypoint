@@ -6724,3 +6724,815 @@ test("跨设备同时编辑与移除 Bot 时，另一设备同步移除后重试
     ],
   });
 });
+
+test("忽略非 m.text、空 body 与缺失 origin_server_ts 的异常边角，不画空气泡也不误插日期分隔", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const day1Ts = new Date(2026, 10, 10, 10, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const day3Ts = new Date(2026, 10, 12, 10, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "消息边角话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$img-day1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { msgtype: "m.image", body: "photo.png", url: "mxc://example.com/1" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$notice-day1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { msgtype: "m.notice", body: "系统通知文本" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$empty-day1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { msgtype: "m.text", body: "   " },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$missing-msgtype",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { body: "缺msgtype的消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$valid-day2",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts,
+                      content: { msgtype: "m.text", body: "第一条真正会画出来的消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$no-ts",
+                      sender: "@bot:example.com",
+                      content: { msgtype: "m.text", body: "没有服务器时间的Agent消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$valid-day2-b",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts + 60_000,
+                      content: { msgtype: "m.text", body: "同一天的第二条" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$empty-day3",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day3Ts,
+                      content: { msgtype: "m.text", body: "" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day3Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "消息边角话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(3);
+  expect(rows[0]).toHaveAttribute("data-side", "left");
+  expect(rows[0]).toHaveTextContent("第一条真正会画出来的消息");
+  expect(rows[1]).toHaveAttribute("data-side", "left");
+  expect(rows[1]).toHaveTextContent("没有服务器时间的Agent消息");
+  expect(rows[2]).toHaveAttribute("data-side", "left");
+  expect(rows[2]).toHaveTextContent("同一天的第二条");
+
+  expect(timeline).not.toHaveTextContent("photo.png");
+  expect(timeline).not.toHaveTextContent("系统通知文本");
+  expect(timeline).not.toHaveTextContent("缺msgtype的消息");
+  expect(timeline.querySelectorAll("[role=\"separator\"]")).toHaveLength(0);
+});
+
+test("Agent 消息靠左且气泡无名字头像时刻，只渲染 body（纯文本、不读 formatted_body、不注入 HTML），m.replace 不画第二条", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const day1Ts = new Date(2026, 10, 10, 9, 45, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 14, 30, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [{ user_id: "@bot:example.com", name: "小助" }],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "只读正文话题" } },
+                    {
+                      type: "m.room.member",
+                      state_key: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { membership: "join", displayname: "Matrix昵称", avatar_url: "mxc://example.com/avatar" },
+                    },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: {
+                        msgtype: "m.text",
+                        body: "纯文本正文 <b>字面标签</b> <script>window.__waypointXss=true</script>",
+                        format: "org.matrix.custom.html",
+                        formatted_body: "<p>绝不应渲染的HTML</p><img src=\"x\" onerror=\"window.__waypointXss=true\"><script>window.__waypointXss=true</script>",
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-only-html",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts,
+                      content: {
+                        msgtype: "m.text",
+                        format: "org.matrix.custom.html",
+                        formatted_body: "<p>只有formatted_body没有body</p>",
+                      },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-replace",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts,
+                      content: {
+                        msgtype: "m.text",
+                        body: "* 替换后的回退文本",
+                        "m.new_content": { msgtype: "m.text", body: "替换后的新内容" },
+                        "m.relates_to": { rel_type: "m.replace", event_id: "$agent-1" },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day2Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "只读正文话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(1);
+  const agentRow = rows[0];
+  expect(agentRow).toHaveAttribute("data-side", "left");
+  expect(agentRow).toHaveClass("left");
+
+  // 只渲染 body 原文（作为纯文本节点），不读 formatted_body，不注入 HTML，不执行 script
+  const bubble = agentRow.querySelector(".waypoint-bubble");
+  expect(bubble).not.toBeNull();
+  expect(bubble?.textContent).toBe(
+    "纯文本正文 <b>字面标签</b> <script>window.__waypointXss=true</script>",
+  );
+  expect(bubble?.querySelector("b")).toBeNull();
+  expect(bubble?.querySelector("script")).toBeNull();
+  expect(bubble?.querySelector("img")).toBeNull();
+  expect(bubble?.querySelector("p")).toBeNull();
+  expect((window as { __waypointXss?: boolean }).__waypointXss).toBeUndefined();
+  expect(timeline).not.toHaveTextContent("绝不应渲染的HTML");
+  expect(timeline).not.toHaveTextContent("只有formatted_body没有body");
+
+  // 气泡上不写名字（手写名、显示名、localpart、完整 ID）、不放头像、不显示时刻
+  expect(agentRow).not.toHaveTextContent(/小助|Matrix昵称|@bot:example\.com|9:45|09:45/);
+  expect(agentRow.querySelector("img")).toBeNull();
+  expect(timeline.querySelector("img")).toBeNull();
+
+  // m.replace 不画成第二条气泡，也不触发跨日分隔
+  expect(timeline).not.toHaveTextContent("替换后的回退文本");
+  expect(timeline).not.toHaveTextContent("替换后的新内容");
+  expect(timeline.querySelectorAll("[role=\"separator\"]")).toHaveLength(0);
+});
+
+test("本地日历日变更才插入日期分隔（今天/昨天/无时刻本地日期），第一条上无分隔，空过日子不补，分隔不占左右", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  const nov1Ts = new Date(2026, 10, 1, 12, 0, 0).getTime();
+  const nov5Ts = new Date(2026, 10, 5, 22, 15, 0).getTime();
+  const yesterdayMorningTs = new Date(2026, 10, 11, 8, 5, 0).getTime();
+  const yesterdayNightTs = new Date(2026, 10, 11, 23, 59, 0).getTime();
+  const todayTs = new Date(2026, 10, 12, 0, 1, 0).getTime();
+  const expectedNov5Label = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(nov5Ts));
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: nov1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "日期分隔话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-nov1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: nov1Ts,
+                        content: { msgtype: "m.text", body: "11月1日消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-nov5",
+                        sender: "@bot:example.com",
+                        origin_server_ts: nov5Ts,
+                        content: { msgtype: "m.text", body: "11月5日消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-yday-1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: yesterdayMorningTs,
+                        content: { msgtype: "m.text", body: "昨天上午" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-yday-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: yesterdayNightTs,
+                        content: { msgtype: "m.text", body: "昨天深夜" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-today",
+                        sender: "@bot:example.com",
+                        origin_server_ts: todayTs,
+                        content: { msgtype: "m.text", body: "今天凌晨" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$m-today-2",
+                      sender: "@bot:example.com",
+                      origin_server_ts: todayTs + 30_000,
+                      content: { msgtype: "m.text", body: "今天第二条" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = new Date(2026, 10, 12, 9, 0, 0).getTime();
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "日期分隔话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const children = Array.from(timeline.children);
+  expect(children.map((el) => el.getAttribute("role") ?? el.getAttribute("data-side"))).toEqual([
+    "left",
+    "separator",
+    "left",
+    "separator",
+    "right",
+    "left",
+    "separator",
+    "left",
+  ]);
+
+  const separators = Array.from(timeline.querySelectorAll('[role="separator"]'));
+  expect(separators).toHaveLength(3);
+  expect(separators[0].textContent).toBe(expectedNov5Label);
+  expect(separators[0].textContent).not.toMatch(/\d{1,2}:\d{2}/);
+  expect(separators[1].textContent).toBe("昨天");
+  expect(separators[2].textContent).toBe("今天");
+  for (const sep of separators) {
+    expect(sep).not.toHaveAttribute("data-side");
+    expect(sep).not.toHaveClass("waypoint-message-row");
+    expect(sep.querySelector(".waypoint-bubble")).toBeNull();
+  }
+
+  // 增量同步同天消息不新增分隔，且原分隔 DOM 节点保持稳定
+  const firstSepNode = separators[0];
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("今天第二条");
+  });
+  const separatorsAfter = Array.from(timeline.querySelectorAll('[role="separator"]'));
+  expect(separatorsAfter).toHaveLength(3);
+  expect(separatorsAfter[0]).toBe(firstSepNode);
+});
+
+test("两台设备时区不同时，同一批服务器时间戳按各自本地日历日显示不同日期分隔", async () => {
+  const msg1Utc = Date.UTC(2026, 10, 11, 15, 0, 0); // Shanghai: Nov 11 23:00; New_York: Nov 11 10:00
+  const msg2Utc = Date.UTC(2026, 10, 11, 17, 0, 0); // Shanghai: Nov 12 01:00; New_York: Nov 11 12:00
+  const nowUtc = Date.UTC(2026, 10, 12, 6, 0, 0);   // Shanghai: Nov 12 14:00; New_York: Nov 12 01:00
+
+  function makeHomeserver() {
+    const hs = new FakeHomeserver();
+    hs.handler = passwordLoginHandler(async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: msg1Utc, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "时区话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: msg1Utc,
+                        content: { msgtype: "m.text", body: "第一条UTC消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: msg2Utc,
+                        content: { msgtype: "m.text", body: "第二条UTC消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      throw new Error(input.url);
+    });
+    return hs;
+  }
+
+  try {
+    vi.stubEnv("TZ", "Asia/Shanghai");
+    const userA = userEvent.setup();
+    const clockA = new ManualClock();
+    clockA.now = nowUtc;
+    const viewA = render(
+      <WaypointApp
+        homeserver={makeHomeserver()}
+        platform={{ deviceDisplayName: "Waypoint macOS" }}
+        clock={clockA}
+      />,
+    );
+    await login(userA);
+    await userA.click(await screen.findByRole("button", { name: "时区话题" }));
+    const timelineA = screen.getByRole("log", { name: "对话时间线" });
+    const sepsA = timelineA.querySelectorAll('[role="separator"]');
+    expect(sepsA).toHaveLength(1);
+    expect(sepsA[0]).toHaveTextContent("今天");
+    viewA.unmount();
+
+    globalThis.indexedDB = new IDBFactory();
+    vi.stubEnv("TZ", "America/New_York");
+    const userB = userEvent.setup();
+    const clockB = new ManualClock();
+    clockB.now = nowUtc;
+    const viewB = render(
+      <WaypointApp
+        homeserver={makeHomeserver()}
+        platform={{ deviceDisplayName: "Waypoint Android" }}
+        clock={clockB}
+      />,
+    );
+    await login(userB);
+    await userB.click(await screen.findByRole("button", { name: "时区话题" }));
+    const timelineB = screen.getByRole("log", { name: "对话时间线" });
+    expect(timelineB.querySelectorAll('[role="separator"]')).toHaveLength(0);
+    viewB.unmount();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+test("加入、邀请、改名、改 Description 不画成气泡；第三人消息不显示、不占左右也不参与分隔；绑定不合法只显示 Owner 靠右", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const day1Ts = new Date(2026, 10, 10, 10, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const day3Ts = new Date(2026, 10, 12, 10, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "干净时间线" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.member",
+                      event_id: "$mem-invite",
+                      state_key: "@bot:example.com",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { membership: "invite" },
+                    },
+                    {
+                      type: "m.room.member",
+                      event_id: "$mem-join",
+                      state_key: "@bot:example.com",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts + 1000,
+                      content: { membership: "join" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$owner-d1",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day1Ts + 2000,
+                      content: { msgtype: "m.text", body: "第一天的 Owner 消息" },
+                    },
+                    {
+                      type: "m.room.name",
+                      event_id: "$rename-d2",
+                      state_key: "",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day2Ts,
+                      content: { name: "干净时间线" },
+                    },
+                    {
+                      type: "m.room.topic",
+                      event_id: "$retopic-d2",
+                      state_key: "",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day2Ts + 1000,
+                      content: { topic: "不会画成气泡的Description" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$third-d2",
+                      sender: "@intruder:example.com",
+                      origin_server_ts: day2Ts + 2000,
+                      content: { msgtype: "m.text", body: "第三人的跨日消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-d1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts + 5000,
+                      content: { msgtype: "m.text", body: "同一天的 Agent 消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$third-d3",
+                      sender: "@intruder:example.com",
+                      origin_server_ts: day3Ts,
+                      content: { msgtype: "m.text", body: "第三人今天的另一条" },
+                    },
+                  ],
+                },
+              },
+              "!t-bad:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 2, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "无效绑定话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$bad-bot",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day1Ts,
+                      content: { msgtype: "m.text", body: "无效绑定时不该显示的Bot消息" },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$bad-owner",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day2Ts,
+                      content: { msgtype: "m.text", body: "无效绑定仍显示的Owner消息" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day3Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "干净时间线" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveAttribute("data-side", "right");
+  expect(rows[0]).toHaveTextContent("第一天的 Owner 消息");
+  expect(rows[1]).toHaveAttribute("data-side", "left");
+  expect(rows[1]).toHaveTextContent("同一天的 Agent 消息");
+
+  expect(timeline).not.toHaveTextContent("不会画成气泡的Description");
+  expect(timeline).not.toHaveTextContent("第三人的跨日消息");
+  expect(timeline).not.toHaveTextContent("第三人今天的另一条");
+  expect(timeline).not.toHaveTextContent(/invite|join|干净时间线/);
+  expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(0);
+
+  // 绑定不合法时不编名字，只显示 Owner 的消息靠右
+  await user.click(await screen.findByRole("button", { name: "无效绑定话题" }));
+  const badTimeline = screen.getByRole("log", { name: "对话时间线" });
+  const badRows = badTimeline.querySelectorAll("[data-side]");
+  expect(badRows).toHaveLength(1);
+  expect(badRows[0]).toHaveAttribute("data-side", "right");
+  expect(badRows[0]).toHaveTextContent("无效绑定仍显示的Owner消息");
+  expect(badTimeline).not.toHaveTextContent("无效绑定时不该显示的Bot消息");
+  expect(badTimeline.querySelectorAll('[role="separator"]')).toHaveLength(0);
+});
+
+test("落在仍由 Waypoint 管理的 Topic 里的 home 投递当作普通消息，不另建收件 Topic，也不发 /sethome", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const day1Ts = new Date(2026, 10, 11, 9, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 12, 8, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!home-topic:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "日常助手" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$owner-1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: day1Ts,
+                        content: { msgtype: "m.text", body: "以后早报发这里" },
+                      },
+                    ],
+                  },
+                },
+                "!legacy-dm:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "m.room.name", state_key: "", content: { name: "旧私聊不应进列表" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$legacy-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day1Ts,
+                        content: { msgtype: "m.text", body: "旧私聊消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          rooms: {
+            join: {
+              "!home-topic:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$home-delivery",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts,
+                      content: { msgtype: "m.text", body: "今日早报：定时汇总已送达" },
+                    },
+                  ],
+                },
+              },
+              "!legacy-dm:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$legacy-delivery",
+                      sender: "@bot:example.com",
+                      origin_server_ts: day2Ts,
+                      content: { msgtype: "m.text", body: "旧房间投递不应出现" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day2Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  expect(sidebar).toHaveTextContent("日常助手");
+  expect(sidebar).not.toHaveTextContent("旧私聊不应进列表");
+  expect(sidebar).not.toHaveTextContent(/收件|inbox/i);
+
+  await user.click(screen.getByRole("button", { name: "日常助手" }));
+  await act(async () => {
+    clock.advance(1000);
+  });
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("今日早报：定时汇总已送达");
+  });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveAttribute("data-side", "right");
+  expect(rows[1]).toHaveAttribute("data-side", "left");
+  expect(rows[1]).toHaveTextContent("今日早报：定时汇总已送达");
+  expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(1);
+  expect(timeline.querySelector('[role="separator"]')).toHaveTextContent("今天");
+
+  expect(sidebar).toHaveTextContent("日常助手");
+  expect(sidebar.querySelectorAll(".waypoint-topic-row")).toHaveLength(1);
+  expect(homeserver.requests.some((req) => req.url.includes("/createRoom"))).toBe(false);
+  expect(JSON.stringify(homeserver.requests)).not.toContain("/sethome");
+});
