@@ -51,6 +51,7 @@ import {
 const FOREGROUND_SYNC_INTERVAL_MS = 1000;
 const AT_BOTTOM_THRESHOLD_PX = 24;
 const TOP_SCROLL_THRESHOLD_PX = 24;
+const SLASH_COMMAND_HINTS = ["/model", "/stop", "/status", "/commands"] as const;
 
 type AgentsFormState =
   | {
@@ -1576,15 +1577,11 @@ export function TopicsWorkspace({
     }
   }
 
-  async function handleSendMessage(event: FormEvent) {
-    event.preventDefault();
-    if (!activeTopic || activeTopic.unavailable || persistingSendRef.current || reauthRequiredRef.current) {
+  async function sendComposerTextMessage(roomId: string, body: string) {
+    if (persistingSendRef.current || reauthRequiredRef.current) {
       return;
     }
-    const roomId = activeTopic.roomId;
-    const draft = draftsByRoomRef.current[roomId];
-    const body = draft?.text ?? "";
-    if (draft?.attachment || body.trim() === "") {
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
       return;
     }
     persistingSendRef.current = true;
@@ -1617,6 +1614,31 @@ export function TopicsWorkspace({
       persistingSendRef.current = false;
       setPersistingSend(false);
     }
+  }
+
+  async function handleSendMessage(event: FormEvent) {
+    event.preventDefault();
+    if (!activeTopic || activeTopic.unavailable || persistingSendRef.current || reauthRequiredRef.current) {
+      return;
+    }
+    const roomId = activeTopic.roomId;
+    const draft = draftsByRoomRef.current[roomId];
+    const body = draft?.text ?? "";
+    if (draft?.attachment || body.trim() === "") {
+      return;
+    }
+    await sendComposerTextMessage(roomId, body);
+  }
+
+  async function handleSelectSlashCommand(roomId: string, command: string) {
+    if (persistingSendRef.current || reauthRequiredRef.current) {
+      return;
+    }
+    const draft = draftsByRoomRef.current[roomId];
+    if (draft?.attachment || draft?.text !== "/") {
+      return;
+    }
+    await sendComposerTextMessage(roomId, command);
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -2653,6 +2675,33 @@ export function TopicsWorkspace({
                         >
                           移除附件
                         </button>
+                      </div>
+                    ) : null}
+                    {!activeTopic.unavailable &&
+                    !reauthRequired &&
+                    !persistingSend &&
+                    !draftsByRoom[activeTopic.roomId]?.attachment &&
+                    draftsByRoom[activeTopic.roomId]?.text === "/" ? (
+                      <div
+                        role="region"
+                        aria-label="斜杠命令提示"
+                        className="waypoint-slash-hints"
+                      >
+                        <ul className="waypoint-slash-hint-list">
+                          {SLASH_COMMAND_HINTS.map((command) => (
+                            <li key={command}>
+                              <button
+                                type="button"
+                                className="waypoint-slash-hint-button"
+                                onClick={() =>
+                                  void handleSelectSlashCommand(activeTopic.roomId, command)
+                                }
+                              >
+                                {command}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
                     ) : null}
                     <form className="waypoint-composer" onSubmit={handleSendMessage}>

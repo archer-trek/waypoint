@@ -930,3 +930,29 @@ p[role="alert"] {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.waypoint-slash-hints {
+  padding: 0.5rem 1.25rem;
+  border-top: 0.0625rem solid #ddd9d0;
+  background: #efede7;
+}
+
+.waypoint-slash-hint-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.waypoint-slash-hint-button {
+  margin-top: 0;
+  padding: 0.25rem 0.625rem;
+  border: 0.0625rem solid #bbb6aa;
+  border-radius: 0.375rem;
+  background: #ffffff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875rem;
+  cursor: pointer;
+}

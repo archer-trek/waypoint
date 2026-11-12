@@ -17334,3 +17334,517 @@ test("渲染在旧设备上异常时提示并回退原文，不拒绝打开 Topi
     errorSpy.mockRestore();
   }
 });
+
+test("只在输入是斜杠且还没写参数时提示四条命令，选定后作为普通消息发出且不在本地执行", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sentBodies: Array<{ url: string; body: unknown }> = [];
+  let syncRound = 0;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/_matrix/client/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "GET") {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "POST") {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV-1" },
+      };
+    }
+    if (input.url.includes("/_matrix/client/v3/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "斜杠测试话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sentBodies.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: { event_id: `$sent-${sentBodies.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "斜杠测试话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+
+  // 只打一个斜杠时出现四条提示，且不包含 /sethome、/yolo、/approve
+  await user.type(input, "/");
+  const hintRegion = screen.getByRole("region", { name: "斜杠命令提示" });
+  const hintButtons = within(hintRegion).getAllByRole("button");
+  expect(hintButtons.map((btn) => btn.textContent)).toEqual([
+    "/model",
+    "/stop",
+    "/status",
+    "/commands",
+  ]);
+  expect(hintRegion).not.toHaveTextContent("/sethome");
+  expect(hintRegion).not.toHaveTextContent("/yolo");
+  expect(hintRegion).not.toHaveTextContent("/approve");
+
+  // 写了其他字符或参数后提示消失
+  await user.type(input, "m");
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+  await user.type(input, "odel fast");
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+
+  // 中间带斜杠或前导空格也不触发提示
+  await user.clear(input);
+  await user.type(input, "hello /");
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+
+  await user.clear(input);
+  await user.type(input, "/sethome");
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+
+  // 清空后重新只打 / ，选定 /status 直接作为消息发出，本地不执行
+  await user.clear(input);
+  await user.type(input, "/");
+  const refreshedHints = screen.getByRole("region", { name: "斜杠命令提示" });
+  await user.click(within(refreshedHints).getByRole("button", { name: "/status" }));
+
+  await waitFor(() => {
+    expect(sentBodies).toHaveLength(1);
+  });
+  expect(sentBodies[0].url).toContain("!t1%3Aexample.com/send/m.room.message/");
+  expect(sentBodies[0].body).toEqual({ msgtype: "m.text", body: "/status" });
+  expect(input).toHaveValue("");
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+  expect(within(screen.getByRole("log", { name: "对话时间线" })).getByText("/status")).toBeInTheDocument();
+});
+
+test("其余内容整段原样发送（含 /yolo、/approve、!approve、/sethome、带参斜杠与直接发 /），四条提示选中后均不拦截不改写", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sentBodies: string[] = [];
+  let syncRound = 0;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/_matrix/client/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "GET") {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "POST") {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV-1" },
+      };
+    }
+    if (input.url.includes("/_matrix/client/v3/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "原样发送话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const payload = input.body as { msgtype: string; body: string };
+      expect(payload.msgtype).toBe("m.text");
+      sentBodies.push(payload.body);
+      return { type: "response", status: 200, body: { event_id: `$sent-${sentBodies.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "原样发送话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+
+  // 逐一选定其余三条斜杠提示（/model、/stop、/commands），均原样发出且不中断同步
+  for (const cmd of ["/model", "/stop", "/commands"]) {
+    await user.type(input, "/");
+    const hintRegion = screen.getByRole("region", { name: "斜杠命令提示" });
+    await user.click(within(hintRegion).getByRole("button", { name: cmd }));
+    await waitFor(() => {
+      expect(sentBodies).toContain(cmd);
+    });
+  }
+
+  // 选定 /stop 后同步仍然照常进行（Waypoint 未在本地执行 /stop）
+  const syncCountBefore = homeserver.requests.filter((r) => r.url.includes("/_matrix/client/v3/sync")).length;
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(homeserver.requests.filter((r) => r.url.includes("/_matrix/client/v3/sync")).length).toBeGreaterThan(
+      syncCountBefore,
+    );
+  });
+
+  // 其余内容整段原样发送，包括 /yolo、/approve、!approve、/sethome、带参斜杠与单独 /
+  const verbatimInputs = [
+    "/yolo",
+    "/approve",
+    "!approve",
+    "/sethome",
+    "/sethome #home:example.com",
+    "/model gpt-4o",
+    "/",
+  ];
+
+  for (const text of verbatimInputs) {
+    await user.type(input, text);
+    if (text === "/") {
+      expect(screen.getByRole("region", { name: "斜杠命令提示" })).toBeInTheDocument();
+    } else {
+      expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+    }
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => {
+      expect(sentBodies[sentBodies.length - 1]).toBe(text);
+    });
+  }
+
+  expect(sentBodies).toEqual([
+    "/model",
+    "/stop",
+    "/commands",
+    "/yolo",
+    "/approve",
+    "!approve",
+    "/sethome",
+    "/sethome #home:example.com",
+    "/model gpt-4o",
+    "/",
+  ]);
+});
+
+test("正在回应（消息挂着 👀）时输入框照常立即发送，不在本地排队，也不改写成 steer 或 stop", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sentMessages: Array<{ url: string; body: unknown }> = [];
+  let syncRound = 0;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/_matrix/client/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "GET") {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "POST") {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV-1" },
+      };
+    }
+    if (input.url.includes("/_matrix/client/v3/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "正在回应话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$bot-ack",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2000,
+                        content: { msgtype: "m.text", body: "我先查一下" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$bot-eyes",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2001,
+                        content: {
+                          "m.relates_to": {
+                            rel_type: "m.annotation",
+                            event_id: "$bot-ack",
+                            key: "👀",
+                          },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sentMessages.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: { event_id: `$owner-${sentMessages.length}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "正在回应话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  expect(input).toBeEnabled();
+
+  // 在 👀 未撤回期间直接发普通消息，立刻发出，不排队、不改写成 steer 或 stop
+  await user.type(input, "顺便把日志也贴出来");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => {
+    expect(sentMessages).toHaveLength(1);
+  });
+  expect(sentMessages[0].body).toEqual({
+    msgtype: "m.text",
+    body: "顺便把日志也贴出来",
+  });
+
+  // 在 👀 未撤回期间点斜杠提示，也照常立即原样发出
+  await user.type(input, "/");
+  const hintRegion = screen.getByRole("region", { name: "斜杠命令提示" });
+  await user.click(within(hintRegion).getByRole("button", { name: "/status" }));
+
+  await waitFor(() => {
+    expect(sentMessages).toHaveLength(2);
+  });
+  expect(sentMessages[1].body).toEqual({
+    msgtype: "m.text",
+    body: "/status",
+  });
+  expect(JSON.stringify(sentMessages)).not.toContain("steer");
+});
+
+test("Topic 变为不可用或需重新验证时隐藏斜杠提示并保留 / 草稿，恢复后重新提示", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/_matrix/client/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "GET") {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.url.endsWith("/_matrix/client/v3/login") && input.method === "POST") {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV-1" },
+      };
+    }
+    if (input.url.includes("/_matrix/client/v3/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [{ user_id: "@bot:example.com", name: "小赫" }],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "可恢复斜杠话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "leave" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  const { clock } = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "可恢复斜杠话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(input, "/");
+  expect(screen.getByRole("region", { name: "斜杠命令提示" })).toBeInTheDocument();
+
+  // 第三人加入 -> Topic 不可用，提示消失但 / 草稿还在
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("status", { name: "Topic 不可用" })).toBeInTheDocument();
+  });
+  expect(screen.queryByRole("region", { name: "斜杠命令提示" })).not.toBeInTheDocument();
+  expect(input).toHaveValue("/");
+
+  // 第三人离开 -> Topic 恢复可用，/ 草稿触发四条提示再次出现
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("region", { name: "斜杠命令提示" })).toBeInTheDocument();
+});
