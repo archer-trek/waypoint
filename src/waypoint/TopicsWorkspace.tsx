@@ -9,6 +9,7 @@ import {
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
+import type { DraftAttachment, DraftRecord } from "./session-store";
 import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
 import {
   appendDirectRoom,
@@ -82,9 +83,16 @@ export function TopicsWorkspace({
   const [editDescriptionInput, setEditDescriptionInput] = useState("");
   const [editPendingFields, setEditPendingFields] = useState({ name: true, description: true });
   const [editError, setEditError] = useState<string | undefined>(undefined);
-  const [draftsByRoom, setDraftsByRoom] = useState<Record<string, string>>({});
+  const [draftsByRoom, setDraftsByRoom] = useState<Record<string, DraftRecord>>(() =>
+    client.drafts(),
+  );
+  const draftsByRoomRef = useRef(draftsByRoom);
+  draftsByRoomRef.current = draftsByRoom;
+  const draftMutationSeqRef = useRef<Record<string, number>>({});
   const [composerError, setComposerError] = useState<string | undefined>(undefined);
+  const [persistingSend, setPersistingSend] = useState(false);
   const persistingSendRef = useRef(false);
+  const visibleComposerRoomRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const pausedRef = useRef(false);
   const syncTimerRef = useRef<number | undefined>(undefined);
@@ -643,6 +651,54 @@ export function TopicsWorkspace({
     }
   }
 
+  const visibleComposerRoomId =
+    !settingsOpen && !creating && !editing && activeTopic ? activeTopic.roomId : null;
+
+  useEffect(() => {
+    const prevRoomId = visibleComposerRoomRef.current;
+    visibleComposerRoomRef.current = visibleComposerRoomId;
+    if (prevRoomId && prevRoomId !== visibleComposerRoomId) {
+      setComposerError(undefined);
+      setDraftsByRoom((prev) => {
+        const draft = prev[prevRoomId];
+        if (!draft) {
+          return prev;
+        }
+        const hasText = typeof draft.text === "string" && draft.text.trim() !== "";
+        if (hasText) {
+          return prev;
+        }
+        if (draft.attachment) {
+          if (draft.text === undefined) {
+            return prev;
+          }
+          return { ...prev, [prevRoomId]: { attachment: draft.attachment } };
+        }
+        const next = { ...prev };
+        delete next[prevRoomId];
+        return next;
+      });
+    }
+  }, [visibleComposerRoomId]);
+
+  useEffect(() => {
+    setDraftsByRoom(client.drafts());
+  }, [client]);
+
+  useEffect(() => {
+    setDraftsByRoom((prev) => {
+      const staleIds = Object.keys(prev).filter((roomId) => !(roomId in rooms));
+      if (staleIds.length === 0) {
+        return prev;
+      }
+      const next = { ...prev };
+      for (const id of staleIds) {
+        delete next[id];
+      }
+      return next;
+    });
+  }, [rooms]);
+
   useEffect(() => {
     mountedRef.current = true;
     pausedRef.current = false;
@@ -661,11 +717,81 @@ export function TopicsWorkspace({
     setDescriptionExpanded(false);
   }
 
-  function updateDraft(roomId: string, text: string) {
-    setDraftsByRoom((prev) => ({ ...prev, [roomId]: text }));
+  function bumpDraftSeq(roomId: string): number {
+    const next = (draftMutationSeqRef.current[roomId] ?? 0) + 1;
+    draftMutationSeqRef.current[roomId] = next;
+    return next;
+  }
+
+  async function handleSelectAttachment(roomId: string, file: File) {
+    const seq = bumpDraftSeq(roomId);
+    let data: Uint8Array;
+    try {
+      data = await readFileBytes(file);
+    } catch {
+      return;
+    }
+    if (draftMutationSeqRef.current[roomId] !== seq) {
+      return;
+    }
+    const existingText = draftsByRoomRef.current[roomId]?.text;
+    const attachment: DraftAttachment = {
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      size: data.byteLength,
+      data,
+    };
+    const nextDraft: DraftRecord = {
+      ...(existingText !== undefined && existingText !== "" ? { text: existingText } : {}),
+      attachment,
+    };
+    setDraftsByRoom((prev) => ({ ...prev, [roomId]: nextDraft }));
     if (composerError) {
       setComposerError(undefined);
     }
+    void client.setDraft(roomId, nextDraft).catch(() => undefined);
+  }
+
+  function handleRemoveAttachment(roomId: string) {
+    bumpDraftSeq(roomId);
+    const existingText = draftsByRoomRef.current[roomId]?.text;
+    const hasText = typeof existingText === "string" && existingText !== "";
+    const nextDraft: DraftRecord | undefined = hasText ? { text: existingText } : undefined;
+    setDraftsByRoom((prev) => {
+      const next = { ...prev };
+      if (nextDraft) {
+        next[roomId] = nextDraft;
+      } else {
+        delete next[roomId];
+      }
+      return next;
+    });
+    if (composerError) {
+      setComposerError(undefined);
+    }
+    void client.setDraft(roomId, nextDraft).catch(() => undefined);
+  }
+
+  function updateDraftText(roomId: string, text: string) {
+    bumpDraftSeq(roomId);
+    const existingAttachment = draftsByRoomRef.current[roomId]?.attachment;
+    const nextDraft: DraftRecord = {
+      ...(text !== "" ? { text } : {}),
+      ...(existingAttachment ? { attachment: existingAttachment } : {}),
+    };
+    setDraftsByRoom((prev) => {
+      const next = { ...prev };
+      if (nextDraft.text !== undefined || nextDraft.attachment !== undefined) {
+        next[roomId] = nextDraft;
+      } else {
+        delete next[roomId];
+      }
+      return next;
+    });
+    if (composerError) {
+      setComposerError(undefined);
+    }
+    void client.setDraft(roomId, nextDraft).catch(() => undefined);
   }
 
   async function handleSendMessage(event: FormEvent) {
@@ -674,24 +800,40 @@ export function TopicsWorkspace({
       return;
     }
     const roomId = activeTopic.roomId;
-    const body = draftsByRoom[roomId] ?? "";
-    if (body.trim() === "") {
+    const draft = draftsByRoomRef.current[roomId];
+    const body = draft?.text ?? "";
+    if (draft?.attachment || body.trim() === "") {
       return;
     }
     persistingSendRef.current = true;
+    setPersistingSend(true);
     setComposerError(undefined);
     try {
-      await client.enqueueRoomEvent(roomId, "m.room.message", {
-        msgtype: "m.text",
-        body,
+      await client.enqueueRoomEvent(
+        roomId,
+        "m.room.message",
+        {
+          msgtype: "m.text",
+          body,
+        },
+        { clearDraft: true },
+      );
+      bumpDraftSeq(roomId);
+      setDraftsByRoom((prev) => {
+        if (!(roomId in prev)) {
+          return prev;
+        }
+        const next = { ...prev };
+        delete next[roomId];
+        return next;
       });
-      setDraftsByRoom((prev) => ({ ...prev, [roomId]: "" }));
       setRevision((value) => value + 1);
       void flushRetryQueue();
     } catch {
       setComposerError("消息保存失败，请重试。");
     } finally {
       persistingSendRef.current = false;
+      setPersistingSend(false);
     }
   }
 
@@ -1294,14 +1436,50 @@ export function TopicsWorkspace({
                     data-keyboard-inset={safeInset}
                   >
                     {composerError ? <p role="alert">{composerError}</p> : null}
+                    {draftsByRoom[activeTopic.roomId]?.attachment ? (
+                      <div
+                        role="region"
+                        aria-label="已选附件"
+                        className="waypoint-draft-attachment"
+                      >
+                        <span className="waypoint-draft-attachment-name">
+                          {draftsByRoom[activeTopic.roomId]?.attachment?.name}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={persistingSend}
+                          onClick={() => handleRemoveAttachment(activeTopic.roomId)}
+                        >
+                          移除附件
+                        </button>
+                      </div>
+                    ) : null}
                     <form className="waypoint-composer" onSubmit={handleSendMessage}>
+                      <label className="waypoint-attach-button">
+                        附件
+                        <input
+                          type="file"
+                          aria-label="选择附件"
+                          className="waypoint-sr-only"
+                          disabled={persistingSend}
+                          onChange={(event) => {
+                            const file = event.target.files?.[0];
+                            event.target.value = "";
+                            if (file) {
+                              void handleSelectAttachment(activeTopic.roomId, file);
+                            }
+                          }}
+                        />
+                      </label>
                       <textarea
                         aria-label="输入消息"
                         name="message"
-                        value={draftsByRoom[activeTopic.roomId] ?? ""}
-                        onChange={(event) => updateDraft(activeTopic.roomId, event.target.value)}
+                        value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
+                        onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                       />
-                      <button type="submit">发送</button>
+                      <button type="submit" disabled={persistingSend}>
+                        发送
+                      </button>
                     </form>
                   </div>
                 </main>
@@ -1323,4 +1501,23 @@ export function TopicsWorkspace({
       ) : null}
     </div>
   );
+}
+
+async function readFileBytes(file: File): Promise<Uint8Array> {
+  if (typeof file.arrayBuffer === "function") {
+    return new Uint8Array(await file.arrayBuffer());
+  }
+  const buffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (reader.result instanceof ArrayBuffer) {
+        resolve(reader.result);
+      } else {
+        reject(new Error("无法读取附件内容"));
+      }
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("无法读取附件内容"));
+    reader.readAsArrayBuffer(file);
+  });
+  return new Uint8Array(buffer);
 }

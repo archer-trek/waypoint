@@ -7536,3 +7536,424 @@ test("落在仍由 Waypoint 管理的 Topic 里的 home 投递当作普通消息
   expect(homeserver.requests.some((req) => req.url.includes("/createRoom"))).toBe(false);
   expect(JSON.stringify(homeserver.requests)).not.toContain("/sethome");
 });
+
+test("文字草稿只留在这台设备：空或空白不保存，切走和重启后仍在，不进重试队列且另一台设备看不到", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "草稿话题一" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "草稿话题二" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const device1 = renderApp(homeserver);
+  await login(user);
+
+  // 在话题一写文字草稿，在话题二写纯空白（不应保存）
+  await user.click(await screen.findByRole("button", { name: "草稿话题一" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "只留在这台设备的文字");
+  await user.click(screen.getByRole("button", { name: "草稿话题二" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "   \n  ");
+
+  // 切回话题一再切回话题二：话题一保留，话题二空白输入未保存
+  await user.click(screen.getByRole("button", { name: "草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("只留在这台设备的文字");
+  await user.click(screen.getByRole("button", { name: "草稿话题二" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 前台同步推进也不触发草稿进入重试队列或同步给服务器
+  await act(async () => {
+    device1.clock.advance(1000);
+  });
+  expect(
+    homeserver.requests.some(
+      (r) =>
+        r.url.includes("/send/") ||
+        r.url.includes("/account_data/") ||
+        r.url.includes("/createRoom"),
+    ),
+  ).toBe(false);
+
+  // 重启这台设备后，话题一的文字草稿还在
+  device1.unmount();
+  const device1Restarted = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("只留在这台设备的文字");
+  await user.click(screen.getByRole("button", { name: "草稿话题二" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 确认没有进入重试队列或变成未确认气泡
+  await user.click(screen.getByRole("button", { name: "草稿话题一" }));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).not.toHaveTextContent("只留在这台设备的文字");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+
+  // 清空文字草稿并重启：已清空的草稿不再恢复
+  await user.clear(screen.getByRole("textbox", { name: "输入消息" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "再留一句");
+  await user.clear(screen.getByRole("textbox", { name: "输入消息" }));
+  device1Restarted.unmount();
+
+  const device1AfterClear = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 重新写入一份草稿，再换一台设备（全新的 IndexedDB）登录同一账号：另一台设备看不到
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "设备一私密草稿");
+  device1AfterClear.unmount();
+
+  const device1Db = globalThis.indexedDB;
+  globalThis.indexedDB = new IDBFactory();
+  try {
+    const device2 = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "草稿话题一" }));
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+    device2.unmount();
+  } finally {
+    globalThis.indexedDB = device1Db;
+  }
+});
+
+test("附件草稿至多一个、可无文字或图文共存，拿掉其一另一个还在，切走和重启后保留，另一台设备看不到且不进重试队列", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "附件草稿话题一" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "附件草稿话题二" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const device1 = renderApp(homeserver);
+  await login(user);
+
+  // 1. 只有附件没有文字；再选第二个附件时只保留一个（至多一个）
+  await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File(["first-bytes"], "first.txt", { type: "text/plain" }),
+  );
+  const attachmentRegion = await screen.findByRole("region", { name: "已选附件" });
+  expect(attachmentRegion).toHaveTextContent("first.txt");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File(["png-bytes"], "second.png", { type: "image/png" }),
+  );
+  await waitFor(() => {
+    expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("second.png");
+  });
+  expect(screen.getByRole("region", { name: "已选附件" })).not.toHaveTextContent("first.txt");
+
+  // 2. 切走再回来还在
+  await user.click(screen.getByRole("button", { name: "附件草稿话题二" }));
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("second.png");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 3. 重启后只有附件的草稿还在
+  device1.unmount();
+  const device1Restarted = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("second.png");
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 4. 补写文字后拿掉附件，文字还在，且重启后仍保留文字
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "附件说明文字");
+  await user.click(screen.getByRole("button", { name: "移除附件" }));
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("附件说明文字");
+
+  await user.click(screen.getByRole("button", { name: "附件草稿话题二" }));
+  await user.click(screen.getByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("附件说明文字");
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+
+  device1Restarted.unmount();
+  const device1AfterRemoveAttachment = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("附件说明文字");
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+
+  // 5. 再选上附件后拿掉文字，附件还在，且重启后仍在
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File(["pdf-bytes"], "third.pdf", { type: "application/pdf" }),
+  );
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("third.pdf");
+  await user.clear(screen.getByRole("textbox", { name: "输入消息" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("third.pdf");
+
+  device1AfterRemoveAttachment.unmount();
+  const device1AfterClearText = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("third.pdf");
+
+  // 6. 移除最后一个附件变成空输入，重启后不再保留
+  await user.click(screen.getByRole("button", { name: "移除附件" }));
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  device1AfterClearText.unmount();
+
+  const device1Empty = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  // 7. 重写带附件草稿，确认不进重试队列且另一台设备看不到
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "仅本机图文");
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File(["bin"], "secret.bin", { type: "application/octet-stream" }),
+  );
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("secret.bin");
+
+  await act(async () => {
+    device1Empty.clock.advance(1000);
+  });
+  expect(
+    homeserver.requests.some(
+      (r) =>
+        r.url.includes("/send/") ||
+        r.url.includes("/upload") ||
+        r.url.includes("/account_data/") ||
+        r.url.includes("/createRoom"),
+    ),
+  ).toBe(false);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  device1Empty.unmount();
+
+  const device1Db = globalThis.indexedDB;
+  globalThis.indexedDB = new IDBFactory();
+  try {
+    const device2 = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "附件草稿话题一" }));
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+    expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+    device2.unmount();
+  } finally {
+    globalThis.indexedDB = device1Db;
+  }
+});
+
+test("点发送后等本地写入成功才离开输入区，服务器发送失败时不填回输入区且重启后草稿仍已清空", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendAttempts = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "写入时机话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "其他话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendAttempts += 1;
+      if (sendAttempts === 1) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "temporary server error" },
+        };
+      }
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "写入时机话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(input, "必须落盘后才离开输入区");
+
+  // 拦住 IndexedDB put 完成回调，模拟本地写入尚未完成
+  const writeGate = deferred<void>();
+  const origPut = IDBObjectStore.prototype.put;
+  let putIntercepted = false;
+  const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+    this: IDBObjectStore,
+    value: unknown,
+    key?: IDBValidKey,
+  ) {
+    const req = origPut.call(this, value, key);
+    if (!putIntercepted) {
+      putIntercepted = true;
+      let userOnSuccess: ((this: IDBRequest<IDBValidKey>, ev: Event) => unknown) | null = null;
+      let firedEvent: Event | null = null;
+      Object.defineProperty(req, "onsuccess", {
+        configurable: true,
+        get() {
+          return null;
+        },
+        set(fn) {
+          userOnSuccess = fn;
+        },
+      });
+      req.addEventListener("success", (ev) => {
+        firedEvent = ev;
+        void writeGate.promise.then(() => {
+          userOnSuccess?.call(req, firedEvent!);
+        });
+      });
+    }
+    return req;
+  });
+
+  try {
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => {
+      expect(putIntercepted).toBe(true);
+    });
+    // 本地写入完成前，内容仍在输入区，不进入时间线也不发请求
+    expect(input).toHaveValue("必须落盘后才离开输入区");
+    expect(screen.getByRole("log", { name: "对话时间线" })).not.toHaveTextContent(
+      "必须落盘后才离开输入区",
+    );
+    expect(homeserver.requests.some((r) => r.url.includes("/send/"))).toBe(false);
+
+    // 放行本地写入
+    await act(async () => {
+      writeGate.resolve();
+    });
+  } finally {
+    putSpy.mockRestore();
+  }
+
+  // 本地写入成功后内容离开输入区，进入时间线并触发发送
+  await waitFor(() => {
+    expect(input).toHaveValue("");
+  });
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("必须落盘后才离开输入区");
+
+  await waitFor(() => {
+    expect(sendAttempts).toBe(1);
+  });
+  // 服务器返回 500 失败后，不把内容填回输入区
+  expect(input).toHaveValue("");
+
+  // 退避重试网络失败后，仍不把内容填回输入区
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(sendAttempts).toBe(2);
+  });
+  expect(input).toHaveValue("");
+
+  // 切走再回来、以及重启后，输入区仍为空（已清除的草稿不会复活）
+  await user.click(screen.getByRole("button", { name: "其他话题" }));
+  await user.click(screen.getByRole("button", { name: "写入时机话题" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+  first.unmount();
+  const restarted = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "写入时机话题" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  restarted.unmount();
+});

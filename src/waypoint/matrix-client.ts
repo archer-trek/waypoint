@@ -4,6 +4,8 @@ import {
   dropPreListSession,
   loadSession,
   saveSession,
+  type DraftAttachment,
+  type DraftRecord,
   type PendingRoomEvent,
   type RawMatrixEvent,
   type SessionRecord,
@@ -24,6 +26,7 @@ export class MatrixClient {
   private storedAccountData: Record<string, unknown> = {};
   private storedRooms: Record<string, StoredRoomEvents> = {};
   private storedPendingEvents: PendingRoomEvent[] = [];
+  private storedDrafts: Record<string, DraftRecord> = {};
   private txnCounter = 0;
   private persistTail: Promise<void> = Promise.resolve();
 
@@ -49,6 +52,32 @@ export class MatrixClient {
     return this.storedRooms;
   }
 
+  draft(roomId: string): DraftRecord | undefined {
+    const existing = this.storedDrafts[roomId];
+    return existing ? cloneDraftRecord(existing) : undefined;
+  }
+
+  drafts(): Record<string, DraftRecord> {
+    return cloneDrafts(this.storedDrafts);
+  }
+
+  async setDraft(roomId: string, draft: DraftRecord | undefined): Promise<void> {
+    const normalized = normalizeDraftRecord(draft);
+    await this.enqueuePersist(async () => {
+      const nextDrafts = cloneDrafts(this.storedDrafts);
+      if (normalized) {
+        nextDrafts[roomId] = normalized;
+      } else {
+        if (!(roomId in nextDrafts)) {
+          return;
+        }
+        delete nextDrafts[roomId];
+      }
+      await saveSession(this.sessionRecord({ drafts: nextDrafts }));
+      this.storedDrafts = nextDrafts;
+    });
+  }
+
   pendingRoomEvents(roomId?: string): PendingRoomEvent[] {
     const filtered =
       roomId === undefined
@@ -70,6 +99,7 @@ export class MatrixClient {
     this.storedPendingEvents = Array.isArray(stored.pendingEvents)
       ? clonePendingEvents(stored.pendingEvents)
       : [];
+    this.storedDrafts = isPlainObject(stored.drafts) ? cloneDrafts(stored.drafts) : {};
     if (stored.accessToken && stored.deviceId) {
       this.accessToken = stored.accessToken;
       this.deviceId = stored.deviceId;
@@ -119,6 +149,7 @@ export class MatrixClient {
       this.storedAccountData = {};
       this.storedRooms = {};
       this.storedPendingEvents = [];
+      this.storedDrafts = {};
       return saveSession({
         baseUrl: this.baseUrl,
         userId,
@@ -154,6 +185,7 @@ export class MatrixClient {
       this.storedAccountData = mergeAccountData(this.storedAccountData, body, attempt.incremental);
       this.storedRooms = mergeSyncRooms(this.storedRooms, body, attempt.incremental);
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
+      this.storedDrafts = reconcileDraftsWithSync(this.storedDrafts, body);
       const cursor = nextBatch(body);
       if (cursor) {
         this.syncCursor = cursor;
@@ -295,6 +327,7 @@ export class MatrixClient {
     roomId: string,
     type: string,
     content: Record<string, unknown>,
+    options?: { clearDraft?: boolean },
   ): Promise<PendingRoomEvent> {
     if (!this.accessToken || !this.userId) {
       throw new Error("没有 access token");
@@ -308,8 +341,14 @@ export class MatrixClient {
     };
     await this.enqueuePersist(async () => {
       const nextPending = [...this.storedPendingEvents, item];
-      await saveSession(this.sessionRecord(nextPending));
+      let nextDrafts = this.storedDrafts;
+      if (options?.clearDraft && roomId in this.storedDrafts) {
+        nextDrafts = cloneDrafts(this.storedDrafts);
+        delete nextDrafts[roomId];
+      }
+      await saveSession(this.sessionRecord({ pending: nextPending, drafts: nextDrafts }));
       this.storedPendingEvents = nextPending;
+      this.storedDrafts = nextDrafts;
     });
     return clonePendingEvent(item);
   }
@@ -360,10 +399,7 @@ export class MatrixClient {
         });
         nextRooms[roomId] = existingRoom;
       }
-      await saveSession({
-        ...this.sessionRecord(nextPending),
-        ...(Object.keys(nextRooms).length > 0 ? { rooms: nextRooms } : {}),
-      });
+      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
     });
@@ -416,6 +452,7 @@ export class MatrixClient {
       this.storedAccountData = {};
       this.storedRooms = {};
       this.storedPendingEvents = [];
+      this.storedDrafts = {};
       return dropPreListSession();
     });
   }
@@ -428,7 +465,11 @@ export class MatrixClient {
     });
   }
 
-  private sessionRecord(pendingOverride?: PendingRoomEvent[]): SessionRecord {
+  private sessionRecord(overrides?: {
+    pending?: PendingRoomEvent[];
+    rooms?: Record<string, StoredRoomEvents>;
+    drafts?: Record<string, DraftRecord>;
+  }): SessionRecord {
     const session: SessionRecord = {
       baseUrl: this.baseUrl,
       userId: this.userId,
@@ -441,12 +482,17 @@ export class MatrixClient {
     if (Object.keys(this.storedAccountData).length > 0) {
       session.accountData = this.storedAccountData;
     }
-    if (Object.keys(this.storedRooms).length > 0) {
-      session.rooms = this.storedRooms;
+    const rooms = overrides?.rooms ?? this.storedRooms;
+    if (Object.keys(rooms).length > 0) {
+      session.rooms = rooms;
     }
-    const pending = pendingOverride ?? this.storedPendingEvents;
+    const pending = overrides?.pending ?? this.storedPendingEvents;
     if (pending.length > 0) {
       session.pendingEvents = pending;
+    }
+    const drafts = overrides?.drafts ?? this.storedDrafts;
+    if (Object.keys(drafts).length > 0) {
+      session.drafts = cloneDrafts(drafts);
     }
     return session;
   }
@@ -761,4 +807,114 @@ function reconcilePendingWithSync(
     }
     return true;
   });
+}
+
+function toUint8Array(value: unknown): Uint8Array | undefined {
+  if (value instanceof Uint8Array) {
+    return new Uint8Array(value);
+  }
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value.slice(0));
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+  }
+  return undefined;
+}
+
+function cloneDraftAttachment(raw: unknown): DraftAttachment | undefined {
+  if (!isPlainObject(raw)) {
+    return undefined;
+  }
+  if (
+    typeof raw.name !== "string" ||
+    raw.name === "" ||
+    typeof raw.mimeType !== "string" ||
+    typeof raw.size !== "number" ||
+    !Number.isFinite(raw.size) ||
+    raw.size < 0
+  ) {
+    return undefined;
+  }
+  const data = toUint8Array(raw.data);
+  if (!data) {
+    return undefined;
+  }
+  return {
+    name: raw.name,
+    mimeType: raw.mimeType,
+    size: raw.size,
+    data,
+  };
+}
+
+function normalizeDraftRecord(raw: unknown): DraftRecord | undefined {
+  if (!isPlainObject(raw)) {
+    return undefined;
+  }
+  const text = typeof raw.text === "string" && raw.text.trim() !== "" ? raw.text : undefined;
+  const attachment = cloneDraftAttachment(raw.attachment);
+  if (text === undefined && attachment === undefined) {
+    return undefined;
+  }
+  return {
+    ...(text !== undefined ? { text } : {}),
+    ...(attachment !== undefined ? { attachment } : {}),
+  };
+}
+
+function cloneDraftRecord(draft: DraftRecord): DraftRecord {
+  return {
+    ...(draft.text !== undefined ? { text: draft.text } : {}),
+    ...(draft.attachment !== undefined
+      ? {
+          attachment: {
+            name: draft.attachment.name,
+            mimeType: draft.attachment.mimeType,
+            size: draft.attachment.size,
+            data: new Uint8Array(draft.attachment.data),
+          },
+        }
+      : {}),
+  };
+}
+
+function cloneDrafts(raw: Record<string, unknown>): Record<string, DraftRecord> {
+  const out: Record<string, DraftRecord> = {};
+  for (const [roomId, value] of Object.entries(raw)) {
+    if (!roomId) {
+      continue;
+    }
+    const normalized = normalizeDraftRecord(value);
+    if (normalized) {
+      out[roomId] = normalized;
+    }
+  }
+  return out;
+}
+
+function reconcileDraftsWithSync(
+  drafts: Record<string, DraftRecord>,
+  body: unknown,
+): Record<string, DraftRecord> {
+  if (Object.keys(drafts).length === 0 || !isPlainObject(body) || !isPlainObject(body.rooms)) {
+    return drafts;
+  }
+  const leaveRooms = body.rooms.leave;
+  if (!isPlainObject(leaveRooms)) {
+    return drafts;
+  }
+  const leaveKeys = Object.keys(leaveRooms);
+  if (leaveKeys.length === 0) {
+    return drafts;
+  }
+  let changed = false;
+  const next = cloneDrafts(drafts);
+  for (const roomId of leaveKeys) {
+    if (roomId in next) {
+      delete next[roomId];
+      changed = true;
+    }
+  }
+  return changed ? next : drafts;
 }

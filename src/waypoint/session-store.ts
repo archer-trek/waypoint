@@ -13,6 +13,18 @@ export type PendingRoomEvent = {
   content: Record<string, unknown>;
 };
 
+export type DraftAttachment = {
+  name: string;
+  mimeType: string;
+  size: number;
+  data: Uint8Array;
+};
+
+export type DraftRecord = {
+  text?: string;
+  attachment?: DraftAttachment;
+};
+
 export type SessionRecord = {
   baseUrl: string;
   userId: string;
@@ -22,6 +34,7 @@ export type SessionRecord = {
   accountData?: Record<string, unknown>;
   rooms?: Record<string, StoredRoomEvents>;
   pendingEvents?: PendingRoomEvent[];
+  drafts?: Record<string, DraftRecord>;
 };
 
 const DB_NAME = "waypoint";
@@ -63,6 +76,9 @@ export async function dropCredential(): Promise<void> {
   }
   if (current.pendingEvents && current.pendingEvents.length > 0) {
     next.pendingEvents = current.pendingEvents;
+  }
+  if (current.drafts && Object.keys(current.drafts).length > 0) {
+    next.drafts = current.drafts;
   }
   await saveSession(next);
 }
