@@ -19,6 +19,10 @@ class ManualClock implements Clock {
     return this.now;
   }
 
+  get timerCount(): number {
+    return this.timers.size;
+  }
+
   setTimeout(handler: () => void, timeoutMs: number): number {
     const id = this.nextId++;
     this.timers.set(id, { at: this.now + timeoutMs, handler });
@@ -8263,6 +8267,7 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
   await waitFor(() => expect(topicTitles()).toEqual(["话题二", "话题一"]));
 
   // 第 2 轮同步带来 limited: true 与 25 条事件：列表照常重排，后台不补齐缺口，本轮最多处理 20 条
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(2));
   await waitFor(() => expect(topicTitles()).toEqual(["话题一", "话题二"]));
@@ -8281,6 +8286,7 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
   expect(bubblesAfterRound2).toContain("消息-25");
 
   // 第 3 轮再带来 5 条增量事件：追加到现有时间线（非全量上限 20）
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(3));
   await waitFor(() => expect(timeline.querySelectorAll("[data-side]")).toHaveLength(26));
@@ -10160,7 +10166,9 @@ test("列表按已读位置标出左侧实心圆点与加粗标题，忽略通�
   expect(unreadRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
   const unreadNameEl = unreadRow.querySelector(".waypoint-topic-name");
   expect(unreadNameEl).toHaveClass("unread");
-  expect(unreadRow).not.toHaveTextContent("2");
+  const unreadRowClone = unreadRow.cloneNode(true) as HTMLElement;
+  unreadRowClone.querySelectorAll(".waypoint-topic-row-time").forEach((el) => el.remove());
+  expect(unreadRowClone.textContent ?? "").not.toContain("2");
 
   const noisyReadRow = screen.getByRole("button", { name: "已读含噪音" });
   expect(noisyReadRow).not.toHaveAttribute("data-unread", "true");
@@ -10354,6 +10362,7 @@ test("已读位置按时间线顺序只往前走，两标记不一致取靠后�
   expect(homeserver.requests.some((r) => r.url.includes("/read_markers"))).toBe(false);
 
   // 第 2 轮：另一台设备把 m.read.private 前移到 $e-newest -> 列表立刻变成已读，圆点消失，字重恢复
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(2));
   await waitFor(() => {
@@ -10363,6 +10372,7 @@ test("已读位置按时间线顺序只往前走，两标记不一致取靠后�
   expect(conflictRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
 
   // 第 3 轮：陈旧标记试图回退到 $e-earlier-in-tl -> 仍保持已读且不写回服务器
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(3));
   expect(conflictRow).not.toHaveAttribute("data-unread", "true");
@@ -10854,6 +10864,7 @@ test("就地编辑不挡住后续前移且更新后气泡在屏上时包含编�
   expect(gapRow).not.toHaveAttribute("data-unread", "true");
 
   // 第 2 轮同步：撤回 $ed-will-redact -> 编辑与撤回话题不再未读；缺口话题收到 limited:true 后变成未读
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(2));
   await waitFor(() => {
@@ -10954,6 +10965,7 @@ test("已读指针指向的消息被撤回并从时间线移除后，回退到�
   const row = await screen.findByRole("button", { name: "已读锚点撤回" });
   expect(row).not.toHaveAttribute("data-unread", "true");
 
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(2));
   await waitFor(() => {
@@ -12353,9 +12365,14 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
 
   await waitFor(() => expect(sendCalls).toBeGreaterThanOrEqual(1));
   const row1 = within(sidebar).getByRole("button", { name: "列表标记话题" });
+  const rowTextWithoutTime = (row: HTMLElement) => {
+    const clone = row.cloneNode(true) as HTMLElement;
+    clone.querySelectorAll(".waypoint-topic-row-time").forEach((el) => el.remove());
+    return clone.textContent ?? "";
+  };
   expect(within(row1).getAllByRole("img", { name: "未确认" })).toHaveLength(1);
   expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
-  expect(row1).not.toHaveTextContent(/2|第一条秘密正文|第二条秘密正文/);
+  expect(rowTextWithoutTime(row1)).not.toMatch(/2|第一条秘密正文|第二条秘密正文/);
 
   // 第一条被 403 永久拒绝，第二条仍未确认 -> 同一行既有失败又有未确认，优先显示红叹号（最多一个）
   sendBehavior = "first-403-rest-offline";
@@ -12365,7 +12382,7 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   expect(within(row1).getAllByRole("img", { name: "失败" })).toHaveLength(1);
   expect(within(row1).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
   expect(row1).toHaveTextContent("!");
-  expect(row1).not.toHaveTextContent(/失败|2|第一条秘密正文|第二条秘密正文/);
+  expect(rowTextWithoutTime(row1)).not.toMatch(/失败|2|第一条秘密正文|第二条秘密正文/);
 
   // 切换到另一条话题，再直接点击列表行上的红叹号：只打开该 Topic，不直接重发
   await user.click(within(sidebar).getByRole("button", { name: "另一条话题" }));
@@ -14996,8 +15013,10 @@ test("多个中间limited缺口均不在后台补完且绝不越过缺口标为�
     await login(user);
 
     const multiGapRow = await screen.findByRole("button", { name: "多缺口不可越过" });
+    await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
     await act(async () => { clock.advance(1000); });
     await waitFor(() => expect(syncRound).toBe(2));
+    await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
     await act(async () => { clock.advance(1000); });
     await waitFor(() => expect(syncRound).toBe(3));
 
@@ -16320,11 +16339,13 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   expect(row2.querySelector(".waypoint-topic-row-secondary")).toBeNull();
 
   // 撤回第一条 👀，第二条 👀 还在，依然显示一次正在回应
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBeGreaterThanOrEqual(2));
   expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
 
   // 撤回第二条 👀，正在回应消失，单 Bot 次行也消失
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => {
     expect(row1).not.toHaveTextContent("正在回应");
@@ -20763,6 +20784,7 @@ test("已停在存在中间 limited 缺口的 Topic 底部时，新同步消息�
     await login(user);
 
     const row = await screen.findByRole("button", { name: "中间缺口底部留驻话题" });
+    await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
     await act(async () => {
       clock.advance(1000);
     });
