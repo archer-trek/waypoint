@@ -25,10 +25,12 @@ import {
   type BubbleVisibility,
   deriveRoomTimelineItems,
   deriveTopics,
+  formatTopicListTime,
   parseRegisteredAgents,
   resolveBotName,
   resolvePreselectedBotId,
   saveRegisteredAgents,
+  setTopicPinned,
   updateTopicDetails,
   validateAgentUserId,
 } from "./topics";
@@ -103,6 +105,10 @@ export function TopicsWorkspace({
   const [deleting, setDeleting] = useState(false);
   const deletingRef = useRef(false);
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
+  const [pinPendingByRoom, setPinPendingByRoom] = useState<Record<string, boolean>>({});
+  const pinPendingRef = useRef<Set<string>>(new Set());
+  const [pinNotice, setPinNotice] = useState<string | undefined>(undefined);
+  const pinNoticeTimerRef = useRef<number | undefined>(undefined);
   const [draftsByRoom, setDraftsByRoom] = useState<Record<string, DraftRecord>>(() =>
     client.drafts(),
   );
@@ -599,6 +605,60 @@ export function TopicsWorkspace({
     setDeleteError(undefined);
   }
 
+  function clearPinNotice() {
+    if (pinNoticeTimerRef.current !== undefined) {
+      clock.clearTimeout(pinNoticeTimerRef.current);
+      pinNoticeTimerRef.current = undefined;
+    }
+    setPinNotice(undefined);
+  }
+
+  function showPinNotice(message: string) {
+    if (pinNoticeTimerRef.current !== undefined) {
+      clock.clearTimeout(pinNoticeTimerRef.current);
+      pinNoticeTimerRef.current = undefined;
+    }
+    setPinNotice(message);
+    pinNoticeTimerRef.current = clock.setTimeout(() => {
+      pinNoticeTimerRef.current = undefined;
+      if (mountedRef.current) {
+        setPinNotice(undefined);
+      }
+    }, 4000);
+  }
+
+  async function handleTogglePin(roomId: string, currentPinned: boolean) {
+    if (pinPendingRef.current.has(roomId) || anyFormSubmitting || exiting) {
+      return;
+    }
+    pinPendingRef.current.add(roomId);
+    setPinPendingByRoom((prev) => ({ ...prev, [roomId]: true }));
+    clearPinNotice();
+    try {
+      const result = await setTopicPinned(client, roomId, !currentPinned);
+      if (!mountedRef.current || !client.hasToken) {
+        return;
+      }
+      if (!result.ok) {
+        showPinNotice(result.message);
+        return;
+      }
+      setRevision((value) => value + 1);
+    } finally {
+      pinPendingRef.current.delete(roomId);
+      if (mountedRef.current) {
+        setPinPendingByRoom((prev) => {
+          if (!(roomId in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[roomId];
+          return next;
+        });
+      }
+    }
+  }
+
   async function confirmDeleteTopic() {
     if (deletingRef.current || !activeTopic) {
       return;
@@ -903,6 +963,10 @@ export function TopicsWorkspace({
     return () => {
       mountedRef.current = false;
       clearSyncTimer();
+      if (pinNoticeTimerRef.current !== undefined) {
+        clock.clearTimeout(pinNoticeTimerRef.current);
+        pinNoticeTimerRef.current = undefined;
+      }
       window.removeEventListener("online", handleOnline);
       retryQueue.setCallbacks({});
       if (!providedRetryQueue) {
@@ -1366,37 +1430,52 @@ export function TopicsWorkspace({
                         : "waypoint-topic-row"
                     }
                     data-unread={topic.unread ? "true" : undefined}
+                    data-pinned={topic.pinned ? "true" : undefined}
                     onClick={() => openTopic(topic.roomId)}
                   >
-                    <span className="waypoint-topic-row-title">
-                      {topic.unread ? (
-                        <span className="waypoint-unread-dot" aria-hidden="true" />
-                      ) : null}
-                      <span
-                        className={
-                          topic.unread
-                            ? "waypoint-topic-name unread"
-                            : "waypoint-topic-name"
-                        }
-                        style={{ fontWeight: topic.unread ? 700 : 400 }}
-                      >
-                        {topic.name}
-                      </span>
-                      {topic.sendStatus === "failed" ? (
+                    <span className="waypoint-topic-row-header">
+                      <span className="waypoint-topic-row-title">
+                        {topic.unread ? (
+                          <span className="waypoint-unread-dot" aria-hidden="true" />
+                        ) : null}
                         <span
-                          role="img"
-                          aria-label="失败"
-                          className="waypoint-topic-row-failed"
+                          className={
+                            topic.unread
+                              ? "waypoint-topic-name unread"
+                              : "waypoint-topic-name"
+                          }
+                          style={{ fontWeight: topic.unread ? 700 : 400 }}
                         >
-                          !
+                          {topic.name}
                         </span>
-                      ) : topic.sendStatus === "unconfirmed" ? (
-                        <span
-                          role="img"
-                          aria-label="未确认"
-                          className="waypoint-unconfirmed-spinner"
-                        />
-                      ) : null}
+                      </span>
+                      <span className="waypoint-topic-row-trailing">
+                        {topic.pinned ? (
+                          <span className="waypoint-topic-row-pin" aria-label="已置顶">
+                            置顶
+                          </span>
+                        ) : null}
+                        {topic.sendStatus === "failed" ? (
+                          <span
+                            role="img"
+                            aria-label="失败"
+                            className="waypoint-topic-row-failed"
+                          >
+                            !
+                          </span>
+                        ) : topic.sendStatus === "unconfirmed" ? (
+                          <span
+                            role="img"
+                            aria-label="未确认"
+                            className="waypoint-unconfirmed-spinner"
+                          />
+                        ) : null}
+                        {topic.lastActivityTs !== undefined ? (
+                          <span className="waypoint-topic-row-time">
+                            {formatTopicListTime(topic.lastActivityTs, nowMs)}
+                          </span>
+                        ) : null}
+                      </span>
                     </span>
                     {registeredAgents.length > 1 && topic.botDisplayName ? (
                       <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
@@ -1781,6 +1860,20 @@ export function TopicsWorkspace({
                   </div>
                   <button
                     type="button"
+                    className="waypoint-topic-pin-button"
+                    disabled={
+                      editing ||
+                      deleteConfirmOpen ||
+                      deleting ||
+                      Boolean(pinPendingByRoom[activeTopic.roomId])
+                    }
+                    aria-pressed={activeTopic.pinned}
+                    onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
+                  >
+                    {activeTopic.pinned ? "取消置顶" : "置顶"}
+                  </button>
+                  <button
+                    type="button"
                     className="waypoint-topic-edit-button"
                     disabled={editing || deleteConfirmOpen || deleting}
                     onClick={openEditForm}
@@ -2056,6 +2149,11 @@ export function TopicsWorkspace({
               </button>
             </section>
           )}
+        </div>
+      ) : null}
+      {pinNotice ? (
+        <div role="status" aria-live="polite" className="waypoint-toast">
+          {pinNotice}
         </div>
       ) : null}
     </div>

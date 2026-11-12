@@ -77,10 +77,32 @@ main {
   background: #eae7df;
 }
 
+.waypoint-topic-row-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .waypoint-topic-row-title {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.waypoint-topic-row-trailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  flex-shrink: 0;
+}
+
+.waypoint-topic-row-time {
+  font-size: 0.75rem;
+  color: #666;
+  white-space: nowrap;
 }
 
 .waypoint-unread-dot {
@@ -178,6 +200,7 @@ main {
   flex-shrink: 0;
 }
 
+.waypoint-topic-pin-button,
 .waypoint-topic-edit-button,
 .waypoint-topic-delete-button {
   margin-top: 0;
@@ -566,4 +589,27 @@ p[role="alert"] {
   font-weight: 700;
   line-height: 1;
   flex-shrink: 0;
+}
+
+.waypoint-topic-row-pin {
+  font-size: 0.6875rem;
+  padding: 0.0625rem 0.25rem;
+  border-radius: 0.25rem;
+  background: #e2ddd2;
+  color: #4a453c;
+  flex-shrink: 0;
+}
+
+.waypoint-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  z-index: 30;
+  padding: 0.5rem 0.875rem;
+  border-radius: 0.5rem;
+  background: #2b2926;
+  color: #ffffff;
+  font-size: 0.875rem;
+  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.2);
 }

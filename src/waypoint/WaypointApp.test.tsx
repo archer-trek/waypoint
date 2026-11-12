@@ -6019,7 +6019,8 @@ test("发出文字后输入区清空，消息出现在时间线末尾靠右且�
   expect(rows[1]).not.toHaveTextContent(/\d{1,2}:\d{2}/);
   await user.click(screen.getByText("你好，帮我查一下"));
   await user.click(spinner);
-  expect(document.body).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+  expect(document.querySelector(".waypoint-detail")).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+  expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /丢掉/ })).not.toBeInTheDocument();
 
   // 验证 PUT 请求格式与内容
@@ -12706,4 +12707,761 @@ test("集成回归：本地未确认/失败占位不误判未读、不阻断 lim
     expect(screen.queryByRole("button", { name: "跨功能集成话题" })).not.toBeInTheDocument();
   });
   view.unmount();
+});
+
+test("列表行右侧按本地日历和区域设置显示最近活动时刻（今天时刻/昨天/今年内月日/跨年年月日/空话题取诞生时间），忽略编辑与撤回且不放头像和预览", async () => {
+  const todayTs = new Date(2026, 10, 12, 9, 5, 0).getTime();
+  const yesterdayTs = new Date(2026, 10, 11, 21, 30, 0).getTime();
+  const earlierThisYearTs = new Date(2026, 4, 3, 14, 20, 0).getTime();
+  const redactedLaterTs = new Date(2026, 10, 12, 10, 0, 0).getTime();
+  const lastYearCreateTs = new Date(2025, 11, 20, 18, 0, 0).getTime();
+  const nowMs = new Date(2026, 10, 12, 15, 0, 0).getTime();
+
+  const expectedToday = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(todayTs));
+  const expectedEarlierThisYear = new Intl.DateTimeFormat(undefined, {
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(earlierThisYearTs));
+  const expectedLastYear = new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(lastYearCreateTs));
+
+  function makeHs() {
+    const hs = new FakeHomeserver();
+    hs.handler = passwordLoginHandler(async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t-today:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: lastYearCreateTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "今天话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-today",
+                        sender: "@bot:example.com",
+                        origin_server_ts: todayTs,
+                        content: { msgtype: "m.text", body: "今天的消息正文不应预览" },
+                      },
+                    ],
+                  },
+                },
+                "!t-yesterday:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: lastYearCreateTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "昨天话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-yday",
+                        sender: "@alice:example.com",
+                        origin_server_ts: yesterdayTs,
+                        content: { msgtype: "m.text", body: "昨天的消息正文" },
+                      },
+                    ],
+                  },
+                },
+                "!t-this-year:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: lastYearCreateTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "今年更早话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-may",
+                        sender: "@bot:example.com",
+                        origin_server_ts: earlierThisYearTs,
+                        content: { msgtype: "m.text", body: "五月的原消息" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-may-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: todayTs,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 五月的编辑后消息",
+                          "m.new_content": { msgtype: "m.text", body: "五月的编辑后消息" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$m-may" },
+                        },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$m-redacted",
+                        sender: "@bot:example.com",
+                        origin_server_ts: redactedLaterTs,
+                        content: {},
+                        unsigned: { redacted_because: { event_id: "$red" } },
+                      },
+                    ],
+                  },
+                },
+                "!t-empty-last-year:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: lastYearCreateTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "去年空话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      throw new Error(input.url);
+    });
+    return hs;
+  }
+
+  const user = userEvent.setup();
+  const clock = new ManualClock();
+  clock.now = nowMs;
+  const view = render(
+    <WaypointApp
+      homeserver={makeHs()}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const rowToday = within(sidebar).getByRole("button", { name: "今天话题" });
+  const rowYesterday = within(sidebar).getByRole("button", { name: "昨天话题" });
+  const rowThisYear = within(sidebar).getByRole("button", { name: "今年更早话题" });
+  const rowLastYear = within(sidebar).getByRole("button", { name: "去年空话题" });
+
+  expect(rowToday.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedToday);
+  expect(rowYesterday.querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+  expect(rowThisYear.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEarlierThisYear);
+  expect(rowLastYear.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedLastYear);
+
+  // 无头像、无消息正文预览、单 Bot 不显示 Bot 名、无搜索/筛选/分组
+  expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
+  expect(within(sidebar).queryByRole("searchbox")).not.toBeInTheDocument();
+  expect(sidebar).not.toHaveTextContent("今天的消息正文不应预览");
+  expect(sidebar).not.toHaveTextContent("五月的编辑后消息");
+  expect(sidebar).not.toHaveTextContent("bot");
+
+  // 排序按最近活动时间倒序
+  const titles = Array.from(sidebar.querySelectorAll(".waypoint-topic-row-title")).map(
+    (el) => el.textContent,
+  );
+  expect(titles).toEqual(["今天话题", "昨天话题", "今年更早话题", "去年空话题"]);
+
+  view.unmount();
+
+  // 跨年零点时区边界：UTC 2025-12-31 20:00 在 Asia/Shanghai 是 2026-01-01 04:00（今年/今天），在 America/New_York 是 2025-12-31 15:00（昨天）
+  try {
+    const boundaryMsgUtc = Date.UTC(2025, 11, 31, 20, 0, 0);
+    const boundaryNowUtc = Date.UTC(2026, 0, 1, 6, 0, 0);
+    function makeBoundaryHs() {
+      const hs = new FakeHomeserver();
+      hs.handler = passwordLoginHandler(async (input) => {
+        if (input.url.includes("/sync")) {
+          return {
+            type: "response",
+            status: 200,
+            body: {
+              next_batch: "batch-1",
+              account_data: validAgents,
+              rooms: {
+                join: {
+                  "!t-tz:example.com": {
+                    state: {
+                      events: [
+                        { type: "m.room.create", state_key: "", origin_server_ts: boundaryMsgUtc, content: {} },
+                        { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                        { type: "m.room.name", state_key: "", content: { name: "跨日跨年时区话题" } },
+                      ],
+                    },
+                    timeline: {
+                      events: [
+                        {
+                          type: "m.room.message",
+                          event_id: "$m-tz",
+                          sender: "@bot:example.com",
+                          origin_server_ts: boundaryMsgUtc,
+                          content: { msgtype: "m.text", body: "跨年边界" },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        throw new Error(input.url);
+      });
+      return hs;
+    }
+
+    globalThis.indexedDB = new IDBFactory();
+    vi.stubEnv("TZ", "Asia/Shanghai");
+    const clockSh = new ManualClock();
+    clockSh.now = boundaryNowUtc;
+    const viewSh = render(
+      <WaypointApp
+        homeserver={makeBoundaryHs()}
+        platform={{ deviceDisplayName: "Waypoint macOS" }}
+        clock={clockSh}
+      />,
+    );
+    await login(userEvent.setup());
+    const shRow = await screen.findByRole("button", { name: "跨日跨年时区话题" });
+    const expectedShTime = new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(boundaryMsgUtc));
+    expect(shRow.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedShTime);
+    viewSh.unmount();
+
+    globalThis.indexedDB = new IDBFactory();
+    vi.stubEnv("TZ", "America/New_York");
+    const clockNy = new ManualClock();
+    clockNy.now = boundaryNowUtc;
+    const viewNy = render(
+      <WaypointApp
+        homeserver={makeBoundaryHs()}
+        platform={{ deviceDisplayName: "Waypoint Android" }}
+        clock={clockNy}
+      />,
+    );
+    await login(userEvent.setup());
+    const nyRow = await screen.findByRole("button", { name: "跨日跨年时区话题" });
+    expect(nyRow.querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+    viewNy.unmount();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
+
+test("置顶写在 Owner 的 im.waypoint.pinned 标签（不用 order 和 favourite），置顶区与未置顶区各自按最近活动倒序，支持不限数量、取消置顶回原位、跨端同步与重启恢复", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: {
+              events: [
+                {
+                  type: "im.waypoint.agents",
+                  content: {
+                    agents: [
+                      { user_id: "@bot1:example.com", name: "一号" },
+                      { user_id: "@bot2:example.com", name: "二号" },
+                    ],
+                  },
+                },
+              ],
+            },
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题一(置顶旧)" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [
+                      { type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t2:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot2:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题二(收藏未置顶最新)" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [
+                      { type: "m.tag", content: { tags: { "m.favourite": { order: 0 } } } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+                "!t3:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot1:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "话题三(置顶新)" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [
+                      { type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0.9 } } } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  account_data: {
+                    events: [{ type: "m.tag", content: { tags: {} } }],
+                  },
+                },
+                "!t3:example.com": {
+                  account_data: {
+                    events: [
+                      { type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    if (
+      (input.method === "PUT" || input.method === "DELETE") &&
+      input.url.includes("/tags/im.waypoint.pinned")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const getTitles = () =>
+    Array.from(sidebar.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+
+  expect(getTitles()).toEqual(["话题三(置顶新)", "话题一(置顶旧)", "话题二(收藏未置顶最新)"]);
+  expect(within(sidebar).getByRole("button", { name: "话题三(置顶新)" })).toHaveAttribute("data-pinned", "true");
+  expect(within(sidebar).getByRole("button", { name: "话题一(置顶旧)" })).toHaveAttribute("data-pinned", "true");
+  expect(within(sidebar).getByRole("button", { name: "话题二(收藏未置顶最新)" })).not.toHaveAttribute("data-pinned");
+
+  // 新建 Topic 仍预选最近活动的话题二所绑定的二号 Bot
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  await user.click(screen.getByRole("button", { name: "取消" }));
+
+  // 置顶话题二 -> 发送 PUT tags/im.waypoint.pinned { order: 0 }，三条全部可置顶
+  await user.click(within(sidebar).getByRole("button", { name: "话题二(收藏未置顶最新)" }));
+  await user.click(screen.getByRole("button", { name: "置顶" }));
+
+  await waitFor(() => {
+    expect(getTitles()).toEqual(["话题二(收藏未置顶最新)", "话题三(置顶新)", "话题一(置顶旧)"]);
+  });
+  expect(screen.getByRole("button", { name: "取消置顶" })).toBeInTheDocument();
+
+  const putTagReq = homeserver.requests.find(
+    (r) => r.method === "PUT" && r.url.includes("/tags/im.waypoint.pinned"),
+  );
+  expect(putTagReq).toMatchObject({
+    method: "PUT",
+    url: "https://matrix.example.com/_matrix/client/v3/user/%40alice%3Aexample.com/rooms/!t2%3Aexample.com/tags/im.waypoint.pinned",
+    headers: { Authorization: "Bearer tok-1" },
+    body: { order: 0 },
+  });
+
+  // 取消置顶话题三 -> 发送 DELETE tags/im.waypoint.pinned，回到最近活动位置（未置顶区）
+  await user.click(within(sidebar).getByRole("button", { name: "话题三(置顶新)" }));
+  await user.click(screen.getByRole("button", { name: "取消置顶" }));
+
+  await waitFor(() => {
+    expect(getTitles()).toEqual(["话题二(收藏未置顶最新)", "话题一(置顶旧)", "话题三(置顶新)"]);
+  });
+  expect(screen.getByRole("button", { name: "置顶" })).toBeInTheDocument();
+
+  const deleteTagReq = homeserver.requests.find(
+    (r) => r.method === "DELETE" && r.url.includes("/tags/im.waypoint.pinned"),
+  );
+  expect(deleteTagReq).toMatchObject({
+    method: "DELETE",
+    url: "https://matrix.example.com/_matrix/client/v3/user/%40alice%3Aexample.com/rooms/!t3%3Aexample.com/tags/im.waypoint.pinned",
+    headers: { Authorization: "Bearer tok-1" },
+  });
+
+  // 另一台设备通过 /sync 取消置顶话题一并置顶话题三
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(getTitles()).toEqual(["话题二(收藏未置顶最新)", "话题三(置顶新)", "话题一(置顶旧)"]);
+  });
+
+  // 重启后离线恢复，置顶状态与排序保留
+  first.unmount();
+  const second = renderApp(homeserver);
+  const sidebar2 = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const getTitles2 = () =>
+    Array.from(sidebar2.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+  expect(getTitles2()).toEqual(["话题二(收藏未置顶最新)", "话题三(置顶新)", "话题一(置顶旧)"]);
+  second.unmount();
+});
+
+test("置顶与取消置顶不做乐观更新、操作期间防抖防连点；失败时保持原状态与排序并给轻量提示，不进重试队列", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingPut = deferred<TransportResult>();
+  const pendingDelete = deferred<TransportResult>();
+  let putCalls = 0;
+  let deleteCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-pinned:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "已置顶老话题" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } }],
+                },
+                timeline: { events: [] },
+              },
+              "!t-normal:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "普通新话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/tags/im.waypoint.pinned")) {
+      putCalls += 1;
+      if (putCalls === 1) {
+        return pendingPut.promise;
+      }
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "DELETE" && input.url.includes("/tags/im.waypoint.pinned")) {
+      deleteCalls += 1;
+      if (deleteCalls === 1) {
+        return pendingDelete.promise;
+      }
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const view = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const getTitles = () =>
+    Array.from(sidebar.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+  expect(getTitles()).toEqual(["已置顶老话题", "普通新话题"]);
+
+  // 打开普通新话题，点击置顶 -> 请求在途期间：不做乐观更新、按钮禁用防连点
+  await user.click(within(sidebar).getByRole("button", { name: "普通新话题" }));
+  const pinBtn = screen.getByRole("button", { name: "置顶" });
+  await user.click(pinBtn);
+  expect(putCalls).toBe(1);
+  expect(pinBtn).toBeDisabled();
+  expect(screen.getByRole("button", { name: "置顶" })).toBeInTheDocument();
+  expect(getTitles()).toEqual(["已置顶老话题", "普通新话题"]);
+  expect(within(sidebar).getByRole("button", { name: "普通新话题" })).not.toHaveAttribute("data-pinned");
+
+  // 再次点击被忽略，不会发送第二个 PUT
+  fireEvent.click(pinBtn);
+  expect(putCalls).toBe(1);
+
+  // 第一次置顶失败（网络错误） -> 保持原状态和排序，给轻量提示，不进重试队列
+  await act(async () => {
+    pendingPut.resolve({ type: "failure", failure: { type: "network" } });
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "置顶" })).not.toBeDisabled();
+  });
+  expect(getTitles()).toEqual(["已置顶老话题", "普通新话题"]);
+  expect(within(sidebar).getByRole("button", { name: "普通新话题" })).not.toHaveAttribute("data-pinned");
+  expect(screen.getByRole("status")).toHaveTextContent(/置顶失败/);
+
+  // 推进时钟不会自动重试置顶，且 4 秒后轻量提示自动收起
+  await act(async () => {
+    view.clock.advance(10_000);
+  });
+  expect(putCalls).toBe(1);
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+  // 手动重试置顶成功
+  await user.click(screen.getByRole("button", { name: "置顶" }));
+  await waitFor(() => {
+    expect(getTitles()).toEqual(["普通新话题", "已置顶老话题"]);
+  });
+  expect(putCalls).toBe(2);
+
+  // 对已置顶老话题尝试取消置顶并遇到 500 失败 -> 防抖、不做乐观更新、保持置顶状态与顺序、给轻量提示且不自动重试
+  await user.click(within(sidebar).getByRole("button", { name: "已置顶老话题" }));
+  const unpinBtn = screen.getByRole("button", { name: "取消置顶" });
+  await user.click(unpinBtn);
+  expect(deleteCalls).toBe(1);
+  expect(unpinBtn).toBeDisabled();
+  fireEvent.click(unpinBtn);
+  expect(deleteCalls).toBe(1);
+  expect(getTitles()).toEqual(["普通新话题", "已置顶老话题"]);
+
+  await act(async () => {
+    pendingDelete.resolve({
+      type: "response",
+      status: 500,
+      body: { errcode: "M_UNKNOWN", error: "Server busy" },
+    });
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "取消置顶" })).not.toBeDisabled();
+  });
+  expect(getTitles()).toEqual(["普通新话题", "已置顶老话题"]);
+  expect(within(sidebar).getByRole("button", { name: "已置顶老话题" })).toHaveAttribute("data-pinned", "true");
+  expect(screen.getByRole("status")).toHaveTextContent(/取消置顶失败/);
+
+  await act(async () => {
+    view.clock.advance(10_000);
+  });
+  expect(deleteCalls).toBe(1);
+  view.unmount();
+});
+
+test("未确认和失败消息不提前修改列表行时刻也不重排，确认回声到达后按服务器时间更新时刻并在各自置顶/未置顶区重排", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSend = deferred<TransportResult>();
+  let sendCount = 0;
+  let capturedTxnId = "";
+  let syncCount = 0;
+
+  const yesterdayTs = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const todayEarlierTs = new Date(2026, 10, 12, 9, 0, 0).getTime();
+  const todayEchoTs = new Date(2026, 10, 12, 11, 30, 0).getTime();
+  const nowMs = new Date(2026, 10, 12, 12, 0, 0).getTime();
+
+  const expectedEarlierTime = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(todayEarlierTs));
+  const expectedEchoTime = new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(todayEchoTs));
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCount += 1;
+      if (syncCount === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!pin-old:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: yesterdayTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "置顶旧" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } }],
+                  },
+                  timeline: { events: [] },
+                },
+                "!pin-new:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: todayEarlierTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "置顶新" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.tag", content: { tags: { "im.waypoint.pinned": { order: 0 } } } }],
+                  },
+                  timeline: { events: [] },
+                },
+                "!unpinned:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: todayEarlierTs, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "普通话题" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCount}`,
+          rooms: {
+            join: {
+              "!pin-old:example.com": {
+                timeline: {
+                  events: capturedTxnId
+                    ? [
+                        {
+                          type: "m.room.message",
+                          event_id: "$echo-pin-old",
+                          sender: "@alice:example.com",
+                          origin_server_ts: todayEchoTs,
+                          content: { msgtype: "m.text", body: "重发确认" },
+                          unsigned: { transaction_id: capturedTxnId },
+                        },
+                      ]
+                    : [],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCount += 1;
+      capturedTxnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      if (sendCount === 1) {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+        };
+      }
+      return pendingSend.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  clock.now = nowMs;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const getTitles = () =>
+    Array.from(sidebar.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+  const pinOldRow = () => within(sidebar).getByRole("button", { name: "置顶旧" });
+  const pinNewRow = () => within(sidebar).getByRole("button", { name: "置顶新" });
+
+  expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
+  expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+  expect(pinNewRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEarlierTime);
+
+  // 打开「置顶旧」发送一条会 403 失败的消息 -> 列表行时刻仍是「昨天」，排序不变，无正文预览
+  await user.click(pinOldRow());
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "不会改时刻的失败消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("button", { name: "失败" });
+
+  expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+  expect(pinOldRow()).not.toHaveTextContent("不会改时刻的失败消息");
+  expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
+
+  // 点红叹号重发（未确认状态），PUT 200 先到但尚无同步回声 -> 时刻仍是「昨天」，排序不变
+  await user.click(screen.getByRole("button", { name: "失败" }));
+  await screen.findByRole("status", { name: "未确认" });
+  expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+  expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
+
+  await act(async () => {
+    pendingSend.resolve({ type: "response", status: 200, body: { event_id: "$echo-pin-old" } });
+  });
+  expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
+  expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
+
+  // 同步回声到达并带来 origin_server_ts -> 时刻更新为服务器时刻，在置顶区内重排到「置顶新」之前
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEchoTime);
+  });
+  expect(getTitles()).toEqual(["置顶旧", "置顶新", "普通话题"]);
 });

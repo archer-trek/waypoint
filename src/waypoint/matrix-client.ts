@@ -20,6 +20,7 @@ export type SyncAttempt = {
   result: TransportResult;
   incremental: boolean;
   leaveGeneration?: number;
+  tagGeneration?: number;
 };
 
 export type LocalMessageStatus = "unconfirmed" | "failed";
@@ -44,6 +45,8 @@ export class MatrixClient {
   private txnCounter = 0;
   private leaveGeneration = 0;
   private leftAtGeneration = new Map<string, number>();
+  private tagGeneration = 0;
+  private tagUpdatedAtGeneration = new Map<string, number>();
   private persistTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: HomeserverTransport) {}
@@ -183,6 +186,8 @@ export class MatrixClient {
       this.storedDrafts = {};
       this.leaveGeneration = 0;
       this.leftAtGeneration.clear();
+      this.tagGeneration = 0;
+      this.tagUpdatedAtGeneration.clear();
       return saveSession({
         baseUrl: this.baseUrl,
         userId,
@@ -198,6 +203,7 @@ export class MatrixClient {
     }
     const cursor = this.syncCursor;
     const generation = this.leaveGeneration;
+    const tagGen = this.tagGeneration;
     const url = cursor
       ? `${matrixUrl(this.baseUrl, "/_matrix/client/v3/sync")}?since=${encodeURIComponent(cursor)}`
       : matrixUrl(this.baseUrl, "/_matrix/client/v3/sync");
@@ -207,7 +213,7 @@ export class MatrixClient {
         url,
         headers: { Authorization: `Bearer ${this.accessToken}` },
       })
-      .then((result) => ({ result, incremental: Boolean(cursor), leaveGeneration: generation }));
+      .then((result) => ({ result, incremental: Boolean(cursor), leaveGeneration: generation, tagGeneration: tagGen }));
   }
 
   async dropSyncCursor(): Promise<void> {
@@ -236,6 +242,8 @@ export class MatrixClient {
         this.userId,
         attempt.leaveGeneration,
         this.leftAtGeneration,
+        attempt.tagGeneration,
+        this.tagUpdatedAtGeneration,
       );
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
       this.storedPendingReadMarkers = reconcilePendingReadMarkersWithSync(
@@ -323,6 +331,77 @@ export class MatrixClient {
       method: "GET",
       url: matrixUrl(this.baseUrl, path),
       headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+  }
+
+  putRoomTag(
+    roomId: string,
+    tag: string,
+    content: Record<string, unknown>,
+  ): Promise<TransportResult> {
+    if (!this.accessToken || !this.userId) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "PUT",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/rooms/${encodeURIComponent(roomId)}/tags/${encodeURIComponent(tag)}`,
+      ),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: content,
+    });
+  }
+
+  deleteRoomTag(roomId: string, tag: string): Promise<TransportResult> {
+    if (!this.accessToken || !this.userId) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "DELETE",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/rooms/${encodeURIComponent(roomId)}/tags/${encodeURIComponent(tag)}`,
+      ),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+      },
+    });
+  }
+
+  async retainRoomTag(
+    roomId: string,
+    tag: string,
+    content: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    this.tagGeneration += 1;
+    this.tagUpdatedAtGeneration.set(roomId, this.tagGeneration);
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const existing = this.storedRooms[roomId];
+      if (!existing) {
+        return;
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const room = nextRooms[roomId];
+      const nextTags: Record<string, unknown> = isPlainObject(room.tags) ? { ...room.tags } : {};
+      if (content !== undefined) {
+        nextTags[tag] = cloneValue(content);
+      } else {
+        delete nextTags[tag];
+      }
+      if (Object.keys(nextTags).length > 0) {
+        room.tags = nextTags;
+      } else {
+        delete room.tags;
+      }
+      await saveSession(this.sessionRecord({ rooms: nextRooms }));
+      this.storedRooms = nextRooms;
     });
   }
 
@@ -851,6 +930,8 @@ export class MatrixClient {
       this.storedDrafts = {};
       this.leaveGeneration = 0;
       this.leftAtGeneration.clear();
+      this.tagGeneration = 0;
+      this.tagUpdatedAtGeneration.clear();
       return dropPreListSession();
     });
   }
@@ -985,6 +1066,9 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
       ...(typeof value.privateReadEventId === "string" && value.privateReadEventId !== ""
         ? { privateReadEventId: value.privateReadEventId }
         : {}),
+      ...(isPlainObject(value.tags) && Object.keys(value.tags).length > 0
+        ? { tags: cloneValue(value.tags) as Record<string, unknown> }
+        : {}),
     };
   }
   return cloned;
@@ -996,6 +1080,8 @@ function mergeSyncRooms(
   ownerUserId: string,
   leaveGeneration?: number,
   leftAtGeneration?: Map<string, number>,
+  tagGeneration?: number,
+  tagUpdatedAtGeneration?: Map<string, number>,
 ): Record<string, StoredRoomEvents> {
   const next: Record<string, StoredRoomEvents> = cloneStoredRooms(current);
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
@@ -1110,6 +1196,9 @@ function mergeSyncRooms(
         }
       }
 
+      const syncTags = extractRoomTags(roomSync);
+      const tagLocked = tagGeneration !== undefined && tagUpdatedAtGeneration !== undefined && (tagUpdatedAtGeneration.get(roomId) ?? 0) > tagGeneration;
+      const nextTags = tagLocked ? existing.tags : (syncTags ?? existing.tags);
       const syncFullyReadId = extractFullyReadEventId(roomSync);
       const syncPrivateReadIds = extractPrivateReadEventIds(roomSync, ownerUserId);
       const nextFullyReadEventId = syncFullyReadId ?? existing.fullyReadEventId;
@@ -1149,6 +1238,7 @@ function mergeSyncRooms(
         ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
         ...(nextFullyReadEventId ? { fullyReadEventId: nextFullyReadEventId } : {}),
         ...(nextPrivateReadEventId ? { privateReadEventId: nextPrivateReadEventId } : {}),
+        ...(nextTags && Object.keys(nextTags).length > 0 ? { tags: nextTags } : {}),
       };
     }
   }
@@ -1161,6 +1251,21 @@ function mergeSyncRooms(
   }
 
   return next;
+}
+
+function extractRoomTags(roomSync: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!isPlainObject(roomSync.account_data) || !Array.isArray(roomSync.account_data.events)) {
+    return undefined;
+  }
+  let found: Record<string, unknown> | undefined;
+  for (const event of roomSync.account_data.events) {
+    if (isPlainObject(event) && event.type === "m.tag" && isPlainObject(event.content)) {
+      found = isPlainObject(event.content.tags)
+        ? (cloneValue(event.content.tags) as Record<string, unknown>)
+        : {};
+    }
+  }
+  return found;
 }
 
 function extractFullyReadEventId(roomSync: Record<string, unknown>): string | undefined {

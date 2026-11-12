@@ -20,6 +20,7 @@ export type TopicSummary = {
   agentUserId?: string;
   botDisplayName?: string;
   lastActivityTs?: number;
+  pinned: boolean;
   unread: boolean;
   firstUnreadEventId?: string;
   readPositionUnknown: boolean;
@@ -29,6 +30,41 @@ export type TopicSummary = {
 export type CreateTopicResult =
   | { ok: true; roomId: string }
   | { ok: false; message: string };
+
+export type PinTopicResult = { ok: true } | { ok: false; message: string };
+
+export async function setTopicPinned(
+  client: MatrixClient,
+  roomId: string,
+  pinned: boolean,
+): Promise<PinTopicResult> {
+  const action = pinned ? "置顶" : "取消置顶";
+  if (!client.hasToken || !client.ownerId) {
+    return { ok: false, message: disconnectedMessage(action) };
+  }
+  let result: TransportResult;
+  try {
+    result = pinned
+      ? await client.putRoomTag(roomId, "im.waypoint.pinned", { order: 0 })
+      : await client.deleteRoomTag(roomId, "im.waypoint.pinned");
+  } catch {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(action, { type: "failure", failure: { type: "network" } }),
+    };
+  }
+  if (result.type === "response" && result.status >= 200 && result.status < 300) {
+    await client.retainRoomTag(roomId, "im.waypoint.pinned", pinned ? { order: 0 } : undefined);
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message: formatMatrixActionFailure(action, result, {
+      serverErrorReason: "Homeserver 暂时不能完成请求",
+      rejectedReason: "Homeserver 拒绝了请求",
+    }),
+  };
+}
 
 export type DeleteTopicResult =
   | { ok: true }
@@ -357,11 +393,15 @@ export function deriveTopics(
       continue;
     }
 
+    const redactedIds = collectRedactedEventIds(room.timelineEvents);
     let lastMessageTs: number | undefined;
     let hasFailedMessage = false;
     let hasUnconfirmedMessage = false;
     for (const event of room.timelineEvents) {
       if (typeof event.state_key === "string") {
+        continue;
+      }
+      if (isRedactedEvent(event, redactedIds)) {
         continue;
       }
       const local = localPlaceholderOf(event);
@@ -403,6 +443,7 @@ export function deriveTopics(
         ])
       : undefined;
     const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
+    const pinned = isRecord(room.tags) && isRecord(room.tags["im.waypoint.pinned"]);
     const unreadState = deriveTopicUnreadState(room, agentUserId);
 
     topics.push({
@@ -412,6 +453,7 @@ export function deriveTopics(
       agentUserId,
       botDisplayName,
       lastActivityTs,
+      pinned,
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
@@ -420,6 +462,9 @@ export function deriveTopics(
   }
 
   topics.sort((left, right) => {
+    if (left.pinned !== right.pinned) {
+      return left.pinned ? -1 : 1;
+    }
     const leftTs = left.lastActivityTs ?? -1;
     const rightTs = right.lastActivityTs ?? -1;
     if (leftTs !== rightTs) {
@@ -731,7 +776,14 @@ export function resolvePreselectedBotId(
   if (registeredAgents.length <= 1 || topics.length === 0) {
     return "";
   }
-  const latest = topics[0];
+  let latest = topics[0];
+  for (const topic of topics) {
+    const latestTs = latest.lastActivityTs ?? -1;
+    const candidateTs = topic.lastActivityTs ?? -1;
+    if (candidateTs > latestTs || (candidateTs === latestTs && topic.roomId.localeCompare(latest.roomId) < 0)) {
+      latest = topic;
+    }
+  }
   if (latest.lastActivityTs === undefined || !latest.agentUserId) {
     return "";
   }
@@ -1098,6 +1150,34 @@ export function deriveRoomTimelineItems(
 function localDayKey(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+export function formatTopicListTime(ts: number, nowMs: number): string {
+  const targetKey = localDayKey(ts);
+  if (targetKey === localDayKey(nowMs)) {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(ts));
+  }
+  const yesterday = new Date(nowMs);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (targetKey === localDayKey(yesterday.getTime())) {
+    return "昨天";
+  }
+  const targetDate = new Date(ts);
+  const nowDate = new Date(nowMs);
+  if (targetDate.getFullYear() === nowDate.getFullYear()) {
+    return new Intl.DateTimeFormat(undefined, {
+      month: "numeric",
+      day: "numeric",
+    }).format(targetDate);
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).format(targetDate);
 }
 
 function formatDaySeparator(ts: number, nowMs: number): string {

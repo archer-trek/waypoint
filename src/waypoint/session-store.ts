@@ -14,6 +14,7 @@ export type StoredRoomEvents = {
   readPositionEventId?: string;
   fullyReadEventId?: string;
   privateReadEventId?: string;
+  tags?: Record<string, unknown>;
 };
 
 export type PendingReadMarker = {
