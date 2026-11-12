@@ -2,12 +2,14 @@ import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, ViewportMode } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
+import { isCredentialRejected, isRateLimited, isRecord } from "./matrix-errors";
 import {
   appendDirectRoom,
   buildAddAgentContent,
   buildRemoveAgentContent,
   buildRenameAgentContent,
   createTopicRoom,
+  deriveRoomTimelineItems,
   deriveTopics,
   parseRegisteredAgents,
   resolveBotName,
@@ -16,6 +18,9 @@ import {
   updateTopicDetails,
   validateAgentUserId,
 } from "./topics";
+
+const FOREGROUND_SYNC_INTERVAL_MS = 1000;
+const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
 type RosterFormState =
   | {
@@ -69,6 +74,16 @@ export function TopicsWorkspace({
   const [editNameInput, setEditNameInput] = useState("");
   const [editDescriptionInput, setEditDescriptionInput] = useState("");
   const [editError, setEditError] = useState<string | undefined>(undefined);
+  const [draftsByRoom, setDraftsByRoom] = useState<Record<string, string>>({});
+  const [composerError, setComposerError] = useState<string | undefined>(undefined);
+  const persistingSendRef = useRef(false);
+  const mountedRef = useRef(true);
+  const pausedRef = useRef(false);
+  const syncTimerRef = useRef<number | undefined>(undefined);
+  const syncBackoffRef = useRef(0);
+  const outboxTimerRef = useRef<number | undefined>(undefined);
+  const outboxRunningRef = useRef(false);
+  const outboxBackoffRef = useRef(0);
 
   const registeredAgents = parseRegisteredAgents(
     client.accountData("im.waypoint.agents"),
@@ -80,6 +95,16 @@ export function TopicsWorkspace({
   const activeTopic = activeTopicId
     ? topics.find((topic) => topic.roomId === activeTopicId)
     : undefined;
+  const nowMs = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+  const activeTimelineItems = activeTopic
+    ? deriveRoomTimelineItems(
+        rooms[activeTopic.roomId],
+        client.pendingRoomEvents(activeTopic.roomId),
+        client.ownerId,
+        activeTopic.agentUserId,
+        nowMs,
+      )
+    : [];
 
   useEffect(() => {
     if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
@@ -463,8 +488,196 @@ export function TopicsWorkspace({
     }
   }
 
+  function clearSyncTimer() {
+    if (syncTimerRef.current !== undefined) {
+      clock.clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = undefined;
+    }
+  }
+
+  function clearOutboxTimer() {
+    if (outboxTimerRef.current !== undefined) {
+      clock.clearTimeout(outboxTimerRef.current);
+      outboxTimerRef.current = undefined;
+    }
+  }
+
+  function scheduleForegroundSync(delayMs: number) {
+    clearSyncTimer();
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    syncTimerRef.current = clock.setTimeout(() => {
+      syncTimerRef.current = undefined;
+      void runForegroundSync();
+    }, delayMs);
+  }
+
+  async function runForegroundSync() {
+    if (!mountedRef.current || pausedRef.current || !client.hasToken) {
+      return;
+    }
+    let attempt;
+    try {
+      attempt = await client.sync();
+    } catch {
+      if (!mountedRef.current || pausedRef.current) {
+        return;
+      }
+      const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+      syncBackoffRef.current += 1;
+      scheduleForegroundSync(delay);
+      return;
+    }
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    if (isCredentialRejected(attempt.result)) {
+      pausedRef.current = true;
+      clearSyncTimer();
+      clearOutboxTimer();
+      return;
+    }
+    if (attempt.result.type === "response" && attempt.result.status === 200) {
+      syncBackoffRef.current = 0;
+      await client.retainSync(attempt);
+      if (!mountedRef.current || pausedRef.current) {
+        return;
+      }
+      setRevision((value) => value + 1);
+      scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+      return;
+    }
+    const delay = RETRY_BACKOFF_MS[Math.min(syncBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+    syncBackoffRef.current += 1;
+    scheduleForegroundSync(delay);
+  }
+
+  function scheduleOutboxRetry() {
+    clearOutboxTimer();
+    if (!mountedRef.current || pausedRef.current) {
+      return;
+    }
+    const delay = RETRY_BACKOFF_MS[Math.min(outboxBackoffRef.current, RETRY_BACKOFF_MS.length - 1)];
+    outboxBackoffRef.current += 1;
+    outboxTimerRef.current = clock.setTimeout(() => {
+      outboxTimerRef.current = undefined;
+      void drainOutbox();
+    }, delay);
+  }
+
+  async function drainOutbox() {
+    if (outboxRunningRef.current || !mountedRef.current || pausedRef.current || !client.hasToken) {
+      return;
+    }
+    outboxRunningRef.current = true;
+    clearOutboxTimer();
+    try {
+      while (mountedRef.current && !pausedRef.current && client.hasToken) {
+        const pending = client.pendingRoomEvents();
+        if (pending.length === 0) {
+          outboxBackoffRef.current = 0;
+          break;
+        }
+        const head = pending[0];
+        let result;
+        try {
+          result = await client.sendRoomEvent(head.roomId, head.type, head.txnId, head.content);
+        } catch {
+          if (mountedRef.current && !pausedRef.current) {
+            scheduleOutboxRetry();
+          }
+          break;
+        }
+        if (!mountedRef.current || pausedRef.current) {
+          break;
+        }
+        if (isCredentialRejected(result)) {
+          pausedRef.current = true;
+          clearSyncTimer();
+          clearOutboxTimer();
+          break;
+        }
+        if (
+          result.type === "response" &&
+          result.status === 200 &&
+          isRecord(result.body) &&
+          typeof result.body.event_id === "string" &&
+          result.body.event_id !== ""
+        ) {
+          await client.confirmSentRoomEvent(head.roomId, head.txnId, result.body.event_id);
+          outboxBackoffRef.current = 0;
+          if (!mountedRef.current) {
+            break;
+          }
+          setRevision((value) => value + 1);
+          continue;
+        }
+        if (
+          result.type === "failure" ||
+          isRateLimited(result.status, result.body) ||
+          result.status >= 500
+        ) {
+          scheduleOutboxRetry();
+          break;
+        }
+        break;
+      }
+    } finally {
+      outboxRunningRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    pausedRef.current = false;
+    scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+    if (client.pendingRoomEvents().length > 0) {
+      void drainOutbox();
+    }
+    return () => {
+      mountedRef.current = false;
+      clearSyncTimer();
+      clearOutboxTimer();
+    };
+  }, [client, clock]);
+
   function collapseDescription() {
     setDescriptionExpanded(false);
+  }
+
+  function updateDraft(roomId: string, text: string) {
+    setDraftsByRoom((prev) => ({ ...prev, [roomId]: text }));
+    if (composerError) {
+      setComposerError(undefined);
+    }
+  }
+
+  async function handleSendMessage(event: FormEvent) {
+    event.preventDefault();
+    if (!activeTopic || persistingSendRef.current) {
+      return;
+    }
+    const roomId = activeTopic.roomId;
+    const body = draftsByRoom[roomId] ?? "";
+    if (body.trim() === "") {
+      return;
+    }
+    persistingSendRef.current = true;
+    setComposerError(undefined);
+    try {
+      await client.enqueueRoomEvent(roomId, "m.room.message", {
+        msgtype: "m.text",
+        body,
+      });
+      setDraftsByRoom((prev) => ({ ...prev, [roomId]: "" }));
+      setRevision((value) => value + 1);
+      void drainOutbox();
+    } catch {
+      setComposerError("消息保存失败，请重试。");
+    } finally {
+      persistingSendRef.current = false;
+    }
   }
 
   async function handleSubmit(event: FormEvent) {
@@ -1033,11 +1246,50 @@ export function TopicsWorkspace({
                     aria-label="对话时间线"
                     className="waypoint-timeline"
                     onScroll={collapseDescription}
-                  />
+                  >
+                    {activeTimelineItems.map((item) =>
+                      item.kind === "day-separator" ? (
+                        <div
+                          key={item.key}
+                          role="separator"
+                          aria-label={item.label}
+                          className="waypoint-day-separator"
+                        >
+                          {item.label}
+                        </div>
+                      ) : (
+                        <div
+                          key={item.key}
+                          className={`waypoint-message-row ${item.side}`}
+                          data-side={item.side}
+                        >
+                          {!item.confirmed ? (
+                            <span
+                              role="status"
+                              aria-label="未确认"
+                              className="waypoint-unconfirmed-spinner"
+                            />
+                          ) : null}
+                          <div className="waypoint-bubble">{item.body}</div>
+                        </div>
+                      ),
+                    )}
+                  </div>
                   <div
                     className="waypoint-composer-safe-area"
                     data-keyboard-inset={safeInset}
-                  />
+                  >
+                    {composerError ? <p role="alert">{composerError}</p> : null}
+                    <form className="waypoint-composer" onSubmit={handleSendMessage}>
+                      <textarea
+                        aria-label="输入消息"
+                        name="message"
+                        value={draftsByRoom[activeTopic.roomId] ?? ""}
+                        onChange={(event) => updateDraft(activeTopic.roomId, event.target.value)}
+                      />
+                      <button type="submit">发送</button>
+                    </form>
+                  </div>
                 </main>
               )}
             </div>

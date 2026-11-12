@@ -1,7 +1,7 @@
 import type { TransportResult } from "../adapters/types";
 import type { MatrixClient } from "./matrix-client";
 import { formatMatrixActionFailure, isRecord, transportFailureMessage } from "./matrix-errors";
-import type { RawMatrixEvent, StoredRoomEvents } from "./session-store";
+import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
   userId: string;
@@ -731,4 +731,110 @@ export async function updateTopicDetails(
     descriptionUpdated,
     message: errors.join(" "),
   };
+}
+
+export type TimelineItem =
+  | {
+      kind: "day-separator";
+      key: string;
+      label: string;
+    }
+  | {
+      kind: "message";
+      key: string;
+      side: "left" | "right";
+      body: string;
+      confirmed: boolean;
+    };
+
+export function deriveRoomTimelineItems(
+  room: StoredRoomEvents | undefined,
+  pendingEvents: PendingRoomEvent[],
+  ownerUserId: string,
+  agentUserId: string | undefined,
+  nowMs: number,
+): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let lastDayKey: string | undefined;
+
+  if (room) {
+    room.timelineEvents.forEach((event, index) => {
+      if (typeof event.state_key === "string" || !isActivityMessageEvent(event)) {
+        return;
+      }
+      const sender = typeof event.sender === "string" ? event.sender : undefined;
+      let side: "left" | "right" | undefined;
+      if (sender === ownerUserId) {
+        side = "right";
+      } else if (agentUserId && sender === agentUserId) {
+        side = "left";
+      }
+      if (!side) {
+        return;
+      }
+      if (!isRecord(event.content) || typeof event.content.body !== "string") {
+        return;
+      }
+      const ts = validTimestamp(event.origin_server_ts);
+      if (ts !== undefined) {
+        const currentDay = localDayKey(ts);
+        if (lastDayKey !== undefined && currentDay !== lastDayKey) {
+          items.push({
+            kind: "day-separator",
+            key: `day-${currentDay}-${index}`,
+            label: formatDaySeparator(ts, nowMs),
+          });
+        }
+        lastDayKey = currentDay;
+      }
+      const eventId =
+        typeof event.event_id === "string" && event.event_id !== ""
+          ? event.event_id
+          : `confirmed-${index}`;
+      items.push({
+        kind: "message",
+        key: eventId,
+        side,
+        body: event.content.body,
+        confirmed: true,
+      });
+    });
+  }
+
+  for (const pending of pendingEvents) {
+    if (pending.type !== "m.room.message" || typeof pending.content.body !== "string") {
+      continue;
+    }
+    items.push({
+      kind: "message",
+      key: `pending-${pending.txnId}`,
+      side: "right",
+      body: pending.content.body,
+      confirmed: false,
+    });
+  }
+
+  return items;
+}
+
+function localDayKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function formatDaySeparator(ts: number, nowMs: number): string {
+  const targetKey = localDayKey(ts);
+  if (targetKey === localDayKey(nowMs)) {
+    return "今天";
+  }
+  const yesterday = new Date(nowMs);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (targetKey === localDayKey(yesterday.getTime())) {
+    return "昨天";
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).format(new Date(ts));
 }

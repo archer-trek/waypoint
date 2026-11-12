@@ -1324,9 +1324,13 @@ test("立刻再试作废还在路上的失败，迟到的失败不能离开 Topi
   });
   expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
   expect(screen.queryByText("同步失败，因为到达不了。")).not.toBeInTheDocument();
-  const syncCount = homeserver.requests.filter((request) => request.url.includes("/sync")).length;
-  clock.advance(60_000);
-  expect(homeserver.requests.filter((request) => request.url.includes("/sync"))).toHaveLength(syncCount);
+  const initialSyncCount = homeserver.requests.filter((request) => request.url.endsWith("/_matrix/client/v3/sync")).length;
+  await act(async () => {
+    clock.advance(60_000);
+  });
+  expect(homeserver.requests.filter((request) => request.url.endsWith("/_matrix/client/v3/sync"))).toHaveLength(initialSyncCount);
+  const laterSyncs = homeserver.requests.filter((request) => request.url.includes("/sync")).slice(initialSyncCount);
+  expect(laterSyncs.every((request) => request.url.includes("since=batch-retry"))).toBe(true);
 });
 
 test("迟到的未知 token 不能清掉更新一次同步已经留下的登录", async () => {
@@ -5877,4 +5881,627 @@ test("另一台设备同步更新 Topic 名字与 Description（含清空）后�
   const header3 = screen.getByRole("banner");
   expect(header3).toHaveTextContent("设备B新名");
   expect(header3.querySelector(".waypoint-topic-description")).toBeNull();
+});
+
+test("点发送后，耐久写入失败时输入区不动、仍是草稿，不出现未确认气泡也不请求 Homeserver", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "发消息话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "发消息话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(input, "这条不能丢的草稿");
+
+  const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(() => {
+    throw new DOMException("QuotaExceededError", "QuotaExceededError");
+  });
+  try {
+    await user.click(screen.getByRole("button", { name: "发送" }));
+  } finally {
+    putSpy.mockRestore();
+  }
+
+  expect(input).toHaveValue("这条不能丢的草稿");
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).not.toHaveTextContent("这条不能丢的草稿");
+  expect(screen.queryByLabelText("未确认")).not.toBeInTheDocument();
+  expect(homeserver.requests.some((r) => r.url.includes("/send/"))).toBe(false);
+});
+
+test("发出文字后输入区清空，消息出现在时间线末尾靠右且只有未确认转圈，无时刻不可点不可丢掉，并按固定 txnId 发送 PUT", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSend = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "发送气泡话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$prev1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1500,
+                      content: { msgtype: "m.text", body: "之前的回复" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/_matrix/client/v3/rooms/!t1%3Aexample.com/send/m.room.message/")) {
+      return pendingSend.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "发送气泡话题" }));
+
+  const input = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(input, "你好，帮我查一下");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => {
+    expect(input).toHaveValue("");
+  });
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveAttribute("data-side", "left");
+  expect(rows[0]).toHaveTextContent("之前的回复");
+  expect(rows[1]).toHaveAttribute("data-side", "right");
+  expect(rows[1]).toHaveTextContent("你好，帮我查一下");
+
+  // 画面上不写未确认、发送中或等登录；无障碍名称仍是未确认；转圈不可点击、不可丢掉
+  expect(document.body).not.toHaveTextContent(/未确认|发送中|等登录/);
+  const spinner = screen.getByRole("status", { name: "未确认" });
+  expect(spinner).toBeInTheDocument();
+  expect(spinner.tagName).not.toBe("BUTTON");
+  expect(rows[1].contains(spinner)).toBe(true);
+  expect(screen.queryByRole("button", { name: /丢掉|删除|撤回|未确认/ })).not.toBeInTheDocument();
+
+  // 气泡上不显示时刻，也不能点开看时刻
+  expect(rows[1]).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+  await user.click(screen.getByText("你好，帮我查一下"));
+  await user.click(spinner);
+  expect(document.body).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+  expect(screen.queryByRole("button", { name: /丢掉/ })).not.toBeInTheDocument();
+
+  // 验证 PUT 请求格式与内容
+  await waitFor(() => {
+    const sendReqs = homeserver.requests.filter((r) => r.method === "PUT" && r.url.includes("/send/m.room.message/"));
+    expect(sendReqs).toHaveLength(1);
+    expect(sendReqs[0]?.headers.Authorization).toBe("Bearer tok-1");
+    expect(sendReqs[0]?.body).toEqual({ msgtype: "m.text", body: "你好，帮我查一下" });
+  });
+});
+
+test("发送响应先到达、同步回声后到达时，收成同一条已确认气泡且不出现第二条", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSend = deferred<TransportResult>();
+  let syncCalls = 0;
+  let capturedTxnId = "";
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "先响应后同步" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ev1",
+                      sender: "@alice:example.com",
+                      origin_server_ts: 5000,
+                      content: { msgtype: "m.text", body: "先响应的消息" },
+                      unsigned: { transaction_id: capturedTxnId },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      capturedTxnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      return pendingSend.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "先响应后同步" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "先响应的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+
+  // 1. 发送响应先到达
+  await act(async () => {
+    pendingSend.resolve({
+      type: "response",
+      status: 200,
+      body: { event_id: "$ev1" },
+    });
+  });
+
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+  expect(timeline).toHaveTextContent("先响应的消息");
+
+  // 2. 随后增量 /sync 带来回声，仍收成同一条气泡
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+
+  await waitFor(() => {
+    expect(syncCalls).toBeGreaterThanOrEqual(2);
+  });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(timeline).toHaveTextContent("先响应的消息");
+
+  // 3. 重启后仍只有一条已确认气泡
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "先响应后同步" }));
+  const restoredTimeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(restoredTimeline.querySelectorAll("[data-side]")).toHaveLength(1);
+  expect(restoredTimeline).toHaveTextContent("先响应的消息");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+});
+
+test("同步回声先到达、发送响应后到达时，收成同一条已确认气泡且保留服务器时间戳", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSend = deferred<TransportResult>();
+  let syncCalls = 0;
+  let capturedTxnId = "";
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "先同步后响应" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$day1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: new Date(2026, 10, 11, 10, 0, 0).getTime(),
+                        content: { msgtype: "m.text", body: "昨天的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ev2",
+                      sender: "@alice:example.com",
+                      origin_server_ts: new Date(2026, 10, 12, 10, 0, 0).getTime(),
+                      content: { msgtype: "m.text", body: "先同步的消息" },
+                      unsigned: { transaction_id: capturedTxnId },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      capturedTxnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      return pendingSend.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  clock.now = new Date(2026, 10, 12, 9, 0, 0).getTime();
+  const first = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "先同步后响应" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "先同步的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(capturedTxnId).not.toBe("");
+  });
+
+  // 1. 增量 /sync 回声先到达（PUT 仍在路上）
+  await act(async () => {
+    clock.advance(1000);
+  });
+
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(2);
+  expect(timeline).toHaveTextContent("今天");
+
+  // 2. 随后迟到的 PUT 响应到达，仍是一条气泡且不抹掉服务器时间戳（日期分隔仍在）
+  await act(async () => {
+    pendingSend.resolve({
+      type: "response",
+      status: 200,
+      body: { event_id: "$ev2" },
+    });
+  });
+
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(2);
+  expect(timeline).toHaveTextContent("今天");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+
+  first.unmount();
+});
+
+test("同一次发送尝试在网络重试与重启恢复后始终使用固定的 txnId，确认后收成同一条气泡", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendAttempts = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "固定事务ID话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendAttempts += 1;
+      if (sendAttempts <= 2) {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      return { type: "response", status: 200, body: { event_id: "$ev-fixed" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "固定事务ID话题" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "重试仍同一个txnId");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => {
+    expect(sendAttempts).toBe(1);
+  });
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  // 退避重试使用同一个 txnId
+  await act(async () => {
+    first.clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(sendAttempts).toBe(2);
+  });
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  // 卸载重启后恢复未确认气泡并继续使用同一个 txnId 重发，直到确认
+  first.unmount();
+  renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "固定事务ID话题" }));
+
+  await waitFor(() => {
+    expect(sendAttempts).toBe(3);
+  });
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+  expect(timeline).toHaveTextContent("重试仍同一个txnId");
+
+  const putUrls = homeserver.requests
+    .filter((r) => r.method === "PUT" && r.url.includes("/send/m.room.message/"))
+    .map((r) => r.url);
+  expect(putUrls).toHaveLength(3);
+  expect(new Set(putUrls).size).toBe(1);
+});
+
+test("未确认的消息不撑开新的一天也不重排 Topic 列表，收到服务器确认回声的 origin_server_ts 后才跨日分隔并重排", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSend = deferred<TransportResult>();
+  let syncCalls = 0;
+  let capturedTxnId = "";
+
+  const day1Ts = new Date(2026, 10, 10, 10, 0, 0).getTime();
+  const day2Ts = new Date(2026, 10, 11, 10, 0, 0).getTime();
+  const day3Ts = new Date(2026, 10, 12, 10, 0, 0).getTime();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t-newer:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "较新话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$newer-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day2Ts,
+                        content: { msgtype: "m.text", body: "昨天的新回复" },
+                      },
+                    ],
+                  },
+                },
+                "!t-older:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: day1Ts, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "较旧话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$older-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: day1Ts,
+                        content: { msgtype: "m.text", body: "前天的旧消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!t-older:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$ev-day3",
+                      sender: "@alice:example.com",
+                      origin_server_ts: day3Ts,
+                      content: { msgtype: "m.text", body: "刚发出的文字" },
+                      unsigned: { transaction_id: capturedTxnId },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      capturedTxnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      return pendingSend.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  clock.now = day3Ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const topicTitles = () =>
+    Array.from(sidebar.querySelectorAll(".waypoint-topic-row-title")).map((el) => el.textContent);
+  expect(topicTitles()).toEqual(["较新话题", "较旧话题"]);
+
+  // 在较旧话题写草稿，切换话题不串草稿
+  await user.click(screen.getByRole("button", { name: "较旧话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "刚发出的文字");
+  await user.click(screen.getByRole("button", { name: "较新话题" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  await user.click(screen.getByRole("button", { name: "较旧话题" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("刚发出的文字");
+
+  // 交出未确认消息：不撑开新的一天，也不重排 Topic 列表
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("前天的旧消息");
+  expect(timeline).toHaveTextContent("刚发出的文字");
+  expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(0);
+  expect(timeline).not.toHaveTextContent("今天");
+  expect(topicTitles()).toEqual(["较新话题", "较旧话题"]);
+
+  // 即使 PUT 响应先返回，在收到带 origin_server_ts 的同步回声前也不提前跨日或重排
+  await act(async () => {
+    pendingSend.resolve({ type: "response", status: 200, body: { event_id: "$ev-day3" } });
+  });
+  expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(0);
+  expect(topicTitles()).toEqual(["较新话题", "较旧话题"]);
+
+  // 同步回声带来服务器时间后，出现跨日分隔并重排到最前
+  await act(async () => {
+    clock.advance(1000);
+  });
+  await waitFor(() => {
+    expect(topicTitles()).toEqual(["较旧话题", "较新话题"]);
+  });
+  const separators = timeline.querySelectorAll('[role="separator"]');
+  expect(separators).toHaveLength(1);
+  expect(separators[0]).toHaveTextContent("今天");
 });
