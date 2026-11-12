@@ -484,7 +484,7 @@ test("同步成功且名册里有当前 Homeserver 的合法 Agent 时，进入 
   });
 });
 
-test("同步成功但名册没有合法 Agent 时不进入 Topic 列表，也不做登记", async () => {
+test("同步成功但名册没有合法 Agent 时不进入 Topic 列表，而是先登记第一个 Bot 且没有可选名字", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   homeserver.handler = async (input) => {
@@ -541,7 +541,9 @@ test("同步成功但名册没有合法 Agent 时不进入 Topic 列表，也不
   expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /登记/ })).not.toBeInTheDocument();
+  expect(await screen.findByLabelText("Matrix 用户 ID")).toHaveValue("");
+  expect(screen.queryByLabelText(/名字|名称|昵称/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /登记/ })).toBeInTheDocument();
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(homeserver.requests.some((request) => request.url.includes("account_data"))).toBe(false);
 });
@@ -1085,7 +1087,7 @@ test("名册缺事件、读不懂或没有合法条目时不进入 Topic 列表"
     });
     expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
     expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /登记/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /登记/ })).toBeInTheDocument();
     view.unmount();
   }
 });
@@ -1360,4 +1362,741 @@ test("迟到的未知 token 不能清掉更新一次同步已经留下的登录"
   const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
   expect(continued.at(-1)?.url).toContain("since=batch-ok");
   expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+});
+
+async function enterRegistration(
+  user: ReturnType<typeof userEvent.setup>,
+  homeserver: FakeHomeserver,
+  ownerUserId = "@alice:example.com",
+  syncAccountData?: unknown,
+) {
+  const baseHandler = homeserver.handler;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: ownerUserId, access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          ...(syncAccountData !== undefined ? { account_data: syncAccountData } : {}),
+        },
+      };
+    }
+    return baseHandler(input);
+  };
+  await login(user);
+  return await screen.findByLabelText("Matrix 用户 ID");
+}
+
+test("首次登记拒绝空值、非完整用户 ID、跨服或大小写不同的 server name，以及 Owner 自己，且不请求 profile", async () => {
+  const user = userEvent.setup();
+  const cases = [
+    { owner: "@alice:example.com", typed: "   ", reason: "空的" },
+    { owner: "@alice:example.com", typed: "bot", reason: "完整" },
+    { owner: "@alice:example.com", typed: "bot:example.com", reason: "完整" },
+    { owner: "@alice:example.com", typed: "@bot", reason: "完整" },
+    { owner: "@alice:example.com", typed: "@bot:", reason: "完整" },
+    { owner: "@alice:example.com", typed: "@:example.com", reason: "完整" },
+    { owner: "@alice:example.com", typed: "@bot:other.example", reason: "server name" },
+    { owner: "@alice:example.com", typed: "@bot:EXAMPLE.COM", reason: "server name" },
+    { owner: "@alice:example.com:8448", typed: "@bot:example.com", reason: "server name" },
+    { owner: "@alice:example.com", typed: "@alice:example.com", reason: "自己" },
+  ];
+
+  for (const item of cases) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    const view = renderApp(homeserver);
+    const input = await enterRegistration(user, homeserver, item.owner);
+    const requestCountBeforeSubmit = homeserver.requests.length;
+
+    await user.type(input, item.typed);
+    await user.click(screen.getByRole("button", { name: /登记/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain(item.reason);
+    expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+    expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+    expect(homeserver.requests).toHaveLength(requestCountBeforeSubmit);
+    expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
+    view.unmount();
+  }
+});
+
+test("提交登记前再读名册时若已有合法 Agent，不再写入且不清理其余条目，丢掉已填 ID 直接进列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      syncs += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: syncs === 1 ? "batch-1" : "batch-2" },
+      };
+    }
+    if (
+      input.method === "GET" &&
+      input.url ===
+        "https://matrix.example.com/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents"
+    ) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          agents: [
+            { user_id: "bad" },
+            { user_id: "@other:elsewhere.example" },
+            { user_id: "@existing:example.com", name: "已存在" },
+          ],
+          extra: "keep",
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const first = renderApp(homeserver);
+  await login(user);
+  const input = await screen.findByLabelText("Matrix 用户 ID");
+  await user.type(input, "@NewBot:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+  expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+  expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(false);
+  expect(homeserver.requests.some((request) => request.url.includes("createRoom"))).toBe(false);
+  expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
+  const readReq = homeserver.requests.find((request) => request.url.includes("/account_data/im.waypoint.agents"));
+  expect(readReq?.headers.Authorization).toBe("Bearer tok-1");
+
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+});
+
+test("名册为 404 时不当成用户不存在，去掉前后空白并保留大小写写入后立刻进列表，不自动建 Topic 也不接着登记第二个", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      syncs += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: { next_batch: syncs === 1 ? "batch-1" : "batch-2" },
+      };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return {
+        type: "response",
+        status: 404,
+        body: { errcode: "M_NOT_FOUND", error: "Account data not found" },
+      };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const first = renderApp(homeserver);
+  await login(user);
+  const input = await screen.findByLabelText("Matrix 用户 ID");
+  await user.type(input, "  @MyBot:example.com  ");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+  expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /登记/ })).not.toBeInTheDocument();
+  expect(homeserver.requests.some((request) => request.url.includes("createRoom"))).toBe(false);
+  expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
+
+  const put = homeserver.requests.find((request) => request.method === "PUT");
+  expect(put).toMatchObject({
+    method: "PUT",
+    url: "https://matrix.example.com/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents",
+    headers: { Authorization: "Bearer tok-1" },
+    body: { agents: [{ user_id: "@MyBot:example.com" }] },
+  });
+
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+});
+
+test("提交前重读发现只有不合法条目时，保留原有条目并追加新登记的 Bot，提交期间锁定防连点", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const putDeferred = deferred<TransportResult>();
+  homeserver.handler = async (input) => {
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          agents: [{ user_id: "@other:elsewhere.example" }, { user_id: "@alice:example.com" }],
+          extra: "kept",
+        },
+      };
+    }
+    if (input.method === "PUT") {
+      return putDeferred.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  renderApp(homeserver);
+  const input = await enterRegistration(user, homeserver);
+
+  await user.type(input, "@bot:example.com");
+  const submit = screen.getByRole("button", { name: /登记/ });
+  await user.click(submit);
+  expect(submit).toBeDisabled();
+  await user.click(submit);
+  expect(homeserver.requests.filter((request) => request.method === "PUT")).toHaveLength(1);
+
+  await act(async () => {
+    putDeferred.resolve({ type: "response", status: 200, body: {} });
+  });
+
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  const put = homeserver.requests.find((request) => request.method === "PUT");
+  expect(put?.body).toEqual({
+    agents: [
+      { user_id: "@other:elsewhere.example" },
+      { user_id: "@alice:example.com" },
+      { user_id: "@bot:example.com" },
+    ],
+    extra: "kept",
+  });
+});
+
+test("提交前重读名册失败时留在登记步，保留已填用户 ID，不进入重试队列，可以再次提交成功", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let gets = 0;
+  homeserver.handler = async (input) => {
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      gets += 1;
+      if (gets === 1) {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "Database busy" },
+        };
+      }
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT") {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const { clock } = renderApp(homeserver);
+  const input = await enterRegistration(user, homeserver);
+  await user.type(input, "@BotOne:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Database busy");
+  expect(alert).not.toHaveTextContent("M_UNKNOWN");
+  expect(alert).not.toHaveTextContent("500");
+  expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@BotOne:example.com");
+  expect(screen.getByRole("button", { name: /登记/ })).toBeEnabled();
+  expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(false);
+
+  clock.advance(60_000);
+  expect(
+    homeserver.requests.filter((request) => request.url.includes("/account_data/im.waypoint.agents")),
+  ).toHaveLength(1);
+
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+});
+
+test("写入名册失败时留在登记步，保留已填用户 ID，不进入重试队列，可再次提交", async () => {
+  const user = userEvent.setup();
+  const cases = [
+    {
+      name: "网络失败",
+      respond: { type: "failure" as const, failure: { type: "network" as const } },
+      expected: "到达不了",
+    },
+    {
+      name: "被限流",
+      respond: {
+        type: "response" as const,
+        status: 429,
+        body: { errcode: "M_LIMIT_EXCEEDED", error: "Slow down" },
+      },
+      expected: "Slow down",
+    },
+    {
+      name: "拒绝写入",
+      respond: {
+        type: "response" as const,
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Read only" },
+      },
+      expected: "Read only",
+    },
+  ];
+  for (const item of cases) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    let puts = 0;
+    homeserver.handler = async (input) => {
+      if (
+        input.method === "GET" &&
+        input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+      ) {
+        return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+      }
+      if (input.method === "PUT") {
+        puts += 1;
+        if (puts === 1) {
+          return item.respond;
+        }
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    };
+    const view = renderApp(homeserver);
+    const { clock } = view;
+    const input = await enterRegistration(user, homeserver);
+    await user.type(input, "@BotOne:example.com");
+    await user.click(screen.getByRole("button", { name: /登记/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(item.expected);
+    expect(alert).not.toHaveTextContent("M_");
+    expect(alert).not.toHaveTextContent("429");
+    expect(alert).not.toHaveTextContent("403");
+    expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@BotOne:example.com");
+    expect(screen.getByRole("button", { name: /登记/ })).toBeEnabled();
+    expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+
+    clock.advance(60_000);
+    expect(homeserver.requests.filter((request) => request.method === "PUT")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: /登记/ }));
+    expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+    expect(homeserver.requests.filter((request) => request.method === "PUT")).toHaveLength(2);
+    view.unmount();
+  }
+});
+
+test("登记时服务器不认 token，只丢掉凭证回到密码步，不保留已填的 Agent 用户 ID", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let logins = 0;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      logins += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: `tok-${logins}`, device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return { type: "response", status: 200, body: { next_batch: "batch-1" } };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT") {
+      return {
+        type: "response",
+        status: 401,
+        body: { errcode: "M_UNKNOWN_TOKEN", error: "Token expired" },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  renderApp(homeserver);
+  await login(user);
+  await user.type(await screen.findByLabelText("Matrix 用户 ID"), "@BotOne:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Token expired");
+  expect(alert).not.toHaveTextContent("M_UNKNOWN_TOKEN");
+  expect(alert).not.toHaveTextContent("401");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "用密码登录" }));
+  expect(await screen.findByLabelText("Matrix 用户 ID")).toHaveValue("");
+});
+
+test("停在同步重试时可以放弃：停掉重试并尽量注销，不删设备，丢掉本地凭证回到保留地址和用户标识的密码步", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncs = 0;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      syncs += 1;
+      return { type: "failure", failure: { type: "network" } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const first = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByRole("alert")).toHaveTextContent("同步失败，因为到达不了。");
+
+  await user.click(screen.getByRole("button", { name: "放弃" }));
+
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "立刻再试" })).not.toBeInTheDocument();
+
+  first.clock.advance(60_000);
+  expect(syncs).toBe(1);
+
+  const logout = homeserver.requests.find((request) => request.url.endsWith("/logout"));
+  expect(logout).toMatchObject({
+    method: "POST",
+    url: "https://matrix.example.com/_matrix/client/v3/logout",
+    headers: { Authorization: "Bearer tok-1" },
+  });
+  expect(homeserver.requests.some((request) => request.url.includes("/devices"))).toBe(false);
+
+  first.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+  expect(syncs).toBe(1);
+});
+
+test("同步还在路上时放弃，迟到的同步结果不能把 Owner 拉进列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingSync = deferred<TransportResult>();
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return pendingSync.promise;
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const view = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "放弃" }));
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+
+  await act(async () => {
+    pendingSync.resolve({
+      type: "response",
+      status: 200,
+      body: { next_batch: "batch-late", account_data: validAgents },
+    });
+  });
+
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+
+  view.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+});
+
+test("停在登记时可以放弃，即使注销返回跨主机重定向、错误、超时或卡住也不阻塞且不跟随重定向，重登从空白游标开始", async () => {
+  const user = userEvent.setup();
+  const logoutCases: Array<{ name: string; respond: () => Promise<TransportResult> }> = [
+    {
+      name: "302 跨主机重定向",
+      respond: async () => ({
+        type: "response",
+        status: 302,
+        body: { location: "https://evil.example.com/logout" },
+      }),
+    },
+    {
+      name: "500 错误",
+      respond: async () => ({
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "Logout broken" },
+      }),
+    },
+    {
+      name: "网络错误",
+      respond: async () => ({ type: "failure", failure: { type: "network" } }),
+    },
+    {
+      name: "超时",
+      respond: async () => ({ type: "failure", failure: { type: "timeout" } }),
+    },
+    {
+      name: "无响应卡住",
+      respond: () => new Promise<TransportResult>(() => {}),
+    },
+  ];
+
+  for (const item of logoutCases) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    let logins = 0;
+    const syncUrls: string[] = [];
+    homeserver.handler = async (input) => {
+      if (input.url.endsWith("/versions")) {
+        return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+      }
+      if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+        return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+        logins += 1;
+        return {
+          type: "response",
+          status: 200,
+          body: { user_id: "@alice:example.com", access_token: `tok-${logins}`, device_id: `DEV${logins}` },
+        };
+      }
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        syncUrls.push(input.url);
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: `batch-${logins}`,
+            ...(logins >= 2 ? { account_data: validAgents } : {}),
+          },
+        };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+        return item.respond();
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    };
+    const first = renderApp(homeserver);
+    await login(user);
+    const input = await screen.findByLabelText("Matrix 用户 ID");
+    await user.type(input, "@bot:example.com");
+    await user.click(screen.getByRole("button", { name: "放弃" }));
+
+    expect(await screen.findByLabelText("密码")).toHaveValue("");
+    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+    expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+
+    const logouts = homeserver.requests.filter((request) => request.url.includes("logout"));
+    expect(logouts).toHaveLength(1);
+    expect(logouts[0]).toMatchObject({
+      method: "POST",
+      url: "https://matrix.example.com/_matrix/client/v3/logout",
+      headers: { Authorization: "Bearer tok-1" },
+    });
+    expect(homeserver.requests.some((request) => request.url.includes("evil.example.com"))).toBe(false);
+    expect(homeserver.requests.some((request) => request.url.includes("/devices"))).toBe(false);
+
+    first.unmount();
+    const second = renderApp(homeserver);
+    expect(await screen.findByLabelText("密码")).toHaveValue("");
+    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("密码"), "secret");
+    await user.click(screen.getByRole("button", { name: "用密码登录" }));
+    expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+    expect(syncUrls).toEqual([
+      "https://matrix.example.com/_matrix/client/v3/sync",
+      "https://matrix.example.com/_matrix/client/v3/sync",
+    ]);
+    second.unmount();
+  }
+});
+
+test("登记写入还在路上时放弃，迟到的写入成功也不能把 Owner 拉进列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const pendingPut = deferred<TransportResult>();
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return { type: "response", status: 200, body: { next_batch: "batch-1" } };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (input.method === "PUT") {
+      return pendingPut.promise;
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  const view = renderApp(homeserver);
+  await login(user);
+  await user.type(await screen.findByLabelText("Matrix 用户 ID"), "@bot:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+  await waitFor(() => {
+    expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(true);
+  });
+
+  await user.click(screen.getByRole("button", { name: "放弃" }));
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+
+  await act(async () => {
+    pendingPut.resolve({ type: "response", status: 200, body: {} });
+  });
+
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+
+  view.unmount();
+  renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
+});
+
+test("提交前重读名册时账号已停用，丢掉凭证回到密码步且不保留已填 Bot ID", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = async (input) => {
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+    ) {
+      return {
+        type: "response",
+        status: 403,
+        body: { errcode: "M_USER_DEACTIVATED", error: "Account deactivated" },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+  renderApp(homeserver);
+  const input = await enterRegistration(user, homeserver);
+  await user.type(input, "@BotOne:example.com");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Account deactivated");
+  expect(alert).not.toHaveTextContent("M_USER_DEACTIVATED");
+  expect(alert).not.toHaveTextContent("403");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
 });

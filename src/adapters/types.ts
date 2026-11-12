@@ -10,7 +10,7 @@ export type TransportResult =
   | { type: "failure"; failure: TransportFailure };
 
 export type HomeserverRequest = {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT";
   url: string;
   headers?: Record<string, string>;
   body?: unknown;

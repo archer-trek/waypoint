@@ -1,5 +1,5 @@
 import type { HomeserverTransport, TransportResult } from "../adapters/types";
-import { dropCredential, loadSession, saveSession, type SessionRecord } from "./session-store";
+import { dropCredential, dropPreListSession, loadSession, saveSession, type SessionRecord } from "./session-store";
 
 export type SyncAttempt = {
   result: TransportResult;
@@ -126,6 +126,77 @@ export class MatrixClient {
         this.syncCursor = cursor;
       }
       return saveSession(this.sessionRecord());
+    });
+  }
+
+  getAccountData(type: string): Promise<TransportResult> {
+    if (!this.accessToken || !this.userId) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "GET",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/account_data/${encodeURIComponent(type)}`,
+      ),
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+  }
+
+  putAccountData(type: string, content: unknown): Promise<TransportResult> {
+    if (!this.accessToken || !this.userId) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.transport.request({
+      method: "PUT",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/account_data/${encodeURIComponent(type)}`,
+      ),
+      headers: {
+        Authorization: `Bearer ${this.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: content,
+    });
+  }
+
+  async retainAccountData(type: string, content: unknown): Promise<void> {
+    await this.enqueuePersist(() => {
+      this.storedAccountData = { ...this.storedAccountData, [type]: content };
+      return saveSession(this.sessionRecord());
+    });
+  }
+
+  async abandonBeforeList(): Promise<void> {
+    const base = this.baseUrl;
+    const token = this.accessToken;
+    if (base && token) {
+      try {
+        void this.transport
+          .request({
+            method: "POST",
+            url: matrixUrl(base, "/_matrix/client/v3/logout"),
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: {},
+          })
+          .then(
+            () => undefined,
+            () => undefined,
+          );
+      } catch {
+        // best-effort logout
+      }
+    }
+    await this.enqueuePersist(() => {
+      this.accessToken = undefined;
+      this.deviceId = undefined;
+      this.syncCursor = undefined;
+      this.storedAccountData = {};
+      return dropPreListSession();
     });
   }
 

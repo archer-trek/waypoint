@@ -3,6 +3,7 @@ import type {
   Clock,
   HomeserverTransport,
   PlatformAdapter,
+  TransportFailure,
   TransportResult,
 } from "../adapters/types";
 import { MatrixClient } from "./matrix-client";
@@ -12,7 +13,7 @@ type Phase =
   | { name: "address"; address: string; message?: string }
   | { name: "password"; address: string; userId: string; password: string; message?: string }
   | { name: "syncing"; address: string; userId: string; message?: string }
-  | { name: "holding" }
+  | { name: "register"; address: string; userId: string; agentUserId: string; submitting: boolean; message?: string }
   | { name: "topics" };
 
 export function WaypointApp({
@@ -37,6 +38,7 @@ export function WaypointApp({
   const backoffStep = useRef(0);
   const syncGeneration = useRef(0);
   const epoch = useRef(0);
+  const abandoning = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,6 +91,29 @@ export function WaypointApp({
     }, delay);
   }
 
+  async function abandon() {
+    if (abandoning.current || (phase.name !== "syncing" && phase.name !== "register")) {
+      return;
+    }
+    abandoning.current = true;
+    const myEpoch = ++epoch.current;
+    syncGeneration.current += 1;
+    clearRetry();
+    backoffStep.current = 0;
+    const matrix = client();
+    const address = matrix.address;
+    const userId = matrix.ownerId;
+    try {
+      await matrix.abandonBeforeList();
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "password", address, userId, password: "" });
+    } finally {
+      abandoning.current = false;
+    }
+  }
+
   function syncIsCurrent(myEpoch: number, generation: number): boolean {
     return epoch.current === myEpoch && syncGeneration.current === generation;
   }
@@ -135,7 +160,7 @@ export function WaypointApp({
       setPhase(
         hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
           ? { name: "topics" }
-          : { name: "holding" },
+          : { name: "register", address: matrix.address, userId: matrix.ownerId, agentUserId: "", submitting: false },
       );
       return;
     }
@@ -196,6 +221,106 @@ export function WaypointApp({
     const next = { ...phase, userId: identifier.user, message: undefined };
     setPhase(next);
     void beginLogin(next.address, identifier.user, phase.password);
+  }
+
+  function submitRegistration(event: FormEvent) {
+    event.preventDefault();
+    if (phase.name !== "register" || phase.submitting) {
+      return;
+    }
+    const validation = validateAgentUserId(phase.agentUserId, phase.userId);
+    if (!validation.ok) {
+      setPhase({ ...phase, agentUserId: validation.trimmed, message: validation.message });
+      return;
+    }
+    setPhase({
+      ...phase,
+      agentUserId: validation.userId,
+      submitting: true,
+      message: undefined,
+    });
+    void beginRegistration(validation.userId);
+  }
+
+  async function handlePreListCredentialRejection(
+    myEpoch: number,
+    action: string,
+    result: TransportResult,
+  ) {
+    const matrix = client();
+    const address = matrix.address;
+    const userId = matrix.ownerId;
+    await matrix.forgetCredential();
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    setPhase({
+      name: "password",
+      address,
+      userId,
+      password: "",
+      message: credentialRejectedMessage(action, result),
+    });
+  }
+
+  async function beginRegistration(agentUserId: string) {
+    const matrix = client();
+    const myEpoch = epoch.current;
+    const ownerId = matrix.ownerId;
+    const existing = await matrix.getAccountData("im.waypoint.agents");
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    if (isCredentialRejected(existing)) {
+      await handlePreListCredentialRejection(myEpoch, "登记 Bot", existing);
+      return;
+    }
+    if (existing.type === "response" && existing.status === 200 && hasValidAgent(existing.body, ownerId)) {
+      await matrix.retainAccountData("im.waypoint.agents", existing.body);
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "topics" });
+      return;
+    }
+    if (!(existing.type === "response" && (existing.status === 200 || existing.status === 404))) {
+      setPhase((prev) =>
+        prev.name === "register"
+          ? {
+              ...prev,
+              submitting: false,
+              message: registrationFailureMessage("读取名册", existing),
+            }
+          : prev,
+      );
+      return;
+    }
+    const nextContent = nextRosterContent(existing, agentUserId);
+    const written = await matrix.putAccountData("im.waypoint.agents", nextContent);
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    if (isCredentialRejected(written)) {
+      await handlePreListCredentialRejection(myEpoch, "登记 Bot", written);
+      return;
+    }
+    if (written.type === "response" && written.status >= 200 && written.status < 300) {
+      await matrix.retainAccountData("im.waypoint.agents", nextContent);
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "topics" });
+      return;
+    }
+    setPhase((prev) =>
+      prev.name === "register"
+        ? {
+            ...prev,
+            submitting: false,
+            message: registrationFailureMessage("登记 Bot", written),
+          }
+        : prev,
+    );
   }
 
   async function beginLogin(address: string, user: string, password: string) {
@@ -294,9 +419,35 @@ export function WaypointApp({
             />
           </label>
           <button type="submit">用密码登录</button>
+          <button
+            type="button"
+            onClick={() => setPhase({ name: "address", address: phase.address })}
+          >
+            更改地址
+          </button>
         </form>
       ) : phase.name === "syncing" ? (
-        <button type="button" onClick={() => { void syncNow(); }}>立刻再试</button>
+        <>
+          <button type="button" onClick={() => { void syncNow(); }}>立刻再试</button>
+          <button type="button" onClick={() => { void abandon(); }}>放弃</button>
+        </>
+      ) : phase.name === "register" ? (
+        <form onSubmit={submitRegistration}>
+          <h1>登记 Bot</h1>
+          <label>
+            Matrix 用户 ID
+            <input
+              name="agent-user-id"
+              value={phase.agentUserId}
+              disabled={phase.submitting}
+              onChange={(event) =>
+                setPhase({ ...phase, agentUserId: event.target.value })
+              }
+            />
+          </label>
+          <button type="submit" disabled={phase.submitting}>登记 Bot</button>
+          <button type="button" onClick={() => { void abandon(); }}>放弃</button>
+        </form>
       ) : null}
       {"message" in phase && phase.message ? <p role="alert">{phase.message}</p> : null}
     </main>
@@ -313,21 +464,45 @@ function isCredentialRejected(result: TransportResult): boolean {
   return code === "M_UNKNOWN_TOKEN" || code === "M_USER_DEACTIVATED";
 }
 
+function credentialRejectedMessage(action: string, result: TransportResult): string {
+  const body = result.type === "response" ? result.body : undefined;
+  return errcode(body) === "M_USER_DEACTIVATED"
+    ? sentence(`${action}失败，因为账号已停用`, errorText(body))
+    : sentence(`${action}失败，因为服务器不认这台设备的登录`, errorText(body));
+}
+
+function transportFailureMessage(action: string, failure: TransportFailure): string {
+  if (failure.type === "timeout") {
+    return `${action}失败，因为超时。`;
+  }
+  if (failure.type === "untrusted-certificate") {
+    return `${action}失败，因为到达不了，证书不受信任。`;
+  }
+  if (failure.type === "hostname-mismatch") {
+    return `${action}失败，因为到达不了，主机名对不上。`;
+  }
+  if (failure.type === "https-unavailable") {
+    return `${action}失败，因为到达不了，HTTPS 建不起来。`;
+  }
+  return `${action}失败，因为到达不了。`;
+}
+
+function registrationFailureMessage(action: string, result: TransportResult): string {
+  if (result.type === "failure") {
+    return transportFailureMessage(action, result.failure);
+  }
+  if (isRateLimited(result.status, result.body)) {
+    return sentence(`${action}失败，因为被限流`, errorText(result.body));
+  }
+  if (result.status >= 500) {
+    return sentence(`${action}失败，因为 Homeserver 暂时不能完成请求`, errorText(result.body));
+  }
+  return sentence(`${action}失败，因为 Homeserver 拒绝了请求`, errorText(result.body));
+}
+
 function syncFailureMessage(result: TransportResult): string {
   if (result.type === "failure") {
-    if (result.failure.type === "timeout") {
-      return "同步失败，因为超时。";
-    }
-    if (result.failure.type === "untrusted-certificate") {
-      return "同步失败，因为到达不了，证书不受信任。";
-    }
-    if (result.failure.type === "hostname-mismatch") {
-      return "同步失败，因为到达不了，主机名对不上。";
-    }
-    if (result.failure.type === "https-unavailable") {
-      return "同步失败，因为到达不了，HTTPS 建不起来。";
-    }
-    return "同步失败，因为到达不了。";
+    return transportFailureMessage("同步", result.failure);
   }
   if (isRateLimited(result.status, result.body)) {
     return sentence("同步失败，因为被限流", errorText(result.body));
@@ -433,7 +608,7 @@ function isFullUserId(user: string): boolean {
     return false;
   }
   const colon = user.indexOf(":");
-  return colon > 1 && user.slice(colon + 1).trim() !== "" && !/\s/.test(user);
+  return colon > 1 && !user.slice(1, colon).includes("@") && user.slice(colon + 1).trim() !== "" && !/\s/.test(user);
 }
 
 function isLocalpart(user: string): boolean {
@@ -517,6 +692,55 @@ function hasValidAgent(content: unknown, ownerUserId: string): boolean {
   });
 }
 
+function validateAgentUserId(
+  raw: string,
+  ownerUserId: string,
+): { ok: true; userId: string } | { ok: false; trimmed: string; message: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, trimmed, message: "登记 Bot 失败，因为用户 ID 是空的。" };
+  }
+  if (!isFullUserId(trimmed)) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为只接受完整的 Matrix 用户 ID，不自动补 @ 或 server name。",
+    };
+  }
+  const ownerServer = serverName(ownerUserId);
+  if (!ownerServer || serverName(trimmed) !== ownerServer) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为 Bot 的 server name 必须与当前账号完全一致。",
+    };
+  }
+  if (trimmed === ownerUserId) {
+    return {
+      ok: false,
+      trimmed,
+      message: "登记 Bot 失败，因为不能把自己登记成 Bot。",
+    };
+  }
+  return { ok: true, userId: trimmed };
+}
+
+function nextRosterContent(existing: TransportResult, agentUserId: string): Record<string, unknown> {
+  if (
+    existing.type === "response" &&
+    existing.status === 200 &&
+    isRecord(existing.body) &&
+    !Array.isArray(existing.body)
+  ) {
+    const prevAgents = Array.isArray(existing.body.agents) ? existing.body.agents : [];
+    return {
+      ...existing.body,
+      agents: [...prevAgents, { user_id: agentUserId }],
+    };
+  }
+  return { agents: [{ user_id: agentUserId }] };
+}
+
 function serverName(userId: string): string | undefined {
   const colon = userId.indexOf(":");
   if (colon < 0) {
@@ -555,19 +779,7 @@ function loginFailure(result: TransportResult): { message: string; clearPassword
     };
   }
   if (result.type === "failure") {
-    if (result.failure.type === "timeout") {
-      return { message: "登录失败，因为超时。", clearPassword: false };
-    }
-    if (result.failure.type === "untrusted-certificate") {
-      return { message: "登录失败，因为到达不了，证书不受信任。", clearPassword: false };
-    }
-    if (result.failure.type === "hostname-mismatch") {
-      return { message: "登录失败，因为到达不了，主机名对不上。", clearPassword: false };
-    }
-    if (result.failure.type === "https-unavailable") {
-      return { message: "登录失败，因为到达不了，HTTPS 建不起来。", clearPassword: false };
-    }
-    return { message: "登录失败，因为到达不了。", clearPassword: false };
+    return { message: transportFailureMessage("登录", result.failure), clearPassword: false };
   }
   if (result.type === "response" && result.status === 200) {
     return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };

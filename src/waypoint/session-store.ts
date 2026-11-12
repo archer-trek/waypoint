@@ -44,6 +44,14 @@ export async function dropCredential(): Promise<void> {
   await saveSession(next);
 }
 
+export async function dropPreListSession(): Promise<void> {
+  const current = await loadSession();
+  if (!current) {
+    return;
+  }
+  await saveSession({ baseUrl: current.baseUrl, userId: current.userId });
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, 1);
