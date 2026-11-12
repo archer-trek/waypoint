@@ -326,6 +326,16 @@ p[role="alert"] {
   background: #efede7;
 }
 
+.waypoint-device-section {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 0.0625rem solid #ddd9d0;
+}
+
+.waypoint-device-section h3 {
+  margin: 0;
+}
+
 .waypoint-timeline {
   display: flex;
   flex-direction: column;

@@ -56,6 +56,7 @@ export function TopicsWorkspace({
   platform,
   viewportMode = "wide",
   keyboardInsetBottom = 0,
+  onExitDevice,
 }: {
   client: MatrixClient;
   clock: Clock;
@@ -63,6 +64,7 @@ export function TopicsWorkspace({
   platform?: PlatformAdapter;
   viewportMode?: ViewportMode;
   keyboardInsetBottom?: number;
+  onExitDevice?: () => Promise<void>;
 }) {
   const retryQueue = useMemo(
     () => providedRetryQueue ?? new RetryQueue(client, clock),
@@ -74,6 +76,8 @@ export function TopicsWorkspace({
   const [agentsForm, setAgentsForm] = useState<AgentsFormState | null>(null);
   const [agentsSubmitting, setAgentsSubmitting] = useState(false);
   const [agentsError, setAgentsError] = useState<string | undefined>(undefined);
+  const [exitConfirmOpen, setExitConfirmOpen] = useState(false);
+  const [exiting, setExiting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [descriptionInput, setDescriptionInput] = useState("");
@@ -162,7 +166,7 @@ export function TopicsWorkspace({
 
   const navDepthRef = useRef(0);
   const targetDepth =
-    viewportMode === "narrow"
+    viewportMode === "narrow" && !exiting
       ? (settingsOpen ? 1 : 0) +
         (creating ? 1 : 0) +
         (activeTopic ? 1 : 0) +
@@ -209,7 +213,7 @@ export function TopicsWorkspace({
     setEditPendingFields({ name: true, description: true });
   }
 
-  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting;
+  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting;
 
   backHandlerRef.current = () => {
     if (viewportMode !== "narrow") {
@@ -217,12 +221,13 @@ export function TopicsWorkspace({
     }
     if (settingsOpen) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (agentsSubmitting) {
+      if (agentsSubmitting || exiting) {
         syncNavigationDepth(targetDepth);
         return true;
       }
       setSettingsOpen(false);
       resetAgentsForm();
+      setExitConfirmOpen(false);
       return true;
     }
     if (creating) {
@@ -272,29 +277,67 @@ export function TopicsWorkspace({
     resetCreateForm();
     resetEditForm();
     resetAgentsForm();
+    setExitConfirmOpen(false);
     setSettingsOpen(true);
   }
 
   function closeSettings() {
-    if (agentsSubmitting) {
+    if (agentsSubmitting || exiting) {
       return;
     }
     setSettingsOpen(false);
     resetAgentsForm();
+    setExitConfirmOpen(false);
+  }
+
+  function openExitConfirm() {
+    if (agentsSubmitting || exiting) {
+      return;
+    }
+    resetAgentsForm();
+    setExitConfirmOpen(true);
+  }
+
+  function cancelExitConfirm() {
+    if (exiting) {
+      return;
+    }
+    setExitConfirmOpen(false);
+  }
+
+  async function confirmExitDevice() {
+    if (exiting || agentsSubmitting || !onExitDevice) {
+      return;
+    }
+    setExiting(true);
+    pausedRef.current = true;
+    syncWakePendingRef.current = false;
+    clearSyncTimer();
+    retryQueue.pause();
+    syncNavigationDepth(0);
+    try {
+      await onExitDevice();
+    } finally {
+      if (mountedRef.current) {
+        setExiting(false);
+      }
+    }
   }
 
   function openAddAgentForm() {
-    if (agentsSubmitting) {
+    if (agentsSubmitting || exiting) {
       return;
     }
+    setExitConfirmOpen(false);
     setAgentsForm({ mode: "add", userId: "", handwrittenName: "" });
     setAgentsError(undefined);
   }
 
   function openEditAgentForm(userId: string, currentName?: string) {
-    if (agentsSubmitting) {
+    if (agentsSubmitting || exiting) {
       return;
     }
+    setExitConfirmOpen(false);
     setAgentsForm({
       mode: "edit",
       userId,
@@ -326,9 +369,10 @@ export function TopicsWorkspace({
   }
 
   function openRemoveAgentConfirm(userId: string) {
-    if (agentsSubmitting || registeredAgents.length <= 1) {
+    if (agentsSubmitting || exiting || registeredAgents.length <= 1) {
       return;
     }
+    setExitConfirmOpen(false);
     setAgentsForm({ mode: "remove", userId });
     setAgentsError(undefined);
   }
@@ -1034,7 +1078,7 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
-                      disabled={agentsSubmitting}
+                      disabled={agentsSubmitting || exiting}
                       onClick={goBack}
                     >
                       返回
@@ -1052,7 +1096,7 @@ export function TopicsWorkspace({
                 {!isNarrow ? (
                   <div className="waypoint-settings-header">
                     <h2>设置</h2>
-                    <button type="button" disabled={agentsSubmitting} onClick={closeSettings}>
+                    <button type="button" disabled={agentsSubmitting || exiting} onClick={closeSettings}>
                       关闭
                     </button>
                   </div>
@@ -1062,7 +1106,7 @@ export function TopicsWorkspace({
                     <h3>Bot 名册</h3>
                     <button
                       type="button"
-                      disabled={agentsSubmitting}
+                      disabled={agentsSubmitting || exiting}
                       onClick={openAddAgentForm}
                     >
                       登记新 Bot
@@ -1080,14 +1124,14 @@ export function TopicsWorkspace({
                         <div className="waypoint-bot-actions">
                           <button
                             type="button"
-                            disabled={agentsSubmitting}
+                            disabled={agentsSubmitting || exiting}
                             onClick={() => openEditAgentForm(bot.userId, bot.handwrittenName)}
                           >
                             编辑
                           </button>
                           <button
                             type="button"
-                            disabled={registeredAgents.length <= 1 || agentsSubmitting}
+                            disabled={registeredAgents.length <= 1 || agentsSubmitting || exiting}
                             onClick={() => openRemoveAgentConfirm(bot.userId)}
                           >
                             移除
@@ -1199,6 +1243,44 @@ export function TopicsWorkspace({
                           type="button"
                           disabled={agentsSubmitting}
                           onClick={cancelAgentsAction}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+                <section aria-label="这台设备" className="waypoint-device-section">
+                  <h3>这台设备</h3>
+                  <button
+                    type="button"
+                    disabled={agentsSubmitting || exiting}
+                    onClick={openExitConfirm}
+                  >
+                    退出这台设备
+                  </button>
+                  {exitConfirmOpen ? (
+                    <div
+                      role="alertdialog"
+                      aria-label="确认退出这台设备"
+                      className="waypoint-agents-form"
+                    >
+                      <h4>确认退出这台设备</h4>
+                      <p>
+                        退出将清空这台设备上的本地时间线、未发送草稿和重试队列。
+                      </p>
+                      <div className="waypoint-form-actions">
+                        <button
+                          type="button"
+                          disabled={exiting}
+                          onClick={() => void confirmExitDevice()}
+                        >
+                          {exiting ? "正在退出…" : "确认退出"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={exiting}
+                          onClick={cancelExitConfirm}
                         >
                           取消
                         </button>

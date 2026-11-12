@@ -67,6 +67,9 @@ export class MatrixClient {
   async setDraft(roomId: string, draft: DraftRecord | undefined): Promise<void> {
     const normalized = normalizeDraftRecord(draft);
     await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
       const nextDrafts = cloneDrafts(this.storedDrafts);
       if (normalized) {
         nextDrafts[roomId] = normalized;
@@ -181,6 +184,9 @@ export class MatrixClient {
 
   async dropSyncCursor(): Promise<void> {
     await this.enqueuePersist(() => {
+      if (!this.accessToken) {
+        return Promise.resolve();
+      }
       this.syncCursor = undefined;
       return saveSession(this.sessionRecord());
     });
@@ -192,6 +198,9 @@ export class MatrixClient {
     }
     const body = attempt.result.body;
     await this.enqueuePersist(() => {
+      if (!this.accessToken) {
+        return Promise.resolve();
+      }
       this.storedAccountData = mergeAccountData(this.storedAccountData, body);
       this.storedRooms = mergeSyncRooms(this.storedRooms, body);
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
@@ -238,6 +247,9 @@ export class MatrixClient {
 
   async retainAccountData(type: string, content: unknown): Promise<void> {
     await this.enqueuePersist(() => {
+      if (!this.accessToken) {
+        return Promise.resolve();
+      }
       this.storedAccountData = { ...this.storedAccountData, [type]: content };
       return saveSession(this.sessionRecord());
     });
@@ -350,6 +362,9 @@ export class MatrixClient {
       content: cloneValue(content) as Record<string, unknown>,
     };
     await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        throw new Error("没有 access token");
+      }
       const nextPending = [...this.storedPendingEvents, item];
       let nextDrafts = this.storedDrafts;
       if (options?.clearDraft && roomId in this.storedDrafts) {
@@ -388,6 +403,9 @@ export class MatrixClient {
 
   async confirmSentRoomEvent(roomId: string, txnId: string, eventId: string): Promise<void> {
     await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
       const pending = this.storedPendingEvents.find(
         (item) => item.roomId === roomId && item.txnId === txnId,
       );
@@ -420,6 +438,9 @@ export class MatrixClient {
     stateEvents: RawMatrixEvent[],
   ): Promise<void> {
     await this.enqueuePersist(() => {
+      if (!this.accessToken) {
+        return Promise.resolve();
+      }
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       this.storedRooms = {
         ...this.storedRooms,
@@ -433,9 +454,15 @@ export class MatrixClient {
     });
   }
 
-  async abandonBeforeList(): Promise<void> {
+  abandonBeforeList(): Promise<void> {
+    return this.exitDevice();
+  }
+
+  async exitDevice(): Promise<void> {
     const base = this.baseUrl;
     const token = this.accessToken;
+    this.accessToken = undefined;
+    this.deviceId = undefined;
     if (base && token) {
       try {
         void this.transport

@@ -80,6 +80,7 @@ export function WaypointApp({
   const syncGeneration = useRef(0);
   const epoch = useRef(0);
   const abandoning = useRef(false);
+  const exiting = useRef(false);
   const phaseNameRef = useRef(phase.name);
   phaseNameRef.current = phase.name;
   const platformRef = useRef(platform);
@@ -221,6 +222,30 @@ export function WaypointApp({
       setPhase({ name: "password", address, userId, password: "" });
     } finally {
       abandoning.current = false;
+    }
+  }
+
+  async function exitDevice() {
+    if (exiting.current || phase.name !== "topics") {
+      return;
+    }
+    exiting.current = true;
+    const myEpoch = ++epoch.current;
+    syncGeneration.current += 1;
+    clearRetry();
+    backoffStep.current = 0;
+    retryQueue().pause();
+    const matrix = client();
+    const address = matrix.address;
+    const userId = matrix.ownerId;
+    try {
+      await matrix.exitDevice();
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase({ name: "password", address, userId, password: "" });
+    } finally {
+      exiting.current = false;
     }
   }
 
@@ -512,6 +537,7 @@ export function WaypointApp({
         platform={platform}
         viewportMode={viewportMode}
         keyboardInsetBottom={keyboardInsetBottom}
+        onExitDevice={exitDevice}
       />
     );
   }

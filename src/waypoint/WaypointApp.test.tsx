@@ -9539,3 +9539,432 @@ test("Owner 停在底部时编辑跟着往下，已经上翻了就不把视口�
   });
   expect(timeline.scrollTop).toBe(1300);
 });
+
+test("设置里有退出入口，点击后必须二次确认并说明清空本地时间线、未发送草稿和重试队列，取消不发送注销且保持已连接", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+
+  const exitButton = screen.getByRole("button", { name: "退出这台设备" });
+  await user.click(exitButton);
+
+  const confirmDialog = screen.getByRole("alertdialog", { name: "确认退出这台设备" });
+  expect(confirmDialog).toHaveTextContent("本地时间线");
+  expect(confirmDialog).toHaveTextContent("未发送草稿");
+  expect(confirmDialog).toHaveTextContent("重试队列");
+  expect(homeserver.requests.some((r) => r.url.includes("/logout"))).toBe(false);
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "取消" }));
+  expect(screen.queryByRole("alertdialog", { name: "确认退出这台设备" })).not.toBeInTheDocument();
+  expect(homeserver.requests.some((r) => r.url.includes("/logout"))).toBe(false);
+  expect(screen.getByText("已连接")).toBeInTheDocument();
+});
+
+test("确认退出后尽量注销（不删设备），清空 token、device id、同步游标、本地时间线、草稿与重试队列，停掉同步与重试并回到保留地址和用户标识的空密码步，重登从空白游标开始", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let logins = 0;
+  let syncCalls = 0;
+  let sendCalls = 0;
+  const syncUrls: string[] = [];
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      logins += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          user_id: "@alice:example.com",
+          access_token: `tok-${logins}`,
+          device_id: `DEV${logins}`,
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      syncCalls += 1;
+      syncUrls.push(input.url);
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "退出清理测试" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$srv-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1500,
+                      content: { msgtype: "m.text", body: "服务端已有回复" },
+                    },
+                  ],
+                },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "草稿话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      return {
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "temporary server error" },
+      };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  // 在 t1 发一条会进入重试队列的未确认消息
+  await user.click(await screen.findByRole("button", { name: "退出清理测试" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("服务端已有回复");
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "还在重试队列里的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => {
+    expect(sendCalls).toBe(1);
+  });
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("还在重试队列里的消息");
+
+  // 在 t2 留下文字和附件草稿
+  await user.click(screen.getByRole("button", { name: "草稿话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未发送草稿文字");
+  const draftFile = new File(["draft-bytes"], "notes.txt", { type: "text/plain" });
+  await user.upload(screen.getByLabelText("选择附件"), draftFile);
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("notes.txt");
+
+  // 打开设置并确认退出这台设备
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  await user.click(screen.getByRole("button", { name: "退出这台设备" }));
+  await user.click(screen.getByRole("button", { name: "确认退出" }));
+
+  // 回到保留地址和用户标识的密码步，密码为空，不再处于已连接
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+  expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+
+  // 发送了 logout，且未删除设备、未退房、未删消息、未写已读位置或 account_data
+  const logouts = homeserver.requests.filter((r) => r.url.endsWith("/_matrix/client/v3/logout"));
+  expect(logouts).toHaveLength(1);
+  expect(logouts[0]).toMatchObject({
+    method: "POST",
+    url: "https://matrix.example.com/_matrix/client/v3/logout",
+    headers: { Authorization: "Bearer tok-1" },
+  });
+  expect(
+    homeserver.requests.some(
+      (r) =>
+        r.url.includes("/devices") ||
+        r.url.includes("/leave") ||
+        r.url.includes("/forget") ||
+        r.url.includes("/redact") ||
+        r.url.includes("/read_markers") ||
+        r.url.includes("/account_data"),
+    ),
+  ).toBe(false);
+
+  // 停掉前台同步与重试定时器
+  const syncsBeforeAdvance = syncCalls;
+  const sendsBeforeAdvance = sendCalls;
+  await act(async () => {
+    first.clock.advance(60_000);
+  });
+  expect(syncCalls).toBe(syncsBeforeAdvance);
+  expect(sendCalls).toBe(sendsBeforeAdvance);
+
+  // 重启应用：直接停在保留地址和用户标识的空密码步，不发起同步
+  first.unmount();
+  const second = renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+  expect(syncCalls).toBe(syncsBeforeAdvance);
+
+  // 重新登录：同步游标已清空（首次同步不带 since），原未发送草稿与重试队列都已清空
+  const syncCountBeforeRelogin = syncUrls.length;
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "用密码登录" }));
+
+  await user.click(await screen.findByRole("button", { name: "退出清理测试" }));
+  expect(syncUrls[syncCountBeforeRelogin]).toBe("https://matrix.example.com/_matrix/client/v3/sync");
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("服务端已有回复");
+  expect(timeline).not.toHaveTextContent("还在重试队列里的消息");
+
+  await user.click(screen.getByRole("button", { name: "草稿话题" }));
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+  expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
+  expect(sendCalls).toBe(sendsBeforeAdvance);
+
+  second.unmount();
+});
+
+test("退出这台设备时即使注销返回跨主机重定向、4xx、5xx、网络错误、超时或卡住也不阻塞且不跟随重定向，且不影响另一台设备的远端房间、已读位置与 Agent 记忆", async () => {
+  const user = userEvent.setup();
+  const logoutCases: Array<{ name: string; respond: () => Promise<TransportResult> }> = [
+    {
+      name: "302 跨主机重定向",
+      respond: async () => ({
+        type: "response",
+        status: 302,
+        body: { location: "https://evil.example.com/logout" },
+      }),
+    },
+    {
+      name: "403 拒绝",
+      respond: async () => ({
+        type: "response",
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+      }),
+    },
+    {
+      name: "500 错误",
+      respond: async () => ({
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "Logout broken" },
+      }),
+    },
+    {
+      name: "网络错误",
+      respond: async () => ({ type: "failure", failure: { type: "network" } }),
+    },
+    {
+      name: "超时",
+      respond: async () => ({ type: "failure", failure: { type: "timeout" } }),
+    },
+    {
+      name: "无响应卡住",
+      respond: () => new Promise<TransportResult>(() => {}),
+    },
+  ];
+
+  for (const item of logoutCases) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "远端话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "Agent 记住的上下文" },
+                      },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+        return item.respond();
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const first = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: "退出这台设备" }));
+    await user.click(screen.getByRole("button", { name: "确认退出" }));
+
+    expect(await screen.findByLabelText("密码")).toHaveValue("");
+    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
+    expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+
+    const logouts = homeserver.requests.filter((r) => r.url.endsWith("/_matrix/client/v3/logout"));
+    expect(logouts).toHaveLength(1);
+    expect(homeserver.requests.some((r) => r.url.includes("evil.example.com"))).toBe(false);
+    expect(homeserver.requests.some((r) => r.url.includes("/devices"))).toBe(false);
+
+    first.unmount();
+
+    // 另一台设备登录同一账号，仍能看到远端房间和 Agent 回复（远端与另一台设备不受影响）
+    globalThis.indexedDB = new IDBFactory();
+    const device2 = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "远端话题" }));
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("Agent 记住的上下文");
+    device2.unmount();
+  }
+});
+
+test("窄视口在设置里退出这台设备对齐历史栈，且还在路上的同步响应迟到后不能写回本地或拉回列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  const lateSync = deferred<TransportResult>();
+  let pushCount = 0;
+  let popCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+          },
+        };
+      }
+      return lateSync.promise;
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const clock = new ManualClock();
+  const view = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{
+        deviceDisplayName: "Waypoint Android",
+        viewportMode: () => "narrow",
+        pushNavigationEntry: () => {
+          pushCount += 1;
+        },
+        popNavigationEntry: () => {
+          popCount += 1;
+        },
+      }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "设置" }));
+  expect(pushCount).toBe(1);
+  expect(popCount).toBe(0);
+
+  // 触发一次前台增量同步，让其停在路上
+  await act(async () => {
+    clock.advance(1000);
+  });
+  expect(syncCalls).toBe(2);
+
+  await user.click(screen.getByRole("button", { name: "退出这台设备" }));
+  await user.click(screen.getByRole("button", { name: "确认退出" }));
+
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(popCount).toBe(1);
+
+  // 迟到的增量同步带着房间和 next_batch 到达，不能写回本地也不能拉回列表
+  await act(async () => {
+    lateSync.resolve({
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-late",
+        account_data: validAgents,
+        rooms: {
+          join: {
+            "!late:example.com": {
+              state: {
+                events: [
+                  { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                  { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                  { type: "m.room.name", state_key: "", content: { name: "迟到房间" } },
+                ],
+              },
+              timeline: { events: [] },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  expect(screen.getByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+
+  view.unmount();
+  const restarted = renderApp(homeserver);
+  expect(await screen.findByLabelText("密码")).toHaveValue("");
+  expect(screen.queryByText("迟到房间")).not.toBeInTheDocument();
+  restarted.unmount();
+});
