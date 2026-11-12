@@ -112,6 +112,9 @@ export function TopicsWorkspace({
   const [composerError, setComposerError] = useState<string | undefined>(undefined);
   const [persistingSend, setPersistingSend] = useState(false);
   const persistingSendRef = useRef(false);
+  const [openFailedMenuId, setOpenFailedMenuId] = useState<string | null>(null);
+  const resendingLocalIdsRef = useRef(new Set<string>());
+  const discardingLocalIdsRef = useRef(new Set<string>());
   const visibleComposerRoomRef = useRef<string | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const lastLandedRoomRef = useRef<string | null>(null);
@@ -131,7 +134,7 @@ export function TopicsWorkspace({
   );
   const rooms = client.rooms();
   const roomList = Object.values(rooms);
-  const topics = deriveTopics(rooms, registeredAgents, client.ownerId);
+  const topics = deriveTopics(rooms, registeredAgents, client.ownerId, client.pendingRoomEvents());
   const activeTopic = activeTopicId
     ? topics.find((topic) => topic.roomId === activeTopicId)
     : undefined;
@@ -149,10 +152,13 @@ export function TopicsWorkspace({
     .map((item) =>
       item.kind === "day-separator"
         ? `s:${item.key}`
-        : `m:${item.key}:${item.confirmed ? 1 : 0}:${item.body}`,
+        : `m:${item.key}:${item.status}:${item.body}`,
     )
     .join("\0");
 
+  useLayoutEffect(() => {
+    setOpenFailedMenuId(null);
+  }, [activeTopic?.roomId]);
 
 
   useEffect(() => {
@@ -770,6 +776,36 @@ export function TopicsWorkspace({
     !settingsOpen && !creating && !editing && activeTopic ? activeTopic.roomId : null;
 
   useEffect(() => {
+    if (visibleComposerRoomId === null) {
+      setOpenFailedMenuId(null);
+    }
+  }, [visibleComposerRoomId]);
+
+  useEffect(() => {
+    if (!openFailedMenuId) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenFailedMenuId(null);
+      }
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Element && target.closest(".waypoint-failed-controls")) {
+        return;
+      }
+      setOpenFailedMenuId(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [openFailedMenuId]);
+
+  useEffect(() => {
     const prevRoomId = visibleComposerRoomRef.current;
     visibleComposerRoomRef.current = visibleComposerRoomId;
     if (prevRoomId && prevRoomId !== visibleComposerRoomId) {
@@ -824,6 +860,11 @@ export function TopicsWorkspace({
     pausedRef.current = retryQueue.isPaused;
     retryQueue.setCallbacks({
       onConfirmed: () => {
+        if (mountedRef.current) {
+          setRevision((value) => value + 1);
+        }
+      },
+      onFailed: () => {
         if (mountedRef.current) {
           setRevision((value) => value + 1);
         }
@@ -1111,6 +1152,39 @@ export function TopicsWorkspace({
     void client.setDraft(roomId, nextDraft).catch(() => undefined);
   }
 
+  async function handleResendFailed(roomId: string, localId: string) {
+    if (resendingLocalIdsRef.current.has(localId) || discardingLocalIdsRef.current.has(localId)) {
+      return;
+    }
+    setOpenFailedMenuId((prev) => (prev === localId ? null : prev));
+    resendingLocalIdsRef.current.add(localId);
+    try {
+      const pending = await client.resendFailedRoomEvent(roomId, localId);
+      if (pending && mountedRef.current) {
+        setRevision((value) => value + 1);
+        retryQueue.wake();
+      }
+    } finally {
+      resendingLocalIdsRef.current.delete(localId);
+    }
+  }
+
+  async function handleDiscardFailed(roomId: string, localId: string) {
+    if (resendingLocalIdsRef.current.has(localId) || discardingLocalIdsRef.current.has(localId)) {
+      return;
+    }
+    setOpenFailedMenuId((prev) => (prev === localId ? null : prev));
+    discardingLocalIdsRef.current.add(localId);
+    try {
+      const removed = await client.discardFailedRoomEvent(roomId, localId);
+      if (removed && mountedRef.current) {
+        setRevision((value) => value + 1);
+      }
+    } finally {
+      discardingLocalIdsRef.current.delete(localId);
+    }
+  }
+
   async function handleSendMessage(event: FormEvent) {
     event.preventDefault();
     if (!activeTopic || persistingSendRef.current) {
@@ -1285,6 +1359,7 @@ export function TopicsWorkspace({
                 <li key={topic.roomId}>
                   <button
                     type="button"
+                    aria-label={topic.name}
                     className={
                       topic.roomId === activeTopic?.roomId
                         ? "waypoint-topic-row active"
@@ -1307,6 +1382,21 @@ export function TopicsWorkspace({
                       >
                         {topic.name}
                       </span>
+                      {topic.sendStatus === "failed" ? (
+                        <span
+                          role="img"
+                          aria-label="失败"
+                          className="waypoint-topic-row-failed"
+                        >
+                          !
+                        </span>
+                      ) : topic.sendStatus === "unconfirmed" ? (
+                        <span
+                          role="img"
+                          aria-label="未确认"
+                          className="waypoint-unconfirmed-spinner"
+                        />
+                      ) : null}
                     </span>
                     {registeredAgents.length > 1 && topic.botDisplayName ? (
                       <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
@@ -1832,14 +1922,70 @@ export function TopicsWorkspace({
                           data-side={item.side}
                           data-event-id={item.eventId}
                         >
-                          {!item.confirmed ? (
+                          {item.status === "unconfirmed" ? (
                             <span
                               role="status"
                               aria-label="未确认"
                               className="waypoint-unconfirmed-spinner"
                             />
+                          ) : item.status === "failed" && item.localId ? (
+                            <div className="waypoint-failed-controls">
+                              <button
+                                type="button"
+                                aria-label="更多操作"
+                                aria-haspopup="menu"
+                                aria-expanded={openFailedMenuId === item.localId}
+                                className="waypoint-bubble-menu-trigger"
+                                onClick={() =>
+                                  setOpenFailedMenuId((prev) =>
+                                    prev === item.localId ? null : item.localId!,
+                                  )
+                                }
+                              >
+                                ⋯
+                              </button>
+                              <button
+                                type="button"
+                                aria-label="失败"
+                                className="waypoint-failed-button"
+                                onClick={() => {
+                                  void handleResendFailed(activeTopic.roomId, item.localId!);
+                                }}
+                              >
+                                !
+                              </button>
+                              {openFailedMenuId === item.localId ? (
+                                <div
+                                  role="menu"
+                                  aria-label="消息操作"
+                                  className="waypoint-failed-menu"
+                                >
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={() => {
+                                      void handleDiscardFailed(activeTopic.roomId, item.localId!);
+                                    }}
+                                  >
+                                    丢掉
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
                           ) : null}
-                          <div className="waypoint-bubble">{item.body}</div>
+                          <div
+                            className="waypoint-bubble"
+                            onContextMenu={
+                              item.status === "failed" && item.localId
+                                ? (event) => {
+                                    event.preventDefault();
+                                    setOpenFailedMenuId(item.localId!);
+                                  }
+                                : undefined
+                            }
+                          >
+                            {item.body}
+                          </div>
                         </div>
                       ),
                     )}

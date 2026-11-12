@@ -6,6 +6,7 @@ export const RETRY_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
 export type RetryQueueCallbacks = {
   onConfirmed?: () => void;
+  onFailed?: () => void;
   onCredentialRejected?: () => void;
 };
 
@@ -196,6 +197,15 @@ export class RetryQueue {
         ) {
           this.scheduleRetry();
           break;
+        }
+        if (result.type === "response" && result.status >= 400 && result.status < 500) {
+          await this.client.failPendingRoomEvent(head.roomId, head.txnId);
+          this.backoffStep = 0;
+          if (this.disposed) {
+            break;
+          }
+          this.callbacks.onFailed?.();
+          continue;
         }
         break;
       }

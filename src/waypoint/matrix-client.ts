@@ -22,6 +22,14 @@ export type SyncAttempt = {
   leaveGeneration?: number;
 };
 
+export type LocalMessageStatus = "unconfirmed" | "failed";
+
+export type WaypointLocalMeta = {
+  id: string;
+  status: LocalMessageStatus;
+  txnId: string;
+};
+
 export class MatrixClient {
   private baseUrl = "";
   private userId = "";
@@ -427,13 +435,30 @@ export class MatrixClient {
         throw new Error("没有 access token");
       }
       const nextPending = [...this.storedPendingEvents, item];
+      let nextRooms = this.storedRooms;
+      if (type === "m.room.message") {
+        nextRooms = cloneStoredRooms(this.storedRooms);
+        const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+        existingRoom.timelineEvents.push({
+          type,
+          sender: this.userId,
+          content: cloneValue(content),
+          waypoint_local: {
+            id: item.txnId,
+            status: "unconfirmed",
+            txnId: item.txnId,
+          },
+        });
+        nextRooms[roomId] = existingRoom;
+      }
       let nextDrafts = this.storedDrafts;
       if (options?.clearDraft && roomId in this.storedDrafts) {
         nextDrafts = cloneDrafts(this.storedDrafts);
         delete nextDrafts[roomId];
       }
-      await saveSession(this.sessionRecord({ pending: nextPending, drafts: nextDrafts }));
+      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms, drafts: nextDrafts }));
       this.storedPendingEvents = nextPending;
+      this.storedRooms = nextRooms;
       this.storedDrafts = nextDrafts;
     });
     return clonePendingEvent(item);
@@ -605,15 +630,156 @@ export class MatrixClient {
       const nextRooms = cloneStoredRooms(this.storedRooms);
       const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const alreadyConfirmed = existingRoom.timelineEvents.some(
-        (ev) => eventIdOf(ev) === eventId || transactionIdOf(ev) === txnId,
+        (ev) => !localPlaceholderOf(ev) && (eventIdOf(ev) === eventId || transactionIdOf(ev) === txnId),
       );
-      if (!alreadyConfirmed && pending) {
+      const placeholderIndex = existingRoom.timelineEvents.findIndex(
+        (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+      );
+      if (!alreadyConfirmed) {
+        const placeholder = placeholderIndex !== -1 ? existingRoom.timelineEvents[placeholderIndex] : undefined;
+        const source = pending ?? (placeholder && typeof placeholder.type === "string" && typeof placeholder.sender === "string" && isPlainObject(placeholder.content) ? { type: placeholder.type, sender: placeholder.sender, content: placeholder.content } : undefined);
+        if (source) {
+          const confirmedEvent: RawMatrixEvent = {
+            type: source.type,
+            event_id: eventId,
+            sender: source.sender,
+            content: cloneValue(source.content),
+            unsigned: { transaction_id: txnId },
+          };
+          if (placeholderIndex !== -1) {
+            existingRoom.timelineEvents[placeholderIndex] = confirmedEvent;
+          } else {
+            existingRoom.timelineEvents.push(confirmedEvent);
+          }
+          nextRooms[roomId] = existingRoom;
+        }
+      } else if (placeholderIndex !== -1) {
+        existingRoom.timelineEvents.splice(placeholderIndex, 1);
+        nextRooms[roomId] = existingRoom;
+      }
+      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+      this.storedPendingEvents = nextPending;
+      this.storedRooms = nextRooms;
+    });
+  }
+
+  async resendFailedRoomEvent(roomId: string, localId: string): Promise<PendingRoomEvent | undefined> {
+    let created: PendingRoomEvent | undefined;
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken || !this.userId) {
+        return;
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const existingRoom = nextRooms[roomId];
+      if (!existingRoom) {
+        return;
+      }
+      const placeholderIndex = existingRoom.timelineEvents.findIndex((ev) => {
+        const meta = localPlaceholderOf(ev);
+        return meta?.id === localId && meta.status === "failed";
+      });
+      if (placeholderIndex === -1) {
+        return;
+      }
+      const placeholder = existingRoom.timelineEvents[placeholderIndex];
+      if (
+        typeof placeholder.type !== "string" ||
+        placeholder.type === "" ||
+        typeof placeholder.sender !== "string" ||
+        placeholder.sender === "" ||
+        !isPlainObject(placeholder.content)
+      ) {
+        return;
+      }
+      const newTxnId = this.nextTxnId();
+      const item: PendingRoomEvent = {
+        txnId: newTxnId,
+        roomId,
+        type: placeholder.type,
+        sender: placeholder.sender,
+        content: cloneValue(placeholder.content) as Record<string, unknown>,
+      };
+      existingRoom.timelineEvents[placeholderIndex] = {
+        ...placeholder,
+        waypoint_local: {
+          id: localId,
+          status: "unconfirmed",
+          txnId: newTxnId,
+        },
+      };
+      const nextPending = [...this.storedPendingEvents, item];
+      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+      this.storedPendingEvents = nextPending;
+      this.storedRooms = nextRooms;
+      created = clonePendingEvent(item);
+    });
+    return created ? clonePendingEvent(created) : undefined;
+  }
+
+  async discardFailedRoomEvent(roomId: string, localId: string): Promise<boolean> {
+    let removed = false;
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const existingRoom = nextRooms[roomId];
+      if (!existingRoom) {
+        return;
+      }
+      const placeholderIndex = existingRoom.timelineEvents.findIndex((ev) => {
+        const meta = localPlaceholderOf(ev);
+        return meta?.id === localId && meta.status === "failed";
+      });
+      if (placeholderIndex === -1) {
+        return;
+      }
+      existingRoom.timelineEvents.splice(placeholderIndex, 1);
+      await saveSession(this.sessionRecord({ rooms: nextRooms }));
+      this.storedRooms = nextRooms;
+      removed = true;
+    });
+    return removed;
+  }
+
+  async failPendingRoomEvent(roomId: string, txnId: string): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const pending = this.storedPendingEvents.find(
+        (item) => item.roomId === roomId && item.txnId === txnId,
+      );
+      const nextPending = this.storedPendingEvents.filter(
+        (item) => !(item.roomId === roomId && item.txnId === txnId),
+      );
+      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const placeholderIndex = existingRoom.timelineEvents.findIndex(
+        (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+      );
+      if (placeholderIndex !== -1) {
+        const placeholder = existingRoom.timelineEvents[placeholderIndex];
+        const meta = localPlaceholderOf(placeholder)!;
+        existingRoom.timelineEvents[placeholderIndex] = {
+          ...placeholder,
+          waypoint_local: {
+            id: meta.id,
+            status: "failed",
+            txnId,
+          },
+        };
+        nextRooms[roomId] = existingRoom;
+      } else if (pending && pending.type === "m.room.message") {
         existingRoom.timelineEvents.push({
           type: pending.type,
-          event_id: eventId,
           sender: pending.sender,
           content: cloneValue(pending.content),
-          unsigned: { transaction_id: txnId },
+          waypoint_local: {
+            id: pending.txnId,
+            status: "failed",
+            txnId: pending.txnId,
+          },
         });
         nextRooms[roomId] = existingRoom;
       }
@@ -1130,6 +1296,9 @@ function mergeStateEvents(
 }
 
 function eventIdOf(event: RawMatrixEvent): string | undefined {
+  if (localPlaceholderOf(event)) {
+    return undefined;
+  }
   return typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
 }
 
@@ -1208,7 +1377,13 @@ function mergeTimelineEventsWithRedactions(
 
   const result = existing.filter((event) => !shouldOmit(event)).map(cloneObject);
   const indexByEventId = new Map<string, number>();
+  const indexByLocalTxnId = new Map<string, number>();
   result.forEach((event, index) => {
+    const local = localPlaceholderOf(event);
+    if (local) {
+      indexByLocalTxnId.set(local.txnId, index);
+      return;
+    }
     const id = eventIdOf(event);
     if (id !== undefined) {
       indexByEventId.set(id, index);
@@ -1221,14 +1396,23 @@ function mergeTimelineEventsWithRedactions(
     }
     const event = cloneObject(rawEvent);
     const id = eventIdOf(event);
-    if (id !== undefined) {
-      const existingIndex = indexByEventId.get(id);
-      if (existingIndex !== undefined) {
-        result[existingIndex] = event;
-      } else {
-        indexByEventId.set(id, result.length);
-        result.push(event);
+    const txnId = transactionIdOf(event);
+    if (id !== undefined && indexByEventId.has(id)) {
+      const existingIndex = indexByEventId.get(id)!;
+      result[existingIndex] = event;
+      if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
+        indexByLocalTxnId.delete(txnId);
       }
+    } else if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
+      const localIndex = indexByLocalTxnId.get(txnId)!;
+      result[localIndex] = event;
+      indexByLocalTxnId.delete(txnId);
+      if (id !== undefined) {
+        indexByEventId.set(id, localIndex);
+      }
+    } else if (id !== undefined) {
+      indexByEventId.set(id, result.length);
+      result.push(event);
     } else {
       result.push(event);
     }
@@ -1543,4 +1727,25 @@ function reconcilePendingReadMarkersWithSync(
     }
     return true;
   });
+}
+
+export function localPlaceholderOf(event: RawMatrixEvent): WaypointLocalMeta | undefined {
+  if (!isPlainObject(event.waypoint_local)) {
+    return undefined;
+  }
+  const raw = event.waypoint_local;
+  if (
+    typeof raw.id !== "string" ||
+    raw.id === "" ||
+    (raw.status !== "unconfirmed" && raw.status !== "failed") ||
+    typeof raw.txnId !== "string" ||
+    raw.txnId === ""
+  ) {
+    return undefined;
+  }
+  return {
+    id: raw.id,
+    status: raw.status,
+    txnId: raw.txnId,
+  };
 }

@@ -11693,3 +11693,1017 @@ test("leave 成功后按顺序尽力 forget 与清理 m.direct（仅在包含时
     secondView.unmount();
   }
 });
+
+test("消息被 Homeserver 永久拒绝（其他 4xx）时转圈换成红叹号，不写失败或错误码，重启后仍留原地且不自动重发；网络错误和限流不变红叹号", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendCalls = 0;
+  let sendMode: "403" | "429" | "network" = "403";
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "永久拒绝测试话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$prev-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1500,
+                      content: { msgtype: "m.text", body: "Bot 先说的话" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCalls += 1;
+      if (sendMode === "403") {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Forbidden to send" },
+        };
+      }
+      if (sendMode === "429") {
+        return {
+          type: "response",
+          status: 429,
+          body: { errcode: "M_LIMIT_EXCEEDED", error: "Rate limited" },
+        };
+      }
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "永久拒绝测试话题" }));
+
+  // 1) 发送一条会被 403 永久拒绝的消息
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被拒绝的文本");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const failBtn = await screen.findByRole("button", { name: "失败" });
+  expect(failBtn).toHaveTextContent("!");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(document.body).not.toHaveTextContent(/失败|Not Delivered|M_FORBIDDEN|403|Forbidden to send/);
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const rows = timeline.querySelectorAll("[data-side]");
+  expect(rows).toHaveLength(2);
+  expect(rows[1]).toHaveAttribute("data-side", "right");
+  expect(rows[1]).toHaveTextContent("被拒绝的文本");
+  expect(rows[1].contains(failBtn)).toBe(true);
+
+  // 2) 网络错误和限流不变红叹号，仍保留在重试队列（转圈）
+  sendMode = "429";
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "限流消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sendCalls).toBe(2));
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
+
+  sendMode = "network";
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => expect(sendCalls).toBe(3));
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
+
+  // 3) 重启恢复后，失败气泡仍在原地且不自动重发，只有未确认项在重试队列
+  first.unmount();
+  const sendsBeforeRestart = sendCalls;
+  const second = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "永久拒绝测试话题" }));
+
+  await waitFor(() => expect(sendCalls).toBe(sendsBeforeRestart + 1));
+  const restoredTimeline = screen.getByRole("log", { name: "对话时间线" });
+  const restoredRows = restoredTimeline.querySelectorAll("[data-side]");
+  expect(restoredRows).toHaveLength(3);
+  expect(restoredRows[1]).toHaveTextContent("被拒绝的文本");
+  expect(restoredRows[1].contains(screen.getByRole("button", { name: "失败" }))).toBe(true);
+  expect(restoredRows[2]).toHaveTextContent("限流消息");
+  expect(restoredRows[2].contains(screen.getByRole("status", { name: "未确认" }))).toBe(true);
+
+  second.unmount();
+});
+
+test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不挪末尾、无二次确认），断网转圈重试再失败回红叹号，确认后原地收成同一条气泡", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendBehavior: "first-403-then-200" | "offline" | "400" | "200" = "first-403-then-200";
+  const sentRequests: Array<{ txnId: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "原处重发测试" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m0",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "第0条Bot消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$m2-bot",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 3000,
+                        content: { msgtype: "m.text", body: "后来Bot插进来的消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      const lastResentTxn = sentRequests[sentRequests.length - 1]?.txnId;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events:
+                    sendBehavior === "200" && lastResentTxn
+                      ? [
+                          {
+                            type: "m.room.message",
+                            event_id: "$m1-resent",
+                            sender: "@alice:example.com",
+                            origin_server_ts: 4000,
+                            content: { msgtype: "m.text", body: "第1条会失败的消息" },
+                            unsigned: { transaction_id: lastResentTxn },
+                          },
+                        ]
+                      : [],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const txnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      sentRequests.push({ txnId, body: input.body });
+      if (sendBehavior === "first-403-then-200") {
+        if (sentRequests.length === 1) {
+          return {
+            type: "response",
+            status: 403,
+            body: { errcode: "M_FORBIDDEN", error: "Rejected first" },
+          };
+        }
+        return { type: "response", status: 200, body: { event_id: "$m1-ok" } };
+      }
+      if (sendBehavior === "offline") {
+        return { type: "failure", failure: { type: "network" } };
+      }
+      if (sendBehavior === "400") {
+        return {
+          type: "response",
+          status: 400,
+          body: { errcode: "M_BAD_JSON", error: "Rejected again" },
+        };
+      }
+      return { type: "response", status: 200, body: { event_id: "$m1-resent" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "原处重发测试" }));
+
+  // 发送第1条（被403拒绝）与第2条（成功）
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第1条会失败的消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  const failBtn = await screen.findByRole("button", { name: "失败" });
+  expect(failBtn).toBeInTheDocument();
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第2条正常消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(sentRequests).toHaveLength(2));
+
+  // 推进同步，收到 Bot 后来发的消息
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(2));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const getBodies = () => Array.from(timeline.querySelectorAll("[data-side] .waypoint-bubble")).map((el) => el.textContent);
+  expect(getBodies()).toEqual([
+    "第0条Bot消息",
+    "第1条会失败的消息",
+    "第2条正常消息",
+    "后来Bot插进来的消息",
+  ]);
+
+  // 正在输入新草稿 + 附件草稿，且在断网时点击红叹号重发
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未发出的草稿");
+  const draftFile = new File(["bytes"], "draft.txt", { type: "text/plain" });
+  await user.upload(screen.getByLabelText("选择附件"), draftFile);
+  expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("draft.txt");
+
+  const firstAttemptTxnId = sentRequests[0]!.txnId;
+  sendBehavior = "offline";
+  await user.click(screen.getByRole("button", { name: "失败" }));
+
+  // 立刻在原处变回转圈，不弹窗确认，不清掉草稿，不挪到末尾，发出新的 txnId
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("未发出的草稿");
+  expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("draft.txt");
+  expect(getBodies()).toEqual([
+    "第0条Bot消息",
+    "第1条会失败的消息",
+    "第2条正常消息",
+    "后来Bot插进来的消息",
+  ]);
+  await waitFor(() => expect(sentRequests).toHaveLength(3));
+  const secondAttemptTxnId = sentRequests[2]!.txnId;
+  expect(secondAttemptTxnId).not.toBe(firstAttemptTxnId);
+  expect(sentRequests[2]!.body).toEqual({ msgtype: "m.text", body: "第1条会失败的消息" });
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(timeline.querySelectorAll("[data-side]")[1].contains(screen.getByRole("status", { name: "未确认" }))).toBe(true);
+
+  // 重试队列 1s 后再试，这次又被 400 永久拒绝 -> 又变回红叹号，仍在原处
+  sendBehavior = "400";
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => expect(sentRequests).toHaveLength(4));
+  expect(sentRequests[3]!.txnId).toBe(secondAttemptTxnId);
+  const failBtnAgain = await screen.findByRole("button", { name: "失败" });
+  expect(timeline.querySelectorAll("[data-side]")[1].contains(failBtnAgain)).toBe(true);
+
+  // 再次点击红叹号 -> 这次成功确认（新 txnId），在原处收成同一条已确认气泡，不出现第二条
+  sendBehavior = "200";
+  await user.click(failBtnAgain);
+  await waitFor(() => expect(sentRequests).toHaveLength(5));
+  const thirdAttemptTxnId = sentRequests[4]!.txnId;
+  expect(thirdAttemptTxnId).not.toBe(secondAttemptTxnId);
+
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(getBodies()).toEqual([
+    "第0条Bot消息",
+    "第1条会失败的消息",
+    "第2条正常消息",
+    "后来Bot插进来的消息",
+  ]);
+
+  // 同步回声到达后仍不重复、保持原位
+  await act(async () => { first.clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(3));
+  expect(getBodies()).toEqual([
+    "第0条Bot消息",
+    "第1条会失败的消息",
+    "第2条正常消息",
+    "后来Bot插进来的消息",
+  ]);
+  expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("未发出的草稿");
+
+  // 重启后仍在原位且无重复
+  first.unmount();
+  const second = renderApp(homeserver);
+  await user.click(await screen.findByRole("button", { name: "原处重发测试" }));
+  const restoredTimeline = screen.getByRole("log", { name: "对话时间线" });
+  const restoredBodies = Array.from(restoredTimeline.querySelectorAll("[data-side] .waypoint-bubble")).map((el) => el.textContent);
+  expect(restoredBodies).toEqual([
+    "第0条Bot消息",
+    "第1条会失败的消息",
+    "第2条正常消息",
+    "后来Bot插进来的消息",
+  ]);
+  second.unmount();
+});
+
+test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无时刻），点一次立即从本机消失无确认无撤销；未确认消息没有此菜单", async () => {
+  const user = userEvent.setup();
+  for (const viewportMode of ["wide", "narrow"] as const) {
+    globalThis.indexedDB = new IDBFactory();
+    const homeserver = new FakeHomeserver();
+    let sendCount = 0;
+
+    homeserver.handler = passwordLoginHandler(async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "丢掉菜单话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$c1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "已确认的Bot消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+        sendCount += 1;
+        if (sendCount === 1) {
+          return {
+            type: "response",
+            status: 403,
+            body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+          };
+        }
+        return { type: "failure", failure: { type: "network" } };
+      }
+      throw new Error(`不应发送 ${input.method} ${input.url}`);
+    });
+
+    const clock = new ManualClock();
+    const view = render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{
+          deviceDisplayName: viewportMode === "wide" ? "Waypoint macOS" : "Waypoint Android",
+          viewportMode: () => viewportMode,
+        }}
+        clock={clock}
+      />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "丢掉菜单话题" }));
+
+    // 发送一条永久失败消息和一条未确认消息
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "要被丢掉的失败消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByRole("button", { name: "失败" });
+
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "还在转圈的未确认消息");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await screen.findByRole("status", { name: "未确认" });
+
+    // 未确认消息和已确认消息都没有菜单，右键也不能打开丢掉菜单
+    const menuTriggers = screen.getAllByRole("button", { name: "更多操作" });
+    expect(menuTriggers).toHaveLength(1);
+    fireEvent.contextMenu(screen.getByText("还在转圈的未确认消息"));
+    fireEvent.contextMenu(screen.getByText("已确认的Bot消息"));
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "丢掉" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+
+    // 点击失败气泡的菜单触发按钮，打开只有「丢掉」的菜单，不显示时刻
+    await user.click(menuTriggers[0]!);
+    const menu = screen.getByRole("menu", { name: "消息操作" });
+    const menuItems = menu.querySelectorAll("[role=menuitem]");
+    expect(menuItems).toHaveLength(1);
+    expect(menuItems[0]).toHaveTextContent("丢掉");
+    expect(menu).not.toHaveTextContent(/\d{1,2}:\d{2}/);
+    expect(menu).not.toHaveTextContent(/撤回|删除|复制|重发|撤销/);
+
+    // 点击「丢掉」：无需二次确认，不发请求，不回填草稿，无撤销，立即从本机消失
+    const reqCountBeforeDiscard = homeserver.requests.length;
+    await user.click(menuItems[0]!);
+    await waitFor(() => {
+      expect(screen.queryByText("要被丢掉的失败消息")).not.toBeInTheDocument();
+    });
+    expect(homeserver.requests).toHaveLength(reqCountBeforeDiscard);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(screen.queryByText(/撤销/)).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+    expect(screen.getByText("还在转圈的未确认消息")).toBeInTheDocument();
+
+    // 重启后失败消息仍已彻底消失，未确认消息仍在
+    view.unmount();
+    const restarted = renderApp(homeserver);
+    await user.click(await screen.findByRole("button", { name: "丢掉菜单话题" }));
+    const restoredTimeline = screen.getByRole("log", { name: "对话时间线" });
+    expect(restoredTimeline).toHaveTextContent("已确认的Bot消息");
+    expect(restoredTimeline).toHaveTextContent("还在转圈的未确认消息");
+    expect(restoredTimeline).not.toHaveTextContent("要被丢掉的失败消息");
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+    restarted.unmount();
+  }
+});
+
+test("未确认和失败消息不推进已读位置、不重排 Topic 列表、不发 read_markers，且另一台设备看不到", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!older:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "旧Topic" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$old-1" } }],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$old-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 1500,
+                      content: { msgtype: "m.text", body: "旧Topic已确认消息" },
+                    },
+                  ],
+                },
+              },
+              "!newer:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "新Topic" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCount += 1;
+      if (sendCount === 1) {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+        };
+      }
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const device1 = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const listOrder = () =>
+    Array.from(sidebar.querySelectorAll(".waypoint-topic-name")).map((el) => el.textContent);
+  expect(listOrder()).toEqual(["新Topic", "旧Topic"]);
+
+  // 在旧Topic发出一条失败消息和一条未确认消息
+  await user.click(screen.getByRole("button", { name: "旧Topic" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "本地失败消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("button", { name: "失败" });
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "本地未确认消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("status", { name: "未确认" });
+
+  // 不改变 Topic 列表顺序，不写 read_markers / account_data
+  expect(listOrder()).toEqual(["新Topic", "旧Topic"]);
+  expect(homeserver.requests.some((r) => r.url.includes("read_markers"))).toBe(false);
+  expect(homeserver.requests.some((r) => r.url.includes("account_data"))).toBe(false);
+
+  // 切走再重新打开旧Topic，不发 read_markers，也不把未确认/失败当成未读
+  await user.click(screen.getByRole("button", { name: "新Topic" }));
+  await user.click(screen.getByRole("button", { name: "旧Topic" }));
+  expect(homeserver.requests.some((r) => r.url.includes("read_markers"))).toBe(false);
+
+  device1.unmount();
+
+  // 另一台设备登录同步，看不到第一台设备上的未确认和失败消息
+  globalThis.indexedDB = new IDBFactory();
+  const device2 = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "旧Topic" }));
+  const timeline2 = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline2).toHaveTextContent("旧Topic已确认消息");
+  expect(timeline2).not.toHaveTextContent("本地失败消息");
+  expect(timeline2).not.toHaveTextContent("本地未确认消息");
+  device2.unmount();
+});
+
+test("Topic 列表行最多显示一个发送状态标记且失败优先于未确认，不计条数、不预览正文、点列表红叹号只打开 Topic 不重发，非消息待重放项不触发标记", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let sendBehavior: "offline" | "first-403-rest-offline" | "200" = "offline";
+  let sendCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "列表标记话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "另一条话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/")) {
+      sendCalls += 1;
+      if (sendBehavior === "first-403-rest-offline" && sendCalls === 3) {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+        };
+      }
+      if (sendBehavior === "200") {
+        return { type: "response", status: 200, body: { event_id: `$ev-${sendCalls}` } };
+      }
+      return { type: "failure", failure: { type: "network" } };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
+
+  // 打开列表标记话题，离线连发两条消息 -> 列表行最多一个转圈，不显示条数与消息正文预览
+  await user.click(within(sidebar).getByRole("button", { name: "列表标记话题" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条秘密正文");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条秘密正文");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  await waitFor(() => expect(sendCalls).toBeGreaterThanOrEqual(1));
+  const row1 = within(sidebar).getByRole("button", { name: "列表标记话题" });
+  expect(within(row1).getAllByRole("img", { name: "未确认" })).toHaveLength(1);
+  expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+  expect(row1).not.toHaveTextContent(/2|第一条秘密正文|第二条秘密正文/);
+
+  // 第一条被 403 永久拒绝，第二条仍未确认 -> 同一行既有失败又有未确认，优先显示红叹号（最多一个）
+  sendBehavior = "first-403-rest-offline";
+  await act(async () => { first.clock.advance(2000); });
+  await screen.findByRole("button", { name: "失败" });
+
+  expect(within(row1).getAllByRole("img", { name: "失败" })).toHaveLength(1);
+  expect(within(row1).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+  expect(row1).toHaveTextContent("!");
+  expect(row1).not.toHaveTextContent(/失败|2|第一条秘密正文|第二条秘密正文/);
+
+  // 切换到另一条话题，再直接点击列表行上的红叹号：只打开该 Topic，不直接重发
+  await user.click(within(sidebar).getByRole("button", { name: "另一条话题" }));
+  expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("另一条话题");
+  const sendsBeforeRowClick = sendCalls;
+  await user.click(within(row1).getByRole("img", { name: "失败" }));
+  expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("列表标记话题");
+  expect(sendCalls).toBe(sendsBeforeRowClick);
+
+  // 丢掉失败消息后只剩未确认消息 -> 列表行从红叹号变回转圈
+  await user.click(screen.getByRole("button", { name: "更多操作" }));
+  await user.click(within(screen.getByRole("menu", { name: "消息操作" })).getByRole("menuitem", { name: "丢掉" }));
+  await waitFor(() => {
+    expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
+  });
+  expect(within(row1).getByRole("img", { name: "未确认" })).toBeInTheDocument();
+
+  // 待未确认消息也确认 -> 列表行标记消失
+  sendBehavior = "200";
+  await act(async () => { first.clock.advance(30_000); });
+  await waitFor(() => {
+    expect(within(row1).queryByRole("img")).not.toBeInTheDocument();
+  });
+
+  // 给「另一条话题」持久化一个待重放的 reaction（非 m.room.message），重启后重试队列重放期间列表行不显示任何标记
+  first.unmount();
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.open("waypoint", 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction("records", "readwrite");
+      const store = tx.objectStore("records");
+      const getReq = store.get("session");
+      getReq.onsuccess = () => {
+        const session = getReq.result;
+        session.pendingEvents = [
+          {
+            txnId: "txn-reaction-1",
+            roomId: "!t2:example.com",
+            type: "m.reaction",
+            sender: "@alice:example.com",
+            content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$x", key: "✅" } },
+          },
+        ];
+        store.put(session, "session");
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+    req.onerror = () => reject(req.error);
+  });
+
+  sendBehavior = "offline";
+  const second = renderApp(homeserver);
+  const sidebar2 = await screen.findByRole("complementary", { name: "Topic 列表" });
+  await waitFor(() => expect(sendCalls).toBeGreaterThan(sendsBeforeRowClick));
+  const row2 = within(sidebar2).getByRole("button", { name: "另一条话题" });
+  expect(within(row2).queryByRole("img")).not.toBeInTheDocument();
+  second.unmount();
+});
+
+test("原处重发时若同步回声先于发送响应到达，仍收成原处同一条已确认气泡；同话题多条失败时各自独立重发或丢掉", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let sendCount = 0;
+  let resentTxnId = "";
+  const pendingResendResponse = deferred<TransportResult>();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "同步先回声重发" } },
+                    ],
+                  },
+                  timeline: { events: [] },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncCalls === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$bot-mid",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 2500,
+                        content: { msgtype: "m.text", body: "中间插入的Bot消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  events: resentTxnId
+                    ? [
+                        {
+                          type: "m.room.message",
+                          event_id: "$resent-echo",
+                          sender: "@alice:example.com",
+                          origin_server_ts: 5000,
+                          content: { msgtype: "m.text", body: "第一条失败" },
+                          unsigned: { transaction_id: resentTxnId },
+                        },
+                      ]
+                    : [],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCount += 1;
+      const txnId = decodeURIComponent(input.url.split("/").pop() ?? "");
+      if (sendCount <= 2) {
+        return {
+          type: "response",
+          status: 403,
+          body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+        };
+      }
+      resentTxnId = txnId;
+      return pendingResendResponse.promise;
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const view = renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "同步先回声重发" }));
+
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条失败");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条失败");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(2));
+
+  // 同步带来 Bot 消息（排在两条失败消息之后）
+  await act(async () => { view.clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(2));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const getBodies = () => Array.from(timeline.querySelectorAll("[data-side] .waypoint-bubble")).map((el) => el.textContent);
+  await waitFor(() => expect(getBodies()).toEqual(["第一条失败", "第二条失败", "中间插入的Bot消息"]));
+
+  // 点第一条的红叹号重发，让同步回声先到，PUT 200 后到
+  await user.click(screen.getAllByRole("button", { name: "失败" })[0]!);
+  await waitFor(() => expect(resentTxnId).not.toBe(""));
+  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
+
+  await act(async () => { view.clock.advance(1000); });
+  await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(3));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  });
+  expect(getBodies()).toEqual(["第一条失败", "第二条失败", "中间插入的Bot消息"]);
+
+  // PUT 200 迟到后仍不产生重复气泡
+  await act(async () => {
+    pendingResendResponse.resolve({
+      type: "response",
+      status: 200,
+      body: { event_id: "$resent-echo" },
+    });
+  });
+  expect(getBodies()).toEqual(["第一条失败", "第二条失败", "中间插入的Bot消息"]);
+
+  // 丢掉剩下的第二条失败，列表标记彻底消失
+  await user.click(screen.getByRole("button", { name: "更多操作" }));
+  await user.click(within(screen.getByRole("menu", { name: "消息操作" })).getByRole("menuitem", { name: "丢掉" }));
+  await waitFor(() => {
+    expect(getBodies()).toEqual(["第一条失败", "中间插入的Bot消息"]);
+  });
+  const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
+  expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
+
+  view.unmount();
+});
+
+test("集成回归：本地未确认/失败占位不误判未读、不阻断 limited 断层与已读位置推进，且删除含失败消息的 Topic 会彻底清理", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let sendCount = 0;
+  let readMarkersPosted: Array<{ roomId: string; eventId: string }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "跨功能集成话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$c1" } }],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$c1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1500,
+                        content: { msgtype: "m.text", body: "已读基线消息" },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncRound}`,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                timeline: {
+                  limited: true,
+                  prev_batch: "prev-gap",
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$after-gap",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3000,
+                      content: { msgtype: "m.text", body: "断层后的新消息" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      sendCount += 1;
+      return {
+        type: "response",
+        status: 403,
+        body: { errcode: "M_FORBIDDEN", error: "Forbidden" },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      const body = input.body as { "m.fully_read": string };
+      readMarkersPosted.push({ roomId: "!t1:example.com", eventId: body["m.fully_read"] });
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.includes("/leave")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.includes("/forget")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const view = renderApp(homeserver);
+  await login(user);
+
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const row = within(sidebar).getByRole("button", { name: "跨功能集成话题" });
+  expect(row).not.toHaveAttribute("data-unread", "true");
+
+  // 打开话题并发送一条会永久失败的消息 -> 不产生未读，不发 read_markers
+  await user.click(row);
+  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "失败占位消息");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  await screen.findByRole("button", { name: "失败" });
+  expect(sendCount).toBe(1);
+  expect(readMarkersPosted).toEqual([]);
+  expect(row).not.toHaveAttribute("data-unread", "true");
+
+  // 触发一次 limited: true 增量 sync，在本地失败占位之后插入断层新消息；
+  // 断层 anchor 应锚定到 $after-gap（不是本地占位），且失败占位未推进 readPositionEventId
+  await act(async () => { view.clock.advance(5000); });
+  await screen.findByText("断层后的新消息");
+  expect(row).toHaveAttribute("data-unread", "true");
+  expect(within(row).getByRole("img", { name: "失败" })).toBeInTheDocument();
+
+  // 删除含失败消息的 Topic，验证 leave + forget 后本地房间和失败占位彻底消失
+  await user.click(screen.getByRole("button", { name: "删除" }));
+  const deleteDialog = screen.getByRole("alertdialog", { name: "确认删除 Topic" });
+  await user.click(within(deleteDialog).getByRole("button", { name: "确认删除" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "跨功能集成话题" })).not.toBeInTheDocument();
+  });
+  view.unmount();
+});

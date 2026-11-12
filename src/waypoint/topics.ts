@@ -1,5 +1,5 @@
 import type { TransportResult } from "../adapters/types";
-import type { MatrixClient } from "./matrix-client";
+import { localPlaceholderOf, type MatrixClient } from "./matrix-client";
 import {
   disconnectedMessage,
   formatMatrixActionFailure,
@@ -23,6 +23,7 @@ export type TopicSummary = {
   unread: boolean;
   firstUnreadEventId?: string;
   readPositionUnknown: boolean;
+  sendStatus?: "unconfirmed" | "failed";
 };
 
 export type CreateTopicResult =
@@ -307,6 +308,7 @@ export function deriveTopics(
   rooms: Record<string, StoredRoomEvents>,
   registeredAgents: RegisteredAgent[],
   ownerUserId: string,
+  pendingEvents: PendingRoomEvent[] = [],
 ): TopicSummary[] {
   const topics: TopicSummary[] = [];
   const allRooms = Object.values(rooms);
@@ -356,8 +358,21 @@ export function deriveTopics(
     }
 
     let lastMessageTs: number | undefined;
+    let hasFailedMessage = false;
+    let hasUnconfirmedMessage = false;
     for (const event of room.timelineEvents) {
       if (typeof event.state_key === "string") {
+        continue;
+      }
+      const local = localPlaceholderOf(event);
+      if (local) {
+        if (event.type === "m.room.message") {
+          if (local.status === "failed") {
+            hasFailedMessage = true;
+          } else if (local.status === "unconfirmed") {
+            hasUnconfirmedMessage = true;
+          }
+        }
         continue;
       }
       if (isActivityMessageEvent(event)) {
@@ -367,6 +382,17 @@ export function deriveTopics(
         }
       }
     }
+    for (const pending of pendingEvents) {
+      if (pending.roomId === roomId && pending.type === "m.room.message") {
+        hasUnconfirmedMessage = true;
+        break;
+      }
+    }
+    const sendStatus: TopicSummary["sendStatus"] = hasFailedMessage
+      ? "failed"
+      : hasUnconfirmedMessage
+        ? "unconfirmed"
+        : undefined;
 
     const marker = parseTopicMarker(topicMarkerContent, ownerUserId);
     const agentUserId = marker.valid ? marker.agentUserId : undefined;
@@ -389,6 +415,7 @@ export function deriveTopics(
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
+      ...(sendStatus ? { sendStatus } : {}),
     });
   }
 
@@ -864,7 +891,8 @@ export type TimelineItem =
       eventId?: string;
       side: "left" | "right";
       body: string;
-      confirmed: boolean;
+      status: "confirmed" | "unconfirmed" | "failed";
+      localId?: string;
     };
 
 function stripStreamingCursor(body: string): string {
@@ -879,6 +907,7 @@ function collectLatestEdits(
   for (const event of events) {
     if (
       typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
       isRedactedEvent(event, redactedIds) ||
       !isActivityMessageEvent(event) ||
       typeof event.event_id !== "string" ||
@@ -898,6 +927,7 @@ function collectLatestEdits(
   for (const event of events) {
     if (
       typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
       isRedactedEvent(event, redactedIds) ||
       event.type !== "m.room.message" ||
       typeof event.sender !== "string" ||
@@ -955,6 +985,8 @@ export function deriveRoomTimelineItems(
   const items: TimelineItem[] = [];
   let lastDayKey: string | undefined;
 
+  const seenLocalTxnIds = new Set<string>();
+
   if (room) {
     const redactedIds = collectRedactedEventIds(room.timelineEvents);
     const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
@@ -964,6 +996,27 @@ export function deriveRoomTimelineItems(
         isRedactedEvent(event, redactedIds) ||
         !isActivityMessageEvent(event)
       ) {
+        return;
+      }
+      const local = localPlaceholderOf(event);
+      if (local) {
+        seenLocalTxnIds.add(local.txnId);
+        if (
+          !isRecord(event.content) ||
+          event.content.msgtype !== "m.text" ||
+          typeof event.content.body !== "string" ||
+          event.content.body.trim() === ""
+        ) {
+          return;
+        }
+        items.push({
+          kind: "message",
+          key: `local-${local.id}`,
+          side: "right",
+          body: event.content.body,
+          status: local.status,
+          localId: local.id,
+        });
         return;
       }
       const sender = typeof event.sender === "string" ? event.sender : undefined;
@@ -1012,12 +1065,15 @@ export function deriveRoomTimelineItems(
         eventId: typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined,
         side,
         body,
-        confirmed: true,
+        status: "confirmed",
       });
     });
   }
 
   for (const pending of pendingEvents) {
+    if (seenLocalTxnIds.has(pending.txnId)) {
+      continue;
+    }
     if (
       pending.type !== "m.room.message" ||
       pending.content.msgtype !== "m.text" ||
@@ -1031,7 +1087,8 @@ export function deriveRoomTimelineItems(
       key: `pending-${pending.txnId}`,
       side: "right",
       body: pending.content.body,
-      confirmed: false,
+      status: "unconfirmed",
+      localId: pending.txnId,
     });
   }
 
@@ -1099,6 +1156,7 @@ function isRenderableTextBubbleEvent(
 ): boolean {
   if (
     typeof event.state_key === "string" ||
+    localPlaceholderOf(event) ||
     isRedactedEvent(event, redactedIds) ||
     !isActivityMessageEvent(event)
   ) {
@@ -1127,7 +1185,9 @@ function deriveTopicUnreadState(
   const readPos = room.readPositionEventId;
   let startIndex = -1;
   if (readPos !== undefined) {
-    startIndex = room.timelineEvents.findIndex((event) => event.event_id === readPos);
+    startIndex = room.timelineEvents.findIndex(
+      (event) => !localPlaceholderOf(event) && event.event_id === readPos,
+    );
     if (startIndex === -1) {
       return { unread: false, readPositionUnknown: true };
     }
@@ -1170,7 +1230,9 @@ export function computeTargetReadPosition(
   const events = room.timelineEvents;
   let startIndex = -1;
   if (room.readPositionEventId !== undefined) {
-    startIndex = events.findIndex((event) => event.event_id === room.readPositionEventId);
+    startIndex = events.findIndex(
+      (event) => !localPlaceholderOf(event) && event.event_id === room.readPositionEventId,
+    );
     if (startIndex === -1) {
       return undefined;
     }
@@ -1183,7 +1245,7 @@ export function computeTargetReadPosition(
   if (room.timelineGap?.limited) {
     if (room.timelineGap.gapBeforeEventId) {
       const gapIdx = events.findIndex(
-        (event) => event.event_id === room.timelineGap?.gapBeforeEventId,
+        (event) => !localPlaceholderOf(event) && event.event_id === room.timelineGap?.gapBeforeEventId,
       );
       if (gapIdx > startIndex && !(startIndex === -1 && gapIdx === 0)) {
         limitIndex = Math.min(limitIndex, gapIdx - 1);
@@ -1212,7 +1274,7 @@ export function computeTargetReadPosition(
     const event = events[i];
     const eventId =
       typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
-    if (!eventId || isRedactedEvent(event, redactedIds)) {
+    if (!eventId || localPlaceholderOf(event) || isRedactedEvent(event, redactedIds)) {
       continue;
     }
     if (isRenderableParticipantBubble(event, ownerUserId, agentUserId, redactedIds, latestEdits)) {
@@ -1252,7 +1314,7 @@ function replaceTargetEventId(
   ownerUserId: string,
   agentUserId: string | undefined,
 ): string | undefined {
-  if (typeof event.state_key === "string" || event.type !== "m.room.message") {
+  if (typeof event.state_key === "string" || localPlaceholderOf(event) || event.type !== "m.room.message") {
     return undefined;
   }
   const sender = typeof event.sender === "string" ? event.sender : undefined;
