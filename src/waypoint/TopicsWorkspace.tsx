@@ -777,6 +777,7 @@ export function TopicsWorkspace({
     if (anyFormSubmitting || !activeTopic) {
       return;
     }
+    setOverflowMenuOpen(false);
     setDeleteConfirmOpen(false);
     setDeleteError(undefined);
     setEditing(true);
@@ -811,6 +812,7 @@ export function TopicsWorkspace({
     if (anyFormSubmitting || !activeTopic || editing) {
       return;
     }
+    setOverflowMenuOpen(false);
     setDeleteError(undefined);
     setDeleteConfirmOpen(true);
   }
@@ -2653,11 +2655,12 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
+                      aria-label="返回"
                       disabled={agentsSubmitting || exiting}
                       onClick={goBack}
                     >
-                      <BackIcon aria-hidden="true" size={14} />
-                      返回
+                      <BackIcon aria-hidden="true" size={16} />
+                      <span className="sr-only">返回</span>
                     </button>
                     <div className="waypoint-topic-header-main">
                       <h2>设置</h2>
@@ -2853,11 +2856,12 @@ export function TopicsWorkspace({
                     <button
                       type="button"
                       className="waypoint-back-button"
+                      aria-label="返回"
                       disabled={submitting || quickSubmitting}
                       onClick={goBack}
                     >
-                      <BackIcon aria-hidden="true" size={14} />
-                      返回
+                      <BackIcon aria-hidden="true" size={16} />
+                      <span className="sr-only">返回</span>
                     </button>
                     <div className="waypoint-topic-header-main">
                       <h2>新建 Topic</h2>
@@ -2912,9 +2916,11 @@ export function TopicsWorkspace({
                   {!quickRegisterOpen ? (
                     <button
                       type="button"
+                      className="waypoint-quick-register-trigger"
                       disabled={submitting || quickSubmitting}
                       onClick={openQuickRegister}
                     >
+                      <PlusIcon aria-hidden="true" size={13} />
                       登记新 Bot
                     </button>
                   ) : (
