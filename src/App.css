@@ -1570,19 +1570,24 @@ hr {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
 }
 
-/* Docked composer: single row until the draft exceeds one line, then text above a fixed icon row. */
+/* Floating composer: a lifted pill, not a docked bar. Single row until the draft exceeds one line. */
 .waypoint-composer-safe-area {
   position: relative;
   flex-shrink: 0;
-  padding: 0.5rem 0.75rem;
+  padding: 0.35rem 0.75rem max(0.75rem, env(safe-area-inset-bottom, 0px));
   box-sizing: border-box;
-  background: var(--bg);
-  border-top: 1px solid var(--line);
+  background: transparent;
+  border-top: none;
+  pointer-events: none;
+}
+
+.waypoint-composer-safe-area > * {
+  pointer-events: auto;
 }
 
 .waypoint-composer-safe-area[data-keyboard-inset]:not([data-keyboard-inset="0"]) {
   padding-top: 0.35rem;
-  padding-bottom: 0;
+  padding-bottom: 0.35rem;
 }
 
 .waypoint-composer {
@@ -1595,15 +1600,15 @@ hr {
   padding: 0.2rem 0.35rem;
   min-height: 44px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 22px;
   background: var(--card);
-  box-shadow: none;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.1), 0 1px 2px rgba(0, 0, 0, 0.04);
   box-sizing: border-box;
 }
 
 .waypoint-composer:focus-within {
-  border-color: var(--ink-secondary);
-  box-shadow: none;
+  border-color: var(--line);
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.14), 0 1px 2px rgba(0, 0, 0, 0.06);
 }
 
 .waypoint-composer.multiline {
@@ -1615,7 +1620,8 @@ hr {
   padding: 0.45rem 0.5rem 0.3rem;
 }
 
-.waypoint-composer textarea {
+.waypoint-composer textarea,
+.waypoint-composer textarea:focus {
   grid-area: field;
   width: 100%;
   margin: 0;
@@ -1623,22 +1629,37 @@ hr {
   border: none;
   border-bottom: 1px solid transparent;
   outline: none;
+  box-shadow: none;
   background: transparent;
   font-family: inherit;
   font-size: 15px;
   line-height: 1.45;
   color: var(--ink);
+  caret-color: var(--ink);
   min-height: calc(1.45em);
   max-height: calc(1.45em * 4);
   resize: none;
   overflow-y: auto;
   box-sizing: border-box;
+  scrollbar-width: none;
 }
 
-.waypoint-composer.multiline textarea {
+.waypoint-composer textarea::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.waypoint-composer.multiline textarea,
+.waypoint-composer.multiline textarea:focus {
   border-bottom-color: var(--line);
   padding-bottom: 0.4rem;
   margin-bottom: 0.1rem;
+  scrollbar-width: thin;
+}
+
+.waypoint-composer.multiline textarea::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
 }
 
 .waypoint-composer textarea:disabled {
