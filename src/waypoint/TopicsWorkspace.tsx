@@ -19,6 +19,7 @@ import {
 import { MessageBody } from "./MessageBody";
 import {
   ArrowDownIcon,
+  ArrowUpIcon,
   BackIcon,
   CloseIcon,
   EditIcon,
@@ -450,7 +451,8 @@ export function TopicsWorkspace({
     if (!textarea) return;
     textarea.style.height = "auto";
     const scrollHeight = textarea.scrollHeight;
-    const clampedHeight = Math.max(38, Math.min(scrollHeight, 180));
+    const isMulti = currentDraftText.includes("\n") || scrollHeight > 34;
+    const clampedHeight = isMulti ? Math.min(scrollHeight, 180) : 24;
     textarea.style.height = `${clampedHeight}px`;
   }, [currentDraftText, activeRoomId]);
 
@@ -2932,201 +2934,149 @@ export function TopicsWorkspace({
     return (
 <div className="waypoint-topic-view">
               <header className="waypoint-topic-header">
-                <div className="waypoint-floating-header-bar">
+                <div className="waypoint-topic-header-bar">
                   {isNarrow ? (
                     <button
                       type="button"
-                      className="waypoint-back-button waypoint-floating-island-btn"
+                      className="waypoint-back-button"
                       disabled={(editing && editSubmitting) || deleting}
                       aria-label="返回"
                       onClick={goBack}
                     >
-                      <BackIcon aria-hidden="true" size={16} />
-                      <span className="waypoint-btn-text">返回</span>
+                      <BackIcon aria-hidden="true" size={20} />
                     </button>
                   ) : null}
-                  <div className="waypoint-topic-header-pill">
-                    <span className="waypoint-header-bot-badge" aria-hidden="true">
-                      {(activeTopic.botDisplayName || activeTopic.name || "A").slice(0, 1).toUpperCase()}
-                    </span>
-                    <div className="waypoint-topic-header-titles">
-                      <h2>{activeTopic.name}</h2>
+                  <div className="waypoint-topic-header-main">
+                    <h2>{activeTopic.name}</h2>
+                    <div className="waypoint-topic-header-sub">
                       {activeTopic.botDisplayName ? (
-                        <p className="waypoint-topic-header-bot">{activeTopic.botDisplayName}</p>
+                        <span className="waypoint-topic-header-bot">{activeTopic.botDisplayName}</span>
+                      ) : null}
+                      {activeTopic.description ? (
+                        <button
+                          type="button"
+                          className={
+                            descriptionExpanded
+                              ? "waypoint-topic-description expanded"
+                              : "waypoint-topic-description"
+                          }
+                          aria-expanded={descriptionExpanded}
+                          onClick={() => setDescriptionExpanded((expanded) => !expanded)}
+                        >
+                          {activeTopic.description}
+                        </button>
                       ) : null}
                     </div>
                   </div>
                   <div className="waypoint-header-actions-group">
-                    {isNarrow ? (
-                      <div className="waypoint-overflow-wrapper">
-                        <button
-                          type="button"
+                    <div className="waypoint-overflow-wrapper">
+                      <button
+                        type="button"
+                        aria-label="话题操作"
+                        aria-haspopup="menu"
+                        aria-expanded={overflowMenuOpen}
+                        className="waypoint-overflow-trigger"
+                        onClick={() => setOverflowMenuOpen((prev) => !prev)}
+                      >
+                        <MoreHorizontalIcon aria-hidden="true" size={20} />
+                      </button>
+                      {overflowMenuOpen ? (
+                        <div
+                          role="menu"
                           aria-label="话题操作"
-                          aria-haspopup="menu"
-                          aria-expanded={overflowMenuOpen}
-                          className="waypoint-overflow-trigger waypoint-floating-island-btn"
-                          onClick={() => setOverflowMenuOpen((prev) => !prev)}
+                          className="waypoint-overflow-menu"
                         >
-                          <MoreHorizontalIcon aria-hidden="true" size={18} />
-                        </button>
-                        {overflowMenuOpen ? (
-                          <div
-                            role="menu"
-                            aria-label="话题操作"
-                            className="waypoint-overflow-menu"
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="waypoint-topic-pin-button"
+                            disabled={
+                              editing ||
+                              deleteConfirmOpen ||
+                              deleting ||
+                              reauthRequired ||
+                              Boolean(pinPendingByRoom[activeTopic.roomId])
+                            }
+                            aria-pressed={activeTopic.pinned}
+                            aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
+                            onClick={() => {
+                              setOverflowMenuOpen(false);
+                              void handleTogglePin(activeTopic.roomId, activeTopic.pinned);
+                            }}
                           >
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="waypoint-topic-pin-button"
-                              disabled={
-                                editing ||
-                                deleteConfirmOpen ||
-                                deleting ||
-                                reauthRequired ||
-                                Boolean(pinPendingByRoom[activeTopic.roomId])
-                              }
-                              aria-pressed={activeTopic.pinned}
-                              aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
-                              onClick={() => {
-                                setOverflowMenuOpen(false);
-                                void handleTogglePin(activeTopic.roomId, activeTopic.pinned);
-                              }}
-                            >
-                              <PinIcon aria-hidden="true" size={13} />
-                              <span className="waypoint-btn-text">
-                                {activeTopic.pinned ? "取消置顶" : "置顶"}
-                              </span>
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="waypoint-topic-edit-button"
-                              disabled={editing || deleteConfirmOpen || deleting}
-                              aria-label="编辑"
-                              onClick={() => {
-                                setOverflowMenuOpen(false);
-                                openEditForm();
-                              }}
-                            >
-                              <EditIcon aria-hidden="true" size={13} />
-                              <span className="waypoint-btn-text">编辑</span>
-                            </button>
-                            <button
-                              type="button"
-                              role="menuitem"
-                              className="waypoint-topic-delete-button"
-                              disabled={editing || deleteConfirmOpen || deleting}
-                              aria-label="删除"
-                              onClick={() => {
-                                setOverflowMenuOpen(false);
-                                openDeleteConfirm();
-                              }}
-                            >
-                              <TrashIcon aria-hidden="true" size={13} />
-                              <span className="waypoint-btn-text">删除</span>
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="waypoint-sr-only">
-                            <button
-                              type="button"
-                              className="waypoint-topic-pin-button"
-                              disabled={
-                                editing ||
-                                deleteConfirmOpen ||
-                                deleting ||
-                                reauthRequired ||
-                                Boolean(pinPendingByRoom[activeTopic.roomId])
-                              }
-                              aria-pressed={activeTopic.pinned}
-                              aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
-                              onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
-                            >
-                              {activeTopic.pinned ? "取消置顶" : "置顶"}
-                            </button>
-                            <button
-                              type="button"
-                              className="waypoint-topic-edit-button"
-                              disabled={editing || deleteConfirmOpen || deleting}
-                              aria-label="编辑"
-                              onClick={openEditForm}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              type="button"
-                              className="waypoint-topic-delete-button"
-                              disabled={editing || deleteConfirmOpen || deleting}
-                              aria-label="删除"
-                              onClick={openDeleteConfirm}
-                            >
-                              删除
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="waypoint-desktop-actions">
-                        <button
-                          type="button"
-                          className="waypoint-topic-pin-button"
-                          disabled={
-                            editing ||
-                            deleteConfirmOpen ||
-                            deleting ||
-                            reauthRequired ||
-                            Boolean(pinPendingByRoom[activeTopic.roomId])
-                          }
-                          aria-pressed={activeTopic.pinned}
-                          aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
-                          onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
-                        >
-                          <PinIcon aria-hidden="true" size={13} />
-                          <span className="waypoint-btn-text">
-                            {activeTopic.pinned ? "取消置顶" : "置顶"}
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          className="waypoint-topic-edit-button"
-                          disabled={editing || deleteConfirmOpen || deleting}
-                          aria-label="编辑"
-                          onClick={openEditForm}
-                        >
-                          <EditIcon aria-hidden="true" size={13} />
-                          <span className="waypoint-btn-text">编辑</span>
-                        </button>
-                        <button
-                          type="button"
-                          className="waypoint-topic-delete-button"
-                          disabled={editing || deleteConfirmOpen || deleting}
-                          aria-label="删除"
-                          onClick={openDeleteConfirm}
-                        >
-                          <TrashIcon aria-hidden="true" size={13} />
-                          <span className="waypoint-btn-text">删除</span>
-                        </button>
-                      </div>
-                    )}
+                            <PinIcon aria-hidden="true" size={15} />
+                            <span>{activeTopic.pinned ? "取消置顶" : "置顶"}</span>
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="waypoint-topic-edit-button"
+                            disabled={editing || deleteConfirmOpen || deleting}
+                            aria-label="编辑"
+                            onClick={() => {
+                              setOverflowMenuOpen(false);
+                              openEditForm();
+                            }}
+                          >
+                            <EditIcon aria-hidden="true" size={15} />
+                            <span>编辑</span>
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="waypoint-topic-delete-button"
+                            disabled={editing || deleteConfirmOpen || deleting}
+                            aria-label="删除"
+                            onClick={() => {
+                              setOverflowMenuOpen(false);
+                              openDeleteConfirm();
+                            }}
+                          >
+                            <TrashIcon aria-hidden="true" size={15} />
+                            <span>删除</span>
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {/* Expose pure icon buttons in wide desktop and for test accessibility */}
+                    <div className={!isNarrow ? "waypoint-desktop-actions" : "waypoint-sr-only"}>
+                      <button
+                        type="button"
+                        className="waypoint-topic-pin-button"
+                        disabled={
+                          editing ||
+                          deleteConfirmOpen ||
+                          deleting ||
+                          reauthRequired ||
+                          Boolean(pinPendingByRoom[activeTopic.roomId])
+                        }
+                        aria-pressed={activeTopic.pinned}
+                        aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
+                        onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
+                      >
+                        <PinIcon aria-hidden="true" size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="waypoint-topic-edit-button"
+                        disabled={editing || deleteConfirmOpen || deleting}
+                        aria-label="编辑"
+                        onClick={openEditForm}
+                      >
+                        <EditIcon aria-hidden="true" size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="waypoint-topic-delete-button"
+                        disabled={editing || deleteConfirmOpen || deleting}
+                        aria-label="删除"
+                        onClick={openDeleteConfirm}
+                      >
+                        <TrashIcon aria-hidden="true" size={16} />
+                      </button>
+                    </div>
                   </div>
                 </div>
-                {activeTopic.description ? (
-                  <div className="waypoint-description-container">
-                    <button
-                      type="button"
-                      className={
-                        descriptionExpanded
-                          ? "waypoint-topic-description expanded"
-                          : "waypoint-topic-description"
-                      }
-                      aria-expanded={descriptionExpanded}
-                      onClick={() => setDescriptionExpanded((expanded) => !expanded)}
-                    >
-                      {activeTopic.description}
-                    </button>
-                  </div>
-                ) : null}
               </header>
               {reauthRequired && !settingsOpen && !creating ? renderReauthBanner() : null}
               {activeTopic.unavailable && activeTopic.unavailableReason ? (
@@ -3517,7 +3467,7 @@ export function TopicsWorkspace({
                         </ul>
                       </div>
                     ) : null}
-                    <form className="waypoint-composer" onSubmit={handleSendMessage}>
+                    <form className={`waypoint-composer${(draftsByRoom[activeTopic.roomId]?.text ?? "").includes("\n") ? " multiline" : ""}`} onSubmit={handleSendMessage}>
                       <label className="waypoint-attach-button">
                         <PlusIcon aria-hidden="true" size={16} />
                         <span className="waypoint-attach-button-text">附件</span>
@@ -3536,15 +3486,11 @@ export function TopicsWorkspace({
                       </label>
                       <textarea
                         ref={composerTextareaRef}
-                        rows={1}
                         aria-label="输入消息"
                         name="message"
+                        rows={1}
                         disabled={persistingSend || activeTopic.unavailable || reauthRequired}
-                        placeholder={
-                          activeTopic.unavailable
-                            ? "Topic 不可用，无法发送消息"
-                            : "输入消息… (Enter 发送，Shift + Enter 换行)"
-                        }
+                        placeholder={activeTopic.unavailable ? "Topic 不可用，无法发送消息" : undefined}
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                         onKeyDown={(event) => {
@@ -3575,9 +3521,13 @@ export function TopicsWorkspace({
                       />
                       <button
                         type="submit"
+                        aria-label="发送"
+                        className="waypoint-send-button"
                         disabled={persistingSend || activeTopic.unavailable || reauthRequired}
+                        data-active={Boolean(draftsByRoom[activeTopic.roomId]?.text?.trim() || draftsByRoom[activeTopic.roomId]?.attachment)}
                       >
-                        发送
+                        <ArrowUpIcon aria-hidden="true" size={16} />
+                        <span className="waypoint-sr-only">发送</span>
                       </button>
                     </form>
                   </div>
