@@ -1645,9 +1645,12 @@ hr {
   overflow-y: auto;
   box-sizing: border-box;
   scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.waypoint-composer textarea::-webkit-scrollbar {
+.waypoint-composer textarea::-webkit-scrollbar,
+.waypoint-composer.multiline textarea::-webkit-scrollbar {
+  display: none;
   width: 0;
   height: 0;
 }
@@ -1658,12 +1661,7 @@ hr {
   padding-bottom: 0.15rem;
   margin-bottom: 0;
   align-self: start;
-  scrollbar-width: thin;
-}
-
-.waypoint-composer.multiline textarea::-webkit-scrollbar {
-  width: 4px;
-  height: 4px;
+  scrollbar-width: none;
 }
 
 .waypoint-composer textarea:disabled {

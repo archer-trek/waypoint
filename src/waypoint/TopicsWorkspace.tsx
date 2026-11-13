@@ -516,7 +516,7 @@ export function TopicsWorkspace({
     const scrollHeight = textarea.scrollHeight;
     const nextHeight = exceeds
       ? Math.min(Math.max(scrollHeight, line), maxHeight)
-      : Math.max(line, 24);
+      : Math.max(scrollHeight, line);
     textarea.style.height = `${nextHeight}px`;
   }, [currentDraftText, activeRoomId, composerMultiline, composerWidth]);
 
