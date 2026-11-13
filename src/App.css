@@ -1631,7 +1631,6 @@ hr {
   -webkit-user-select: text;
   min-height: calc(1.45em);
   max-height: calc(1.45em * 4);
-  align-self: center;
   resize: none;
   overflow-y: auto;
   box-sizing: border-box;
