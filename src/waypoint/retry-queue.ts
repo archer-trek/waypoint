@@ -166,7 +166,11 @@ export class RetryQueue {
   }
 
   private async flushEvents(): Promise<void> {
-    if (this.running || this.disposed || this.paused || !this.client.hasToken) {
+    if (this.disposed || this.paused || !this.client.hasToken) {
+      return;
+    }
+    if (this.running) {
+      this.wakePending = true;
       return;
     }
     this.running = true;
@@ -317,7 +321,11 @@ export class RetryQueue {
   }
 
   private async flushReadMarkers(): Promise<void> {
-    if (this.readMarkersRunning || this.disposed || this.paused || !this.client.hasToken) {
+    if (this.disposed || this.paused || !this.client.hasToken) {
+      return;
+    }
+    if (this.readMarkersRunning) {
+      this.readMarkersWakePending = true;
       return;
     }
     this.readMarkersRunning = true;

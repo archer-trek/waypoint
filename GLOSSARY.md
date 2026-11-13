@@ -17,7 +17,7 @@ Owner 登记过的 Agent（面向 Owner 的界面文案称 Bot 名册）。空�
 _Avoid_: 通讯录, contact list, roster
 
 **已连接**:
-这台设备已经进入 Topic 列表，并且还没退出。还停在同步或登记，不是已连接。
+这台设备已经进入 Topic 列表，并且还没退出。还停在同步或登记，不是已连接。面向 Owner 的人类视觉界面不展示「已连接」或「尚未进入 Topic 列表」等内部状态文字。
 _Avoid_: 在线, online, 已登录
 
 **Topic**:

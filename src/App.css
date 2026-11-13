@@ -1,9 +1,91 @@
 :root {
-  font-family: system-ui, sans-serif;
-  line-height: 1.5;
-  color: #1a1a1a;
-  background: #f6f5f2;
+  --bg: #f8f7f4;
+  --bg-subtle: #f1efe8;
+  --sidebar: #f3f1ea;
+  --header: rgba(248, 247, 244, 0.95);
+  --card: #ffffff;
+  --card-subtle: #f9f8f5;
+  --ink: #1a1c1e;
+  --ink-secondary: #4a5058;
+  --muted: #747b85;
+  --line: #ddd9cf;
+  --line-subtle: #eae7df;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-ink: #ffffff;
+  --accent-subtle: #eff4fc;
+  --owner-bg: #1e2530;
+  --owner-ink: #f8fafc;
+  --code-bg: #f3f1eb;
+  --code-header-bg: #eae6dd;
+  --code-body-bg: #ffffff;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --danger-border: #fca5a5;
+  --warn-bg: #fef3c7;
+  --warn-ink: #92400e;
+  --warn-border: #fde68a;
+  --pinned-accent: #d97706;
+  --success: #10b981;
+  --modal-backdrop: rgba(15, 23, 42, 0.45);
+  --modal-bg: rgba(255, 255, 255, 0.96);
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "SF Pro Text", "SF Pro", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-pill: 9999px;
   --keyboard-inset: 0px;
+
+  font-family: var(--font-sans);
+  font-size: 15.5px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181d;
+    --bg-subtle: #1e222a;
+    --sidebar: #131518;
+    --header: rgba(22, 24, 29, 0.95);
+    --card: #1f232b;
+    --card-subtle: #262b35;
+    --ink: #eaedf1;
+    --ink-secondary: #9da3b0;
+    --muted: #6f7684;
+    --line: #2b303c;
+    --line-subtle: #222630;
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --accent-ink: #ffffff;
+    --accent-subtle: rgba(59, 130, 246, 0.15);
+    --owner-bg: #2b3240;
+    --owner-ink: #f3f5f8;
+    --code-bg: #1d2129;
+    --code-header-bg: #242933;
+    --code-body-bg: #171920;
+    --danger: #f87171;
+    --danger-bg: #371717;
+    --danger-border: #7f1d1d;
+    --warn-bg: #2a2214;
+    --warn-ink: #fbbf24;
+    --warn-border: #523e1c;
+    --pinned-accent: #f59e0b;
+    --success: #34d399;
+    --modal-backdrop: rgba(0, 0, 0, 0.75);
+    --modal-bg: rgba(29, 33, 41, 0.96);
+    --sdm-bg: transparent;
+    --sdm-fg: var(--ink);
+  }
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
 }
 
 html,
@@ -11,6 +93,69 @@ body,
 #root {
   height: 100%;
   margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+}
+
+/* Screen reader only utility */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Native thin scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
+/* Chrome vs text selection discipline */
+.waypoint-sidebar,
+.waypoint-sidebar-header,
+.waypoint-topic-header,
+.waypoint-topic-row-header,
+.waypoint-auth-card,
+button,
+label {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.waypoint-message-row,
+.waypoint-composer-input,
+.waypoint-input,
+pre,
+code {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Tauri window drag support on macOS */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+button, input, textarea, select, [role="button"], a {
+  -webkit-app-region: no-drag;
 }
 
 main {
@@ -20,12 +165,282 @@ main {
 }
 
 .waypoint-auth-main {
-  max-width: 32rem;
-  margin: 0 auto;
-  padding: 2rem 1.25rem;
-  padding-bottom: calc(2rem + var(--keyboard-inset, 0px));
-  box-sizing: border-box;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-height: 100%;
+  width: 100%;
+  padding: 1.5rem 1.25rem;
+  padding-top: max(1.5rem, env(safe-area-inset-top, 0px));
+  padding-bottom: calc(max(1.5rem, env(safe-area-inset-bottom, 0px)) + var(--keyboard-inset, 0px));
+  background: var(--bg);
+  box-sizing: border-box;
+}
+
+.waypoint-auth-container {
+  width: 100%;
+  max-width: 25.5rem;
+  margin: auto;
+}
+
+.waypoint-auth-card {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+  box-sizing: border-box;
+  width: 100%;
+}
+
+.waypoint-auth-card.booting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  padding: 3.5rem 2rem;
+}
+
+.waypoint-auth-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-bottom: 1.75rem;
+}
+
+.waypoint-auth-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  border-radius: 14px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  margin-bottom: 0.875rem;
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.15);
+}
+
+.waypoint-auth-title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  color: var(--ink);
+}
+
+.waypoint-auth-subtitle {
+  margin: 0.35rem 0 0;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.waypoint-auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.125rem;
+  width: 100%;
+}
+
+.waypoint-form-group {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.waypoint-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+  width: 100%;
+}
+
+.waypoint-input {
+  width: 100%;
+  height: 2.75rem;
+  padding: 0 0.875rem;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.waypoint-input:focus {
+  background: var(--card);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+.waypoint-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.waypoint-auth-server-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg-subtle);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  color: var(--ink-secondary);
+  overflow: hidden;
+}
+
+.waypoint-auth-server-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.waypoint-auth-server-url {
+  margin: 0;
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waypoint-auth-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.625rem;
+  margin-top: 0.5rem;
+  width: 100%;
+}
+
+.waypoint-auth-actions.horizontal {
+  flex-direction: row;
+  justify-content: center;
+}
+
+.waypoint-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.875rem;
+  min-height: 44px;
+  padding: 0 1.25rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: var(--radius-md);
+  border: none;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  touch-action: manipulation;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.waypoint-btn:active {
+  transform: scale(0.985);
+}
+
+.waypoint-btn-primary {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.waypoint-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.waypoint-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.waypoint-btn-ghost {
+  background: transparent;
+  color: var(--ink-secondary);
+  border: 1px solid var(--line);
+}
+
+.waypoint-btn-ghost:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+.waypoint-auth-syncing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 0 0.5rem;
+  gap: 1rem;
+}
+
+.waypoint-sync-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.waypoint-spinner {
+  width: 2rem;
+  height: 2rem;
+  border: 2.5px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: waypoint-spin 0.75s linear infinite;
+}
+
+@keyframes waypoint-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.waypoint-sync-status {
+  margin: 0;
+  font-size: 0.9375rem;
+  color: var(--ink-secondary);
+  font-weight: 500;
+}
+
+.waypoint-register-heading {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--ink);
+  text-align: center;
+}
+
+.waypoint-register-desc {
+  margin: -0.5rem 0 0.25rem;
+  font-size: 0.8125rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.waypoint-alert {
+  margin-top: 1rem;
+  padding: 0.75rem 0.875rem;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  text-align: left;
 }
 
 .waypoint-workspace {
@@ -33,21 +448,32 @@ main {
   height: 100%;
   width: 100%;
   overflow: hidden;
+  background: var(--bg);
 }
 
+/* Sidebar & Topic List */
 .waypoint-sidebar {
-  width: clamp(15rem, 30%, 22rem);
-  flex: 0 0 clamp(15rem, 30%, 22rem);
-  border-right: 0.0625rem solid #ddd9d0;
-  padding: 1rem;
+  width: clamp(16rem, 28%, 22rem);
+  flex: 0 0 clamp(16rem, 28%, 22rem);
+  border-right: 1px solid var(--line);
+  background: var(--sidebar);
+  padding: 0.875rem 0.75rem;
   box-sizing: border-box;
   overflow-y: auto;
+}
+
+.waypoint-workspace:not([data-viewport="narrow"]) .waypoint-sidebar {
+  padding-top: calc(1.75rem + env(safe-area-inset-top, 0px));
 }
 
 .waypoint-workspace[data-viewport="narrow"] .waypoint-sidebar {
   width: 100%;
   flex: 1 1 100%;
   border-right: none;
+  padding-top: max(0.875rem, env(safe-area-inset-top, 0px));
+  padding-bottom: max(0.875rem, env(safe-area-inset-bottom, 0px));
+  padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
 }
 
 .waypoint-sidebar-header {
@@ -55,39 +481,133 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  padding: 0.25rem 0.25rem 0.75rem;
+  min-height: 44px;
+}
+
+.waypoint-sidebar-header-left,
+.waypoint-sidebar-header-right {
+  display: flex;
+  align-items: center;
+}
+
+.waypoint-sidebar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  min-width: 40px;
+  min-height: 40px;
+  padding: 0;
+  margin: 0;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  touch-action: manipulation;
+}
+
+.waypoint-sidebar-icon-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+.waypoint-sidebar-icon-btn:active:not(:disabled) {
+  transform: scale(0.92);
+  background: var(--line-subtle);
+}
+
+.waypoint-sidebar-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.waypoint-sidebar-icon-btn.waypoint-create-topic-btn {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.waypoint-sidebar-icon-btn.waypoint-create-topic-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.waypoint-settings-header button,
+.waypoint-agents-header button,
+.waypoint-bot-actions button,
+.waypoint-form-actions button {
+  margin-top: 0;
 }
 
 .waypoint-topic-list {
   list-style: none;
   padding: 0;
-  margin: 1rem 0 0;
+  margin: 0.25rem 0 0;
 }
 
 .waypoint-topic-row {
   width: 100%;
   text-align: left;
-  padding: 0.5rem 0.75rem;
-  margin-top: 0.25rem;
-  border: 0.0625rem solid transparent;
+  padding: 0.75rem 0.65rem;
+  margin-top: 0;
+  border: none;
+  border-bottom: 1px solid var(--line-subtle);
+  border-radius: var(--radius-md);
   background: transparent;
   cursor: pointer;
+  box-sizing: border-box;
+  transition: background-color 0.12s ease, transform 0.1s ease;
+  touch-action: manipulation;
+  min-height: 56px;
+}
+
+.waypoint-topic-row:hover {
+  background: var(--bg-subtle);
+}
+
+.waypoint-topic-row:active {
+  transform: scale(0.985);
+  background: var(--bg-subtle);
 }
 
 .waypoint-topic-row.active {
-  background: #eae7df;
+  background: var(--line-subtle);
+}
+
+.waypoint-topic-row.unavailable {
+  opacity: 0.6;
 }
 
 .waypoint-topic-row-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: 0.75rem;
+}
+
+.waypoint-topic-bot-avatar {
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.875rem;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
 .waypoint-topic-row-title {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
   min-width: 0;
   flex: 1;
 }
@@ -95,13 +615,15 @@ main {
 .waypoint-topic-row-trailing {
   display: inline-flex;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.35rem;
   flex-shrink: 0;
 }
 
 .waypoint-topic-row-time {
-  font-size: 0.75rem;
-  color: #666;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
   white-space: nowrap;
 }
 
@@ -109,11 +631,13 @@ main {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
-  background: #2b6cb0;
+  background: var(--accent);
   flex-shrink: 0;
 }
 
 .waypoint-topic-name {
+  font-size: 0.95rem;
+  color: var(--ink);
   font-weight: 400;
   min-width: 0;
   overflow: hidden;
@@ -130,14 +654,19 @@ main {
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  margin-top: 0.125rem;
+  margin-top: 0.25rem;
   min-width: 0;
+  padding-left: 2.45rem;
 }
 
 .waypoint-topic-row-bot {
-  display: block;
-  font-size: 0.875rem;
-  color: #555;
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--ink-secondary);
+  background: var(--line-subtle);
+  padding: 0.05rem 0.45rem;
+  border-radius: var(--radius-pill);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -145,19 +674,66 @@ main {
 }
 
 .waypoint-topic-row-responding {
-  font-size: 0.8125rem;
-  color: #2b6cb0;
+  font-size: 0.75rem;
+  color: var(--accent);
+  font-weight: 500;
   flex-shrink: 0;
   white-space: nowrap;
+  margin-left: auto;
 }
 
+.waypoint-topic-row-responding::after {
+  content: " 👀";
+}
+
+.waypoint-topic-row-failed {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: var(--danger);
+  color: var(--accent-ink);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.waypoint-topic-row-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.6875rem;
+  padding: 0.0625rem 0.3rem;
+  border-radius: var(--radius-sm);
+  background: var(--line-subtle);
+  color: var(--ink-secondary);
+  border: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.waypoint-topic-row-unavailable {
+  font-size: 0.6875rem;
+  padding: 0.0625rem 0.3rem;
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
+  border: 1px solid var(--warn-border);
+  flex-shrink: 0;
+}
+
+/* Detail view */
 .waypoint-detail {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
+  background: var(--bg);
 }
 
 .waypoint-workspace[data-viewport="narrow"] .waypoint-detail {
@@ -165,103 +741,115 @@ main {
   flex: 1 1 100%;
 }
 
-.waypoint-empty-detail {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 2rem 1.5rem;
-  text-align: center;
-  color: #555;
-}
-
-.waypoint-dialog {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-}
-
-.waypoint-dialog-body {
-  max-width: 32rem;
-  width: 100%;
-  padding: 1.5rem 1.25rem;
-  padding-bottom: calc(1.5rem + var(--keyboard-inset, 0px));
-  box-sizing: border-box;
-}
-
 .waypoint-topic-view {
   display: flex;
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  background: var(--bg);
 }
 
+/* Docked Sticky Header (t3code style: Not floating, larger title, no bot tag) */
 .waypoint-topic-header {
   position: sticky;
   top: 0;
-  z-index: 10;
+  z-index: 20;
   flex-shrink: 0;
-  background: #f6f5f2;
-  border-bottom: 0.0625rem solid #ddd9d0;
-  padding: 0.75rem 1.25rem;
+  background: var(--header);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+  padding: 0.65rem 1rem;
+  box-sizing: border-box;
+}
+
+.waypoint-workspace:not([data-viewport="narrow"]) .waypoint-topic-header {
+  padding-top: calc(0.65rem + env(safe-area-inset-top, 0px));
+}
+
+.waypoint-workspace[data-viewport="narrow"] .waypoint-topic-header {
+  padding-top: max(0.65rem, env(safe-area-inset-top, 0px));
+  padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+  padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
 }
 
 .waypoint-topic-header-bar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 0.75rem;
 }
 
 .waypoint-back-button {
-  margin-top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
   flex-shrink: 0;
+  border-radius: 50%;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+  touch-action: manipulation;
 }
 
-.waypoint-topic-pin-button,
-.waypoint-topic-edit-button,
-.waypoint-topic-delete-button {
-  margin-top: 0;
-  flex-shrink: 0;
+.waypoint-back-button:hover {
+  background: var(--bg-subtle);
 }
 
-.waypoint-delete-dialog {
-  margin: 1rem 1.25rem 0;
+.waypoint-back-button:active {
+  transform: scale(0.92);
+  background: var(--line-subtle);
 }
 
 .waypoint-topic-header-main {
   display: flex;
-  align-items: baseline;
-  gap: 0.75rem;
+  flex-direction: column;
+  justify-content: center;
   min-width: 0;
   flex: 1;
 }
 
+
 .waypoint-topic-header-main h2 {
   margin: 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  letter-spacing: -0.01em;
 }
 
-.waypoint-topic-header-bot {
-  margin: 0;
-  font-size: 0.875rem;
-  color: #555;
-}
-
+/* Description as clean subtitle directly beneath title */
 .waypoint-topic-description {
   display: block;
   width: 100%;
   text-align: left;
   background: transparent;
   border: none;
-  padding: 0.25rem 0 0;
-  margin: 0;
-  color: #444;
+  padding: 0;
+  margin: 0.15rem 0 0;
+  color: var(--ink-secondary);
+  font-size: 14px;
+  line-height: 1.35;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  box-sizing: border-box;
+}
+
+.waypoint-topic-description:hover {
+  color: var(--ink);
 }
 
 .waypoint-topic-description.expanded {
@@ -270,17 +858,124 @@ main {
   text-overflow: clip;
 }
 
+.waypoint-header-actions-group {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.waypoint-overflow-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.waypoint-overflow-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  min-width: 2.25rem;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  border-radius: 50%;
+  transition: background-color 0.15s ease;
+}
+
+.waypoint-overflow-trigger:hover {
+  background: var(--bg-subtle);
+}
+
+.waypoint-overflow-menu {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 30;
+  min-width: 8rem;
+  padding: 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.waypoint-overflow-menu button {
+  width: 100%;
+  margin: 0;
+  padding: 0 0.75rem;
+  min-height: 44px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.3;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.waypoint-overflow-menu button:hover {
+  background: var(--bg-subtle);
+}
+
+.waypoint-desktop-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.waypoint-desktop-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0;
+  margin: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.waypoint-desktop-actions button:hover {
+  background: var(--bg-subtle);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.waypoint-desktop-actions button[aria-pressed="true"] {
+  color: var(--pinned-accent);
+  background: var(--accent-subtle);
+}
+
+/* Timeline & Document Flow */
 .waypoint-timeline-container {
   max-width: none;
   width: 100%;
   margin: 0;
   padding: 0;
-  padding-bottom: var(--keyboard-inset, 0px);
   box-sizing: border-box;
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
 }
 
 .waypoint-timeline {
@@ -288,140 +983,41 @@ main {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 1rem 1.25rem;
-}
-
-.waypoint-composer-safe-area {
-  flex-shrink: 0;
-}
-
-label,
-button {
-  display: block;
-}
-
-input,
-textarea,
-select,
-button {
-  font: inherit;
-}
-
-input,
-textarea,
-select {
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 0.25rem;
-}
-
-button {
-  margin-top: 1rem;
-}
-
-p[role="alert"] {
-  color: #8a1f1f;
-}
-
-.waypoint-sidebar-actions {
-  display: flex;
-  gap: 0.5rem;
-}
-
-.waypoint-sidebar-actions button,
-.waypoint-settings-header button,
-.waypoint-agents-header button,
-.waypoint-bot-actions button,
-.waypoint-form-actions button {
-  margin-top: 0;
-}
-
-.waypoint-settings-header,
-.waypoint-agents-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-}
-
-.waypoint-bot-list {
-  list-style: none;
-  padding: 0;
-  margin: 0.75rem 0 0;
-}
-
-.waypoint-bot-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.5rem 0;
-  border-bottom: 0.0625rem solid #ddd9d0;
-}
-
-.waypoint-bot-info {
+  padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  gap: 1.125rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
 }
 
-.waypoint-bot-name {
-  font-weight: 600;
+.waypoint-timeline::-webkit-scrollbar {
+  width: 6px;
 }
-
-.waypoint-bot-id {
-  font-size: 0.875rem;
-  color: #555;
-  word-break: break-all;
-}
-
-.waypoint-bot-actions,
-.waypoint-form-actions {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.75rem;
-}
-
-.waypoint-bot-actions {
-  margin-top: 0;
-  flex-shrink: 0;
-}
-
-.waypoint-agents-form,
-.waypoint-inline-register {
-  margin-top: 1rem;
-  padding: 0.75rem 1rem;
-  border: 0.0625rem solid #ddd9d0;
-  background: #efede7;
-}
-
-.waypoint-device-section {
-  margin-top: 1.5rem;
-  padding-top: 1rem;
-  border-top: 0.0625rem solid #ddd9d0;
-}
-
-.waypoint-device-section h3 {
-  margin: 0;
-}
-
-.waypoint-timeline {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
+.waypoint-timeline::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--radius-pill);
 }
 
 .waypoint-day-separator {
   align-self: center;
+  text-align: center;
   font-size: 0.75rem;
-  color: #666;
-  margin: 0.5rem 0;
+  font-weight: 500;
+  color: var(--muted);
+  margin: 1.25rem auto;
+  padding: 0.2rem 0.75rem;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-pill);
 }
 
 .waypoint-message-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.5rem;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .waypoint-message-row.right {
@@ -435,24 +1031,79 @@ p[role="alert"] {
 .waypoint-message-content {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  max-width: min(36rem, 80%);
   min-width: 0;
   gap: 0.25rem;
 }
 
+/* Agent (left): Pure Unboxed Document Flow - NO bubble, NO card border! */
+.waypoint-message-row.left .waypoint-message-content {
+  width: 100%;
+  max-width: 100%;
+  align-items: flex-start;
+}
+
+.waypoint-message-row.left .waypoint-bubble {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  padding: 0.25rem 0 !important;
+  width: 100%;
+  max-width: 100%;
+}
+
+.waypoint-message-row.left .waypoint-md-p,
+.waypoint-message-row.left p {
+  max-width: min(42rem, 100%);
+  margin: 0.85rem 0;
+  line-height: 1.65;
+  font-size: 15.5px;
+  color: var(--ink);
+}
+
+.waypoint-message-row.left .waypoint-md-p:first-child,
+.waypoint-message-row.left p:first-child {
+  margin-top: 0;
+}
+
+.waypoint-message-row.left .waypoint-md-p:last-child,
+.waypoint-message-row.left p:last-child {
+  margin-bottom: 0;
+}
+
+/* Code blocks & tables break out of 42rem to stretch wider */
+.waypoint-message-row.left [data-streamdown="code-block"],
+.waypoint-message-row.left [data-streamdown="table-wrapper"] {
+  max-width: 100%;
+  width: 100%;
+}
+
+/* Owner (right): Compact Ink Bubble - ONLY user message has a bubble */
 .waypoint-message-row.right .waypoint-message-content {
+  max-width: min(38rem, 85%);
   align-items: flex-end;
 }
 
-.waypoint-bubble {
-  max-width: 100%;
-  min-width: 0;
-  padding: 0.5rem 0.75rem;
-  border-radius: 0.75rem;
+.waypoint-message-row.right .waypoint-bubble {
+  background: var(--owner-bg);
+  color: var(--owner-ink);
+  border-radius: 18px;
+  padding: 0.65rem 1rem;
   white-space: normal;
   overflow-wrap: break-word;
-  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.waypoint-message-row.right .waypoint-bubble .waypoint-md-p,
+.waypoint-message-row.right .waypoint-bubble p {
+  color: var(--owner-ink);
+  line-height: 1.5;
+  font-size: 15px;
+}
+
+.waypoint-message-row.right .waypoint-bubble a {
+  color: inherit;
+  text-decoration: underline;
 }
 
 .waypoint-message-reactions {
@@ -464,28 +1115,28 @@ p[role="alert"] {
 .waypoint-message-reaction {
   display: inline-flex;
   align-items: center;
-  padding: 0.0625rem 0.375rem;
-  border-radius: 999px;
-  background: #eae7df;
+  padding: 0.0625rem 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--line-subtle);
+  border: 1px solid var(--line);
+  color: var(--ink-secondary);
   font-size: 0.75rem;
   line-height: 1.25;
 }
 
 .waypoint-message-responding {
   font-size: 0.75rem;
-  color: #2b6cb0;
+  color: var(--accent);
   padding: 0 0.25rem;
+  font-weight: 500;
 }
 
-.waypoint-message-row.right .waypoint-bubble {
-  background: #d8e6f3;
-}
-
+/* Unconfirmed spinner */
 .waypoint-unconfirmed-spinner {
   display: inline-block;
   width: 0.875rem;
   height: 0.875rem;
-  border: 0.125rem solid #999;
+  border: 0.125rem solid var(--muted);
   border-top-color: transparent;
   border-radius: 50%;
   animation: waypoint-spin 0.8s linear infinite;
@@ -498,24 +1149,544 @@ p[role="alert"] {
   }
 }
 
-.waypoint-composer {
+/* Headings & Document Typography inside Markdown */
+.waypoint-markdown {
+  min-width: 0;
+  white-space: normal;
+}
+
+.waypoint-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.waypoint-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.waypoint-markdown h1,
+.waypoint-markdown h2,
+.waypoint-markdown h3,
+.waypoint-markdown h4 {
+  color: var(--ink);
+  font-weight: 700;
+  line-height: 1.4;
+  margin-top: 1.5rem;
+  margin-bottom: 0.65rem;
+  letter-spacing: -0.01em;
+}
+
+.waypoint-markdown h1 { font-size: 1.45rem; }
+.waypoint-markdown h2 { font-size: 1.3rem; }
+.waypoint-markdown h3 { font-size: 1.15rem; }
+.waypoint-markdown h4 { font-size: 1.05rem; }
+
+.waypoint-markdown [data-streamdown="ordered-list"],
+.waypoint-markdown [data-streamdown="unordered-list"] {
+  margin: 0.65rem 0;
+  padding-left: 1.5rem;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+.waypoint-markdown li {
+  margin: 0.35rem 0;
+}
+
+.waypoint-markdown li > [data-streamdown="ordered-list"],
+.waypoint-markdown li > [data-streamdown="unordered-list"] {
+  margin: 0.25rem 0;
+}
+
+.waypoint-markdown hr,
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.5rem 0;
+  opacity: 0.5;
+}
+
+.waypoint-md-p {
+  margin: 0.5rem 0;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.waypoint-md-p:first-child {
+  margin-top: 0;
+}
+
+.waypoint-md-p:last-child {
+  margin-bottom: 0;
+}
+
+.waypoint-markdown [data-streamdown="inline-code"] {
+  padding: 0.125rem 0.35rem;
+  border-radius: var(--radius-sm);
+  background: rgba(125, 125, 125, 0.14);
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+.waypoint-message-row.right [data-streamdown="inline-code"] {
+  background: rgba(255, 255, 255, 0.18);
+  color: var(--owner-ink);
+}
+
+/* Code Blocks */
+.waypoint-markdown [data-streamdown="code-block"] {
+  position: relative;
+  margin: 1.125rem 0;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--code-bg);
+  box-sizing: border-box;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.waypoint-markdown [data-streamdown="code-block-header"] {
   display: flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.35rem 3.5rem 0.35rem 0.85rem;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  background: var(--code-header-bg);
+  border-bottom: 1px solid var(--line);
+}
+
+.waypoint-markdown [data-streamdown="code-block-actions"] {
+  position: absolute;
+  top: 0.3rem;
+  right: 0.4rem;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.waypoint-markdown [data-streamdown="code-block-copy-button"] {
+  margin-top: 0;
+  padding: 0.25rem 0.55rem;
+  height: 1.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink-secondary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.waypoint-markdown [data-streamdown="code-block-copy-button"]:hover {
+  background: var(--bg-subtle);
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"] {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-width: 100%;
+  background: var(--code-body-bg);
+  padding: 0.85rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.55;
+  white-space: pre;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--radius-pill);
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"] pre {
+  margin: 0;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  background: var(--sdm-bg, transparent);
+  color: var(--sdm-fg, inherit);
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"] code {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  font-family: inherit;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"] pre code > span {
+  display: block;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"] pre code span[style] {
+  color: var(--sdm-c, inherit);
+  background: var(--sdm-tbg, transparent);
+}
+
+/* Dark mode syntax highlighting contrast fix */
+@media (prefers-color-scheme: dark) {
+  .waypoint-markdown [data-streamdown="code-block-body"] pre code span[style] {
+    color: var(--shiki-dark, var(--sdm-c, inherit)) !important;
+    background: var(--shiki-dark-bg, var(--sdm-tbg, transparent)) !important;
+  }
+}
+
+/* Tables */
+.waypoint-markdown [data-streamdown="table-wrapper"] {
+  margin: 1.25rem 0;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-sizing: border-box;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-width: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.waypoint-markdown [data-streamdown="table"] {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  min-width: 100%;
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.waypoint-markdown [data-streamdown="table-header"] {
+  background: var(--bg-subtle);
+  font-weight: 600;
+}
+
+.waypoint-markdown [data-streamdown="table-header-cell"] {
+  padding: 0.65rem 0.95rem;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line-subtle);
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.waypoint-markdown [data-streamdown="table-cell"] {
+  padding: 0.6rem 0.95rem;
+  border-bottom: 1px solid var(--line-subtle);
+  border-right: 1px solid var(--line-subtle);
+  text-align: left;
+  white-space: nowrap;
+  color: var(--ink-secondary);
+  transition: background-color 0.12s ease;
+}
+
+.waypoint-markdown [data-streamdown="table-cell"]:last-child,
+.waypoint-markdown [data-streamdown="table-header-cell"]:last-child {
+  border-right: none;
+}
+
+.waypoint-markdown [data-streamdown="table"] tr:last-child [data-streamdown="table-cell"] {
+  border-bottom: none;
+}
+
+.waypoint-markdown [data-streamdown="table"] tr:hover [data-streamdown="table-cell"] {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+/* Blockquote */
+.waypoint-markdown [data-streamdown="blockquote"] {
+  margin: 1.25rem 0;
+  padding: 0.75rem 1.125rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+.waypoint-markdown [data-streamdown="blockquote"] > *:first-child {
+  margin-top: 0;
+}
+
+.waypoint-markdown [data-streamdown="blockquote"] > *:last-child {
+  margin-bottom: 0;
+}
+
+.waypoint-markdown .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  margin: 0.75rem 0;
+}
+
+.waypoint-markdown .katex-error {
+  color: var(--danger);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Grokbot Action Prompts / Pills */
+.waypoint-message-prompt {
+  display: inline-flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
-  padding: 0.75rem 1.25rem;
-  border-top: 0.0625rem solid #ddd9d0;
-  background: #f6f5f2;
-  align-items: flex-end;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+
+.waypoint-prompt-button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-top: 0;
+  padding: 0.35rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.waypoint-prompt-button:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--line);
+}
+
+.waypoint-prompt-button.selected {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 600;
+  transform: scale(1.03);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+.waypoint-prompt-button.selected .waypoint-prompt-button-scope {
+  color: var(--accent-ink);
+  opacity: 0.85;
+}
+
+.waypoint-prompt-button:disabled:not(.selected) {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.waypoint-prompt-button-scope {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* Floating Action Button: Scroll To Bottom */
+.waypoint-scroll-bottom-fab {
+  position: absolute;
+  bottom: calc(100% + 0.5rem);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.15s ease;
+  margin-top: 0;
+  padding: 0;
+}
+
+.waypoint-scroll-bottom-fab:hover {
+  transform: translateX(-50%) translateY(-2px);
+  background: var(--bg-subtle);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+}
+
+/* Docked composer: single row until the draft exceeds one line, then text above a fixed icon row. */
+.waypoint-composer-safe-area {
+  position: relative;
+  flex-shrink: 0;
+  padding: 0.5rem 0.75rem;
+  box-sizing: border-box;
+  background: var(--bg);
+  border-top: 1px solid var(--line);
+}
+
+.waypoint-composer-safe-area[data-keyboard-inset]:not([data-keyboard-inset="0"]) {
+  padding-top: 0.35rem;
+  padding-bottom: 0;
+}
+
+.waypoint-composer {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "attach field send";
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.2rem 0.35rem;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+.waypoint-composer:focus-within {
+  border-color: var(--ink-secondary);
+  box-shadow: none;
+}
+
+.waypoint-composer.multiline {
+  grid-template-areas:
+    "field field field"
+    "attach . send";
+  align-items: end;
+  row-gap: 0.35rem;
+  padding: 0.45rem 0.5rem 0.3rem;
 }
 
 .waypoint-composer textarea {
-  flex: 1;
-  margin-top: 0;
+  grid-area: field;
+  width: 100%;
+  margin: 0;
+  padding: 0.2rem 0.35rem;
+  border: none;
+  border-bottom: 1px solid transparent;
+  outline: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--ink);
+  min-height: calc(1.45em);
+  max-height: calc(1.45em * 4);
   resize: none;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
 
-.waypoint-composer button {
-  margin-top: 0;
+.waypoint-composer.multiline textarea {
+  border-bottom-color: var(--line);
+  padding-bottom: 0.4rem;
+  margin-bottom: 0.1rem;
+}
+
+.waypoint-composer textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.waypoint-attach-button {
+  grid-area: attach;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--bg-subtle);
+  color: var(--ink-secondary);
+  cursor: pointer;
   flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.waypoint-attach-button:hover {
+  background: var(--card);
+  border-color: var(--muted);
+  color: var(--ink);
+}
+
+.waypoint-attach-button-text {
+  display: none;
+}
+
+.waypoint-attach-button:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.waypoint-send-button {
+  grid-area: send;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  min-width: 2rem;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--line-subtle);
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.waypoint-send-button[data-active="true"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+}
+
+.waypoint-send-button[data-active="true"]:hover {
+  opacity: 0.92;
+  transform: scale(1.05);
+}
+
+.waypoint-send-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .waypoint-draft-attachment {
@@ -523,9 +1694,12 @@ p[role="alert"] {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.5rem 1.25rem;
-  border-top: 0.0625rem solid #ddd9d0;
-  background: #efede7;
+  padding: 0.35rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  font-size: 0.8125rem;
 }
 
 .waypoint-draft-attachment-name {
@@ -533,36 +1707,58 @@ p[role="alert"] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--ink);
 }
 
 .waypoint-draft-attachment button {
   margin-top: 0;
-  flex-shrink: 0;
-}
-
-.waypoint-attach-button {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  padding: 0.375rem 0.625rem;
-  border: 0.0625rem solid #bbb6aa;
-  background: #efede7;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink-secondary);
+  font-size: 0.75rem;
   cursor: pointer;
-  flex-shrink: 0;
 }
 
-.waypoint-sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
+.waypoint-slash-hints {
+  position: relative;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+
+.waypoint-slash-hint-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+  list-style: none;
+  margin: 0;
   padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
 }
 
+.waypoint-slash-hint-button {
+  margin-top: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.waypoint-slash-hint-button:hover {
+  background: var(--line-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Failed message controls */
 .waypoint-failed-button {
   display: inline-flex;
   align-items: center;
@@ -573,8 +1769,8 @@ p[role="alert"] {
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: #c62828;
-  color: #ffffff;
+  background: var(--danger);
+  color: var(--accent-ink);
   font-size: 0.75rem;
   font-weight: 700;
   line-height: 1;
@@ -601,10 +1797,14 @@ p[role="alert"] {
   border: none;
   border-radius: 50%;
   background: transparent;
-  color: #666;
+  color: var(--muted);
   font-size: 0.875rem;
   line-height: 1;
   cursor: pointer;
+}
+
+.waypoint-bubble-menu-trigger:hover {
+  color: var(--ink);
 }
 
 .waypoint-failed-menu {
@@ -614,10 +1814,10 @@ p[role="alert"] {
   z-index: 20;
   min-width: 4.5rem;
   padding: 0.25rem;
-  border: 0.0625rem solid #ddd9d0;
-  border-radius: 0.375rem;
-  background: #ffffff;
-  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
 }
 
 .waypoint-failed-menu button {
@@ -625,57 +1825,479 @@ p[role="alert"] {
   margin-top: 0;
   padding: 0.375rem 0.5rem;
   border: none;
-  border-radius: 0.25rem;
+  border-radius: var(--radius-sm);
   background: transparent;
-  color: #b91c1c;
+  color: var(--danger);
   text-align: left;
   cursor: pointer;
 }
 
-.waypoint-topic-row-failed {
+.waypoint-failed-menu button:hover {
+  background: var(--danger-bg);
+}
+
+/* Modal Dialogs (Desktop Centered & Backdrop Blur) */
+.waypoint-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: var(--modal-backdrop);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  box-sizing: border-box;
+}
+
+.waypoint-dialog {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg);
+}
+
+.waypoint-dialog.waypoint-modal {
+  flex: none;
+  max-width: 480px;
+  width: 100%;
+  max-height: 85vh;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: var(--modal-bg);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.waypoint-dialog-body {
+  max-width: 32rem;
+  width: 100%;
+  padding: 1.5rem 1.25rem;
+  padding-bottom: calc(1.5rem + var(--keyboard-inset, 0px));
+  box-sizing: border-box;
+}
+
+.waypoint-dialog.waypoint-modal .waypoint-dialog-body {
+  max-width: 100%;
+  padding: 1.5rem;
+  overflow-y: auto;
+}
+
+.waypoint-dialog-body input:not([type="checkbox"]):not([type="radio"]),
+.waypoint-dialog-body textarea,
+.waypoint-dialog-body select,
+.waypoint-agents-form input:not([type="checkbox"]):not([type="radio"]),
+.waypoint-agents-form textarea,
+.waypoint-agents-form select {
+  width: 100%;
+  height: 2.75rem;
+  padding: 0 0.875rem;
+  font-size: 0.9375rem;
+  font-family: inherit;
+  color: var(--ink);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.waypoint-dialog-body textarea,
+.waypoint-agents-form textarea {
+  height: auto;
+  min-height: 5.5rem;
+  padding: 0.75rem 0.875rem;
+  line-height: 1.5;
+  resize: none;
+}
+
+.waypoint-dialog-body input:focus,
+.waypoint-dialog-body textarea:focus,
+.waypoint-dialog-body select:focus,
+.waypoint-agents-form input:focus,
+.waypoint-agents-form textarea:focus,
+.waypoint-agents-form select:focus {
+  background: var(--card);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+.waypoint-dialog-body label,
+.waypoint-agents-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 1.125rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
+.waypoint-dialog-body label:first-child,
+.waypoint-agents-form label:first-child {
+  margin-top: 0;
+}
+
+
+.waypoint-quick-register-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.5rem 0;
+  margin-top: 0.75rem;
+  transition: opacity 0.12s ease;
+}
+
+.waypoint-quick-register-trigger:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.waypoint-field-hint {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  margin: 0.4rem 0 0;
+  line-height: 1.45;
+}
+
+.waypoint-settings-header,
+.waypoint-agents-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.waypoint-settings-header h2,
+.waypoint-agents-header h3 {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+.waypoint-agents-header button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  transition: background-color 0.12s ease;
+}
+
+.waypoint-agents-header button:hover:not(:disabled) {
+  background: var(--accent-subtle);
+}
+
+.waypoint-bot-list {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.waypoint-bot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.875rem 1rem;
+  border-bottom: 1px solid var(--line-subtle);
+}
+
+.waypoint-bot-row:last-child {
+  border-bottom: none;
+}
+
+.waypoint-bot-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waypoint-bot-name {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.waypoint-bot-id {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  word-break: break-all;
+  margin-top: 0.15rem;
+}
+
+.waypoint-bot-actions,
+.waypoint-form-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.25rem;
+}
+
+.waypoint-bot-actions {
+  margin-top: 0;
+  flex-shrink: 0;
+  gap: 0.5rem;
+}
+
+.waypoint-bot-actions button {
+  height: 2rem;
+  min-height: 32px;
+  padding: 0 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  border: 1px solid var(--line);
+  color: var(--ink-secondary);
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.waypoint-bot-actions button:hover:not(:disabled) {
+  background: var(--line-subtle);
+  color: var(--ink);
+}
+
+.waypoint-bot-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.waypoint-form-actions button {
+  height: 2.875rem;
+  min-height: 44px;
+  padding: 0 1.25rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  font-family: inherit;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  touch-action: manipulation;
+  flex: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1rem;
-  height: 1rem;
-  border-radius: 50%;
-  background: #c62828;
-  color: #ffffff;
-  font-size: 0.75rem;
+}
+
+.waypoint-form-actions button[type="submit"] {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.waypoint-form-actions button[type="submit"]:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.waypoint-form-actions button[type="button"] {
+  background: transparent;
+  color: var(--ink-secondary);
+  border: 1px solid var(--line);
+}
+
+.waypoint-form-actions button[type="button"]:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  color: var(--ink);
+}
+
+.waypoint-form-actions button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.waypoint-form-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.waypoint-agents-form,
+.waypoint-inline-register,
+.waypoint-delete-dialog,
+div[role="alertdialog"] {
+  margin-top: 1rem;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+}
+
+div[role="alertdialog"] h4,
+.waypoint-agents-form h4 {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
   font-weight: 700;
-  line-height: 1;
-  flex-shrink: 0;
+  color: var(--ink);
 }
 
-.waypoint-topic-row-pin {
-  font-size: 0.6875rem;
-  padding: 0.0625rem 0.25rem;
-  border-radius: 0.25rem;
-  background: #e2ddd2;
-  color: #4a453c;
-  flex-shrink: 0;
-}
-
-.waypoint-toast {
-  position: fixed;
-  left: 50%;
-  bottom: 1.5rem;
-  transform: translateX(-50%);
-  z-index: 30;
-  padding: 0.5rem 0.875rem;
-  border-radius: 0.5rem;
-  background: #2b2926;
-  color: #ffffff;
+div[role="alertdialog"] p,
+.waypoint-agents-form p {
+  margin: 0 0 0.65rem;
   font-size: 0.875rem;
-  box-shadow: 0 0.25rem 0.75rem rgba(0, 0, 0, 0.2);
+  line-height: 1.55;
+  color: var(--ink-secondary);
+}
+
+.waypoint-device-section {
+  margin-top: 2rem;
+}
+
+.waypoint-device-section h3 {
+  margin: 0 0 0.5rem 0.25rem;
+}
+
+.waypoint-device-section button {
+  width: 100%;
+  height: 3rem;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--danger);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  touch-action: manipulation;
+}
+
+.waypoint-device-section button:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
+.waypoint-device-section button:active:not(:disabled) {
+  transform: scale(0.985);
+}
+
+.waypoint-delete-dialog {
+  margin: 1rem 1.25rem 0;
+}
+
+.waypoint-delete-dialog .waypoint-form-actions button:first-child {
+  background: var(--danger);
+  color: var(--accent-ink);
+  border: none;
+}
+
+.waypoint-delete-dialog .waypoint-form-actions button:first-child:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+/* Empty Workbench State (Muse style) */
+.waypoint-empty-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  color: var(--ink-secondary);
+}
+
+.waypoint-empty-card {
+  max-width: 24rem;
+  width: 100%;
+  padding: 2rem 1.5rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--card-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  box-sizing: border-box;
+}
+
+.waypoint-empty-detail p {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--ink-secondary);
+}
+
+.waypoint-empty-detail button {
+  margin-top: 0;
+  padding: 0.5rem 1.25rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.waypoint-empty-detail button:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.waypoint-empty-shortcut-hint {
+  font-size: 0.75rem;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.waypoint-kbd-hint {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  background: var(--line-subtle);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+}
+
+/* Edge & Banner States */
+.waypoint-unavailable-banner {
+  flex-shrink: 0;
+  padding: 0.625rem 1.25rem;
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn-border);
+  color: var(--warn-ink);
+  font-size: 0.875rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .waypoint-reauth-banner {
   flex-shrink: 0;
   padding: 0.625rem 1.25rem;
-  border-bottom: 0.0625rem solid #d8c89e;
-  background: #fdf6e2;
-  color: #4a3a10;
+  border-bottom: 1px solid var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-ink);
 }
 
 .waypoint-reauth-banner-row {
@@ -704,218 +2326,111 @@ p[role="alert"] {
 .waypoint-reauth-form {
   margin-top: 0.75rem;
   padding: 0.75rem 1rem;
-  border: 0.0625rem solid #d8c89e;
-  background: #fffdf6;
+  border: 1px solid var(--warn-border);
+  background: var(--card);
 }
 
-.waypoint-topic-row.unavailable {
-  opacity: 0.65;
-  color: #6b6760;
-}
-
-.waypoint-topic-row-unavailable {
-  font-size: 0.6875rem;
-  padding: 0.0625rem 0.25rem;
-  border-radius: 0.25rem;
-  background: #e2ddd2;
-  color: #5c564d;
-  flex-shrink: 0;
-}
-
-.waypoint-unavailable-banner {
-  flex-shrink: 0;
-  padding: 0.5rem 1.25rem;
-  background: #f3e8d2;
-  border-bottom: 0.0625rem solid #d9c8a3;
-  color: #5a4318;
+.waypoint-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translateX(-50%);
+  z-index: 60;
+  padding: 0.5rem 0.875rem;
+  border-radius: var(--radius-md);
+  background: var(--owner-bg);
+  color: var(--owner-ink);
   font-size: 0.875rem;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
 }
 
-.waypoint-attach-button:has(input:disabled) {
+/* Form Controls */
+label,
+button {
+  display: block;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  padding: 0.45rem 0.625rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 0.9375rem;
+  transition: border-color 0.15s ease;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button {
+  margin-top: 1rem;
+  padding: 0.45rem 0.875rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-subtle);
+}
+
+button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
-.waypoint-markdown {
-  min-width: 0;
-  white-space: normal;
+p[role="alert"] {
+  color: var(--danger);
+  font-size: 0.875rem;
 }
 
-.waypoint-markdown > *:first-child {
-  margin-top: 0;
-}
 
-.waypoint-markdown > *:last-child {
-  margin-bottom: 0;
-}
-
-.waypoint-md-p {
-  margin: 0.5rem 0;
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-}
-
-.waypoint-md-p:first-child {
-  margin-top: 0;
-}
-
-.waypoint-md-p:last-child {
-  margin-bottom: 0;
-}
-
-.waypoint-markdown [data-streamdown="inline-code"] {
-  padding: 0.1rem 0.3rem;
-  border-radius: 0.25rem;
-  background: rgba(0, 0, 0, 0.06);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.875em;
-}
-
-.waypoint-markdown [data-streamdown="code-block"] {
-  position: relative;
-  margin: 0.5rem 0;
-  max-width: 100%;
-  min-width: 0;
-  border: 0.0625rem solid #ddd9d0;
-  border-radius: 0.5rem;
-  background: #f8f7f4;
-  padding: 0.375rem;
-  box-sizing: border-box;
-}
-
-.waypoint-markdown [data-streamdown="code-block-header"] {
-  display: flex;
-  align-items: center;
-  min-height: 1.75rem;
-  padding: 0 3rem 0.25rem 0.375rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.75rem;
-  color: #555;
-}
-
-.waypoint-markdown [data-streamdown="code-block-actions"] {
-  position: absolute;
-  top: 0.375rem;
-  right: 0.375rem;
-  z-index: 1;
+.waypoint-quick-register-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-}
-
-.waypoint-markdown [data-streamdown="code-block-copy-button"] {
-  margin-top: 0;
-  padding: 0.25rem 0.375rem;
-  border: 0.0625rem solid #d4cfc4;
-  border-radius: 0.25rem;
-  background: #ffffff;
-  color: #333;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 0.875rem;
+  font-weight: 500;
   cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  padding: 0.5rem 0;
+  margin-top: 0.75rem;
+  transition: opacity 0.12s ease;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"] {
-  overflow-x: auto;
-  overflow-y: auto;
-  max-width: 100%;
-  border: 0.0625rem solid #e4e0d8;
-  border-radius: 0.375rem;
-  background: #ffffff;
-  padding: 0.625rem 0.75rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 0.875rem;
-  line-height: 1.45;
-  white-space: pre;
+.waypoint-quick-register-trigger:hover:not(:disabled) {
+  opacity: 0.85;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"] pre {
-  margin: 0;
-  white-space: pre;
-  word-break: normal;
-  overflow-wrap: normal;
-  background: var(--sdm-bg, transparent);
-  color: var(--sdm-fg, inherit);
+.waypoint-field-hint {
+  font-size: 0.8125rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"] code {
-  white-space: pre;
-  word-break: normal;
-  overflow-wrap: normal;
-  font-family: inherit;
-}
-
-.waypoint-markdown [data-streamdown="code-block-body"] pre code > span {
-  display: block;
-}
-
-.waypoint-markdown [data-streamdown="code-block-body"] pre code span[style] {
-  color: var(--sdm-c, inherit);
-  background: var(--sdm-tbg, transparent);
-}
-
-.waypoint-markdown [data-streamdown="table-wrapper"] {
-  margin: 0.5rem 0;
-  max-width: 100%;
-  min-width: 0;
-  border: 0.0625rem solid #ddd9d0;
-  border-radius: 0.5rem;
-  background: #ffffff;
-  box-sizing: border-box;
-}
-
-.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child {
-  overflow-x: auto;
-  overflow-y: auto;
-  max-width: 100%;
-}
-
-.waypoint-markdown [data-streamdown="table"] {
-  border-collapse: collapse;
-  width: max-content;
-  min-width: 100%;
-  font-size: 0.875rem;
-}
-
-.waypoint-markdown [data-streamdown="table-header"] {
-  background: #f3f1eb;
-}
-
-.waypoint-markdown [data-streamdown="table-header-cell"],
-.waypoint-markdown [data-streamdown="table-cell"] {
-  padding: 0.375rem 0.625rem;
-  border: 0.0625rem solid #e4e0d8;
-  text-align: left;
-  white-space: nowrap;
-}
-
-.waypoint-markdown [data-streamdown="blockquote"] {
-  margin: 0.5rem 0;
-  padding-left: 0.75rem;
-  border-left: 0.1875rem solid #c9c3b6;
-  color: #444;
-}
-
-.waypoint-markdown [data-streamdown="ordered-list"],
-.waypoint-markdown [data-streamdown="unordered-list"] {
-  margin: 0.5rem 0;
-  padding-left: 1.25rem;
-}
-
-.waypoint-markdown .katex-display {
-  overflow-x: auto;
-  overflow-y: hidden;
-  max-width: 100%;
-  margin: 0.5rem 0;
-}
-
-.waypoint-markdown .katex-error {
-  color: #b91c1c;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
+/* Fallback & Media */
 .waypoint-bubble-fallback {
   white-space: normal;
 }
@@ -923,74 +2438,12 @@ p[role="alert"] {
 .waypoint-render-fallback-hint {
   margin-bottom: 0.375rem;
   font-size: 0.75rem;
-  color: #8a5300;
+  color: var(--warn-ink);
 }
 
 .waypoint-bubble-raw {
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.waypoint-slash-hints {
-  padding: 0.5rem 1.25rem;
-  border-top: 0.0625rem solid #ddd9d0;
-  background: #efede7;
-}
-
-.waypoint-slash-hint-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.waypoint-slash-hint-button {
-  margin-top: 0;
-  padding: 0.25rem 0.625rem;
-  border: 0.0625rem solid #bbb6aa;
-  border-radius: 0.375rem;
-  background: #ffffff;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.875rem;
-  cursor: pointer;
-}
-
-.waypoint-message-prompt {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.375rem;
-}
-
-.waypoint-prompt-button {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.25rem;
-  margin-top: 0;
-  padding: 0.3125rem 0.625rem;
-  border: 0.0625rem solid #c9c3b6;
-  border-radius: 0.5rem;
-  background: #ffffff;
-  color: #1f2937;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-
-.waypoint-prompt-button.selected {
-  border-color: #2b6cb0;
-  background: #ebf4ff;
-  color: #1a4d80;
-}
-
-.waypoint-prompt-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.waypoint-prompt-button-scope {
-  font-size: 0.75rem;
-  color: #5b6472;
 }
 
 .waypoint-media-bubble {
@@ -1017,18 +2470,30 @@ p[role="alert"] {
   align-items: center;
   gap: 0.375rem;
   padding: 0.375rem 0.625rem;
-  border: 0.0625rem solid #cfc9bc;
-  border-radius: 0.5rem;
-  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
 }
 
 .waypoint-bubble-image {
   display: block;
   max-width: 100%;
   height: auto;
-  border-radius: 0.5rem;
+  border-radius: var(--radius-md);
 }
 
 .waypoint-media-filename {
   word-break: break-word;
+}
+
+.waypoint-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
