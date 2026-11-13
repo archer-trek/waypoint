@@ -1,7 +1,7 @@
 :root {
   --bg: #f8f7f4;
   --bg-subtle: #f1efe8;
-  --sidebar: #f3f1ea;
+  --sidebar: #f8f7f4;
   --header: rgba(248, 247, 244, 0.95);
   --card: #ffffff;
   --card-subtle: #f9f8f5;
@@ -50,7 +50,7 @@
   :root {
     --bg: #16181d;
     --bg-subtle: #1e222a;
-    --sidebar: #131518;
+    --sidebar: #16181d;
     --header: rgba(22, 24, 29, 0.95);
     --card: #1f232b;
     --card-subtle: #262b35;
@@ -451,12 +451,39 @@ main {
   background: var(--bg);
 }
 
+.waypoint-workspace[data-viewport="narrow"] .waypoint-page-enter-forward {
+  animation: waypoint-page-forward 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.waypoint-workspace[data-viewport="narrow"] .waypoint-page-enter-back {
+  animation: waypoint-page-back 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes waypoint-page-forward {
+  from { transform: translate3d(100%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes waypoint-page-back {
+  from { transform: translate3d(-28%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waypoint-page-enter-forward,
+  .waypoint-page-enter-back {
+    animation: none;
+  }
+}
+
 /* Sidebar & Topic List */
 .waypoint-sidebar {
   width: clamp(16rem, 28%, 22rem);
   flex: 0 0 clamp(16rem, 28%, 22rem);
+  display: flex;
+  flex-direction: column;
   border-right: 1px solid var(--line);
-  background: var(--sidebar);
+  background: var(--bg);
   padding: 0.875rem 0.75rem;
   box-sizing: border-box;
   overflow-y: auto;
@@ -2211,6 +2238,13 @@ div[role="alertdialog"] p,
 }
 
 /* Empty Workbench State (Muse style) */
+.waypoint-list-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .waypoint-empty-detail {
   flex: 1;
   display: flex;
@@ -2244,7 +2278,12 @@ div[role="alertdialog"] p,
 }
 
 .waypoint-empty-detail button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
   margin-top: 0;
+  min-height: 44px;
   padding: 0.5rem 1.25rem;
   border: none;
   border-radius: var(--radius-md);

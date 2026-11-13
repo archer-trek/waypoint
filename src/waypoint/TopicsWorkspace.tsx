@@ -2645,6 +2645,34 @@ export function TopicsWorkspace({
   const showSidebar = !isNarrow || !isNarrowPushed;
   const showDetail = !isNarrow || isNarrowPushed;
   const safeInset = normalizeInset(keyboardInsetBottom);
+  const narrowPageKey = !isNarrow
+    ? "wide"
+    : settingsOpen
+      ? "settings"
+      : creating
+        ? "create"
+        : activeTopic
+          ? "topic"
+          : "list";
+  const pageMotionRef = useRef({
+    key: narrowPageKey,
+    depth: targetDepth,
+    direction: "none" as "none" | "forward" | "back",
+  });
+  if (isNarrow && pageMotionRef.current.key !== narrowPageKey) {
+    const previous = pageMotionRef.current;
+    const direction =
+      previous.key === "wide" ? "none" : targetDepth < previous.depth ? "back" : "forward";
+    pageMotionRef.current = { key: narrowPageKey, depth: targetDepth, direction };
+  } else if (!isNarrow && pageMotionRef.current.key !== "wide") {
+    pageMotionRef.current = { key: "wide", depth: 0, direction: "none" };
+  }
+  const pageEnterClass =
+    isNarrow && pageMotionRef.current.direction === "forward"
+      ? "waypoint-page-enter-forward"
+      : isNarrow && pageMotionRef.current.direction === "back"
+        ? "waypoint-page-enter-back"
+        : "";
 
   function renderSettingsDialog(isModal: boolean) {
     return (
@@ -3591,26 +3619,34 @@ export function TopicsWorkspace({
     );
   }
 
+  function renderEmptyInvitation(options?: { shortcut?: boolean }) {
+    return (
+      <section aria-label="Topic 引导" className="waypoint-empty-detail">
+        <div className="waypoint-empty-card">
+          <p>
+            {topics.length === 0
+              ? "还没有 Topic，新建一条 Topic 开始交流。"
+              : "选择一条 Topic，或新建一条 Topic 开始交流。"}
+          </p>
+          <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
+            <PlusIcon aria-hidden="true" size={14} />
+            新建一条 Topic
+          </button>
+          {options?.shortcut === false ? null : (
+            <div className="waypoint-empty-shortcut-hint">
+              快捷键 <kbd className="waypoint-kbd-hint">Alt + N</kbd>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
   function renderEmptyDetail() {
     return (
       <>
         {reauthRequired && !settingsOpen && !creating ? renderReauthBanner() : null}
-        <section aria-label="Topic 引导" className="waypoint-empty-detail">
-          <div className="waypoint-empty-card">
-            <p>
-              {topics.length === 0
-                ? "还没有 Topic，新建一条 Topic 开始交流。"
-                : "选择一条 Topic，或新建一条 Topic 开始交流。"}
-            </p>
-            <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
-              <PlusIcon aria-hidden="true" size={14} />
-              新建一条 Topic
-            </button>
-            <div className="waypoint-empty-shortcut-hint">
-              快捷键 <kbd className="waypoint-kbd-hint">Alt + N</kbd>
-            </div>
-          </div>
-        </section>
+        {renderEmptyInvitation()}
       </>
     );
   }
@@ -3621,7 +3657,7 @@ export function TopicsWorkspace({
       style={{ "--keyboard-inset": `${safeInset}px` } as CSSProperties}
     >
       {showSidebar ? (
-        <aside className="waypoint-sidebar" aria-label="Topic 列表">
+        <aside className={`waypoint-sidebar${pageEnterClass ? ` ${pageEnterClass}` : ""}`} aria-label="Topic 列表">
           <p className="sr-only">已连接</p>
           <div className="waypoint-sidebar-header" data-tauri-drag-region>
             <h1 className="sr-only">Topic</h1>
@@ -3651,7 +3687,14 @@ export function TopicsWorkspace({
           </div>
           {reauthRequired && !showDetail ? renderReauthBanner() : null}
           {topics.length === 0 ? (
-            <p>暂无 Topic</p>
+            isNarrow ? (
+              <div className="waypoint-list-empty">
+                <p className="sr-only">暂无 Topic</p>
+                {renderEmptyInvitation({ shortcut: false })}
+              </div>
+            ) : (
+              <p className="sr-only">暂无 Topic</p>
+            )
           ) : (
             <ul className="waypoint-topic-list">
               {topics.map((topic) => (
@@ -3741,7 +3784,7 @@ export function TopicsWorkspace({
       ) : null}
 
       {showDetail ? (
-        <div className="waypoint-detail">
+        <div key={isNarrow ? narrowPageKey : "wide"} className={`waypoint-detail${pageEnterClass ? ` ${pageEnterClass}` : ""}`}>
           {isNarrow ? (
             settingsOpen ? (
               renderSettingsDialog(false)
