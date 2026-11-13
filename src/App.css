@@ -1,15 +1,15 @@
 :root {
-  --bg: #f8f7f4;
-  --bg-subtle: #f1efe8;
-  --sidebar: #f8f7f4;
-  --header: rgba(248, 247, 244, 0.95);
+  --bg: #ffffff;
+  --bg-subtle: #f5f5f5;
+  --sidebar: #ffffff;
+  --header: rgba(255, 255, 255, 0.95);
   --card: #ffffff;
-  --card-subtle: #f9f8f5;
+  --card-subtle: #fafafa;
   --ink: #1a1c1e;
   --ink-secondary: #4a5058;
   --muted: #747b85;
-  --line: #ddd9cf;
-  --line-subtle: #eae7df;
+  --line: #e8e8e8;
+  --line-subtle: #f0f0f0;
   --accent: #2563eb;
   --accent-hover: #1d4ed8;
   --accent-ink: #ffffff;
