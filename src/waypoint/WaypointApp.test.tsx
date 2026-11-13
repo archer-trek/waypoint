@@ -18258,13 +18258,23 @@ test("macOS 窗口失焦或不可见不挂起同步，且桌面从休眠或断�
   await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => expect(syncCalls).toBe(3));
 
-  // 断网并入队两条消息，进入退避；再挂起一轮休眠前僵死的 /sync #4
+  // 断网并入队两条消息，进入退避；再挂起一轮休眠前僵死的 /sync #4。
+  // 必须等上一条本地写入结束、发送按钮恢复后再点下一次，否则慢速环境下第二次点击会落在禁用按钮上。
   offline = true;
-  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "桌面消息1");
+  const composer = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(composer, "桌面消息1");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "桌面消息2");
+  await waitFor(() => {
+    expect(sendCalls).toBe(1);
+    expect(composer).toBeEnabled();
+    expect(composer).toHaveValue("");
+  });
+  await user.type(composer, "桌面消息2");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await waitFor(() => expect(sendCalls).toBeGreaterThanOrEqual(1));
+  await waitFor(() => {
+    expect(sendCalls).toBe(2);
+    expect(composer).toHaveValue("");
+  });
 
   const stale2 = deferred<TransportResult>();
   staleSync = stale2;
