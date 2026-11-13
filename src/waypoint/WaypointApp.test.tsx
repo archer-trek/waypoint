@@ -8558,7 +8558,7 @@ test("重新连上后同步立刻恢复，重试队列按交出顺序重放且�
   await user.click(screen.getByRole("button", { name: "发送" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
 
   // 推进 1s 让队列再失败一次，进入 2s 退避等待
   await act(async () => { clock.advance(1000); });
@@ -8658,7 +8658,7 @@ test("进程被回收后重新打开，恢复凭证、游标、本地时间线�
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(offlineTxns.length).toBeGreaterThanOrEqual(1));
-  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
 
   // 模拟进程被系统回收
   first.unmount();
@@ -18075,7 +18075,7 @@ test("Android 回到前台时立刻清零退避、携带已有同步游标增量
   await user.click(screen.getByRole("button", { name: "发送" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息二");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2);
+  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
 
   await act(async () => { clock.advance(1000); });
   const syncCountBeforeBg = syncCalls;
