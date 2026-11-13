@@ -3616,8 +3616,8 @@ export function TopicsWorkspace({
     >
       {showSidebar ? (
         <aside className="waypoint-sidebar" aria-label="Topic 列表">
-          <p>已连接</p>
-          <div className="waypoint-sidebar-header">
+          <p className="sr-only">已连接</p>
+          <div className="waypoint-sidebar-header" data-tauri-drag-region>
             <h1>Topic</h1>
             <div className="waypoint-sidebar-actions">
               <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
