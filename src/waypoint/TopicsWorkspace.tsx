@@ -470,12 +470,25 @@ export function TopicsWorkspace({
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [overflowMenuOpen]);
 
-  useEffect(() => {
+  const [composerWidth, setComposerWidth] = useState(0);
+  useLayoutEffect(() => {
+    const form = composerFormRef.current;
+    if (!form || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const next = form.clientWidth;
+      setComposerWidth((prev) => (prev === next ? prev : next));
+    });
+    observer.observe(form);
+    setComposerWidth((prev) => (prev === form.clientWidth ? prev : form.clientWidth));
+    return () => observer.disconnect();
+  }, [activeRoomId]);
+
+  useLayoutEffect(() => {
     const textarea = composerTextareaRef.current;
     const form = composerFormRef.current;
     if (!textarea) return;
     const style = getComputedStyle(textarea);
-    const line = Number.parseFloat(style.lineHeight) || 22;
+    const line = Number.parseFloat(style.lineHeight) || 24;
     const maxHeight = line * 4;
     const textValue = currentDraftText;
     let exceeds = textValue.includes("\n");
@@ -496,14 +509,16 @@ export function TopicsWorkspace({
       const available = form.clientWidth - padX - 32 - 32 - 8 - 8 - 12;
       exceeds = textWidth > Math.max(available, 48);
     }
-    setComposerMultiline(exceeds);
+    if (exceeds !== composerMultiline) {
+      setComposerMultiline(exceeds);
+    }
     textarea.style.height = "auto";
     const scrollHeight = textarea.scrollHeight;
     const nextHeight = exceeds
       ? Math.min(Math.max(scrollHeight, line), maxHeight)
       : Math.max(line, 24);
     textarea.style.height = `${nextHeight}px`;
-  }, [currentDraftText, activeRoomId]);
+  }, [currentDraftText, activeRoomId, composerMultiline, composerWidth]);
 
   function openSettings() {
     if (anyFormSubmitting) {

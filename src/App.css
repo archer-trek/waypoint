@@ -1632,12 +1632,15 @@ hr {
   box-shadow: none;
   background: transparent;
   font-family: inherit;
-  font-size: 15px;
+  font-size: 17px;
   line-height: 1.45;
   color: var(--ink);
   caret-color: var(--ink);
+  user-select: text;
+  -webkit-user-select: text;
   min-height: calc(1.45em);
   max-height: calc(1.45em * 4);
+  align-self: center;
   resize: none;
   overflow-y: auto;
   box-sizing: border-box;
@@ -1651,9 +1654,10 @@ hr {
 
 .waypoint-composer.multiline textarea,
 .waypoint-composer.multiline textarea:focus {
-  border-bottom-color: var(--line);
-  padding-bottom: 0.4rem;
-  margin-bottom: 0.1rem;
+  border-bottom-color: transparent;
+  padding-bottom: 0.15rem;
+  margin-bottom: 0;
+  align-self: start;
   scrollbar-width: thin;
 }
 
