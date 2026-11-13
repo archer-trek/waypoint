@@ -17,6 +17,16 @@ import {
   type MatrixClient,
 } from "./matrix-client";
 import { MessageBody } from "./MessageBody";
+import {
+  BackIcon,
+  CloseIcon,
+  EditIcon,
+  PaperclipIcon,
+  PinIcon,
+  PlusIcon,
+  SettingsIcon,
+  TrashIcon,
+} from "./icons";
 import type { DraftAttachment, DraftRecord } from "./session-store";
 import {
   classifyLoginFailure,
@@ -71,6 +81,17 @@ type AgentsFormState =
       mode: "remove";
       userId: string;
     };
+
+function isInputTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  const tag = target.tagName.toLowerCase();
+  return (
+    tag === "input" ||
+    tag === "textarea" ||
+    tag === "select" ||
+    (target as HTMLElement).isContentEditable
+  );
+}
 
 export function TopicsWorkspace({
   client,
@@ -369,6 +390,64 @@ export function TopicsWorkspace({
       window.removeEventListener("popstate", onPopState);
     };
   }, [platform]);
+
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (creating) {
+          if (quickRegisterOpen) {
+            closeQuickRegister();
+          } else {
+            closeCreateForm();
+          }
+        } else if (settingsOpen) {
+          if (agentsForm) {
+            cancelAgentsAction();
+          } else if (exitConfirmOpen) {
+            cancelExitConfirm();
+          } else {
+            closeSettings();
+          }
+        } else if (editing) {
+          closeEditForm();
+        } else if (deleteConfirmOpen) {
+          cancelDeleteConfirm();
+        }
+      } else if (
+        (event.key === "n" || event.key === "N") &&
+        (event.altKey || (!isInputTarget(event.target) && (event.metaKey || event.ctrlKey)))
+      ) {
+        if (!creating && !settingsOpen && !reauthRequiredRef.current) {
+          event.preventDefault();
+          openCreateForm();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [
+    creating,
+    quickRegisterOpen,
+    settingsOpen,
+    agentsForm,
+    exitConfirmOpen,
+    editing,
+    deleteConfirmOpen,
+  ]);
+
+  const activeRoomId = activeTopic?.roomId;
+  const currentDraftText = draftsByRoom[activeRoomId ?? ""]?.text ?? "";
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const scrollHeight = textarea.scrollHeight;
+    const clampedHeight = Math.max(38, Math.min(scrollHeight, 180));
+    textarea.style.height = `${clampedHeight}px`;
+  }, [currentDraftText, activeRoomId]);
 
   function openSettings() {
     if (anyFormSubmitting) {
@@ -2159,7 +2238,7 @@ export function TopicsWorkspace({
     }
   }
 
-  async function handleSendMessage(event: FormEvent) {
+  async function handleSendMessage(event: { preventDefault: () => void }) {
     event.preventDefault();
     if (!activeTopic || activeTopic.unavailable || persistingSendRef.current || reauthRequiredRef.current) {
       return;
@@ -2501,117 +2580,9 @@ export function TopicsWorkspace({
   const showDetail = !isNarrow || isNarrowPushed;
   const safeInset = normalizeInset(keyboardInsetBottom);
 
-  return (
-    <div
-      className="waypoint-workspace"
-      data-viewport={viewportMode}
-      style={{ "--keyboard-inset": `${safeInset}px` } as CSSProperties}
-    >
-      {showSidebar ? (
-        <aside className="waypoint-sidebar" aria-label="Topic 列表">
-          <p>已连接</p>
-          <div className="waypoint-sidebar-header">
-            <h1>Topic</h1>
-            <div className="waypoint-sidebar-actions">
-              <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
-                新建 Topic
-              </button>
-              <button type="button" onClick={openSettings}>
-                设置
-              </button>
-            </div>
-          </div>
-          {reauthRequired && !showDetail ? renderReauthBanner() : null}
-          {topics.length === 0 ? (
-            <p>暂无 Topic</p>
-          ) : (
-            <ul className="waypoint-topic-list">
-              {topics.map((topic) => (
-                <li key={topic.roomId}>
-                  <button
-                    type="button"
-                    aria-label={topic.name}
-                    className={[
-                      "waypoint-topic-row",
-                      topic.roomId === activeTopic?.roomId ? "active" : "",
-                      topic.unavailable ? "unavailable" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    data-unread={topic.unread ? "true" : undefined}
-                    data-pinned={topic.pinned ? "true" : undefined}
-                    data-unavailable={topic.unavailable ? "true" : undefined}
-                    onClick={() => openTopic(topic.roomId)}
-                  >
-                    <span className="waypoint-topic-row-header">
-                      <span className="waypoint-topic-row-title">
-                        {topic.unread ? (
-                          <span className="waypoint-unread-dot" aria-hidden="true" />
-                        ) : null}
-                        <span
-                          className={
-                            topic.unread
-                              ? "waypoint-topic-name unread"
-                              : "waypoint-topic-name"
-                          }
-                          style={{ fontWeight: topic.unread ? 700 : 400 }}
-                        >
-                          {topic.name}
-                        </span>
-                        {topic.unavailable ? (
-                          <span className="waypoint-topic-row-unavailable">不可用</span>
-                        ) : null}
-                      </span>
-                      <span className="waypoint-topic-row-trailing">
-                        {topic.pinned ? (
-                          <span className="waypoint-topic-row-pin" aria-label="已置顶">
-                            置顶
-                          </span>
-                        ) : null}
-                        {topic.sendStatus === "failed" ? (
-                          <span
-                            role="img"
-                            aria-label="失败"
-                            className="waypoint-topic-row-failed"
-                          >
-                            !
-                          </span>
-                        ) : topic.sendStatus === "unconfirmed" ? (
-                          <span
-                            role="img"
-                            aria-label="未确认"
-                            className="waypoint-unconfirmed-spinner"
-                          />
-                        ) : null}
-                        {topic.lastActivityTs !== undefined ? (
-                          <span className="waypoint-topic-row-time">
-                            {formatTopicListTime(topic.lastActivityTs, nowMs)}
-                          </span>
-                        ) : null}
-                      </span>
-                    </span>
-                    {(registeredAgents.length > 1 && topic.botDisplayName) || topic.responding ? (
-                      <span className="waypoint-topic-row-secondary">
-                        {registeredAgents.length > 1 && topic.botDisplayName ? (
-                          <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
-                        ) : null}
-                        {topic.responding ? (
-                          <span className="waypoint-topic-row-responding">正在回应</span>
-                        ) : null}
-                      </span>
-                    ) : null}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
-      ) : null}
-
-      {showDetail ? (
-        <div className="waypoint-detail">
-          {settingsOpen ? (
-            <section aria-label="设置" className="waypoint-dialog">
+  function renderSettingsDialog(isModal: boolean) {
+    return (
+<section aria-label="设置" className={isModal ? "waypoint-dialog waypoint-modal" : "waypoint-dialog"} role="region" aria-modal={isModal ? "true" : undefined} onClick={isModal ? (event) => event.stopPropagation() : undefined}>
               {isNarrow ? (
                 <div className="waypoint-topic-header">
                   <div className="waypoint-topic-header-bar">
@@ -2621,6 +2592,7 @@ export function TopicsWorkspace({
                       disabled={agentsSubmitting || exiting}
                       onClick={goBack}
                     >
+                      <BackIcon aria-hidden="true" size={14} />
                       返回
                     </button>
                     <div className="waypoint-topic-header-main">
@@ -2638,6 +2610,7 @@ export function TopicsWorkspace({
                   <div className="waypoint-settings-header">
                     <h2>设置</h2>
                     <button type="button" disabled={agentsSubmitting || exiting} onClick={closeSettings}>
+                      <CloseIcon aria-hidden="true" size={14} />
                       关闭
                     </button>
                   </div>
@@ -2804,8 +2777,12 @@ export function TopicsWorkspace({
                 </section>
               </div>
             </section>
-          ) : creating ? (
-            <section aria-label="新建 Topic" className="waypoint-dialog">
+    );
+  }
+
+  function renderCreateDialog(isModal: boolean) {
+    return (
+<section aria-label="新建 Topic" className={isModal ? "waypoint-dialog waypoint-modal" : "waypoint-dialog"} role="region" aria-modal={isModal ? "true" : undefined} onClick={isModal ? (event) => event.stopPropagation() : undefined}>
               {isNarrow ? (
                 <div className="waypoint-topic-header">
                   <div className="waypoint-topic-header-bar">
@@ -2815,6 +2792,7 @@ export function TopicsWorkspace({
                       disabled={submitting || quickSubmitting}
                       onClick={goBack}
                     >
+                      <BackIcon aria-hidden="true" size={14} />
                       返回
                     </button>
                     <div className="waypoint-topic-header-main">
@@ -2933,8 +2911,13 @@ export function TopicsWorkspace({
                 </form>
               </div>
             </section>
-          ) : activeTopic ? (
-            <div className="waypoint-topic-view">
+    );
+  }
+
+  function renderTopicView() {
+    if (!activeTopic) return null;
+    return (
+<div className="waypoint-topic-view">
               <header className="waypoint-topic-header">
                 <div className="waypoint-topic-header-bar">
                   {isNarrow ? (
@@ -2944,6 +2927,7 @@ export function TopicsWorkspace({
                       disabled={(editing && editSubmitting) || deleting}
                       onClick={goBack}
                     >
+                      <BackIcon aria-hidden="true" size={14} />
                       返回
                     </button>
                   ) : null}
@@ -2966,7 +2950,7 @@ export function TopicsWorkspace({
                     aria-pressed={activeTopic.pinned}
                     onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
                   >
-                    {activeTopic.pinned ? "取消置顶" : "置顶"}
+                    <PinIcon aria-hidden="true" size={13} /> {activeTopic.pinned ? "取消置顶" : "置顶"}
                   </button>
                   <button
                     type="button"
@@ -2974,6 +2958,7 @@ export function TopicsWorkspace({
                     disabled={editing || deleteConfirmOpen || deleting}
                     onClick={openEditForm}
                   >
+                    <EditIcon aria-hidden="true" size={13} />
                     编辑
                   </button>
                   <button
@@ -2982,6 +2967,7 @@ export function TopicsWorkspace({
                     disabled={editing || deleteConfirmOpen || deleting}
                     onClick={openDeleteConfirm}
                   >
+                    <TrashIcon aria-hidden="true" size={13} />
                     删除
                   </button>
                 </div>
@@ -3000,7 +2986,7 @@ export function TopicsWorkspace({
                   </button>
                 ) : null}
               </header>
-              {reauthRequired ? renderReauthBanner() : null}
+              {reauthRequired && !settingsOpen && !creating ? renderReauthBanner() : null}
               {activeTopic.unavailable && activeTopic.unavailableReason ? (
                 <div
                   role="status"
@@ -3381,6 +3367,7 @@ export function TopicsWorkspace({
                     ) : null}
                     <form className="waypoint-composer" onSubmit={handleSendMessage}>
                       <label className="waypoint-attach-button">
+                        <PaperclipIcon aria-hidden="true" size={14} />
                         附件
                         <input
                           type="file"
@@ -3396,6 +3383,8 @@ export function TopicsWorkspace({
                         />
                       </label>
                       <textarea
+                        ref={composerTextareaRef}
+                        rows={1}
                         aria-label="输入消息"
                         name="message"
                         disabled={persistingSend || activeTopic.unavailable || reauthRequired}
@@ -3404,6 +3393,17 @@ export function TopicsWorkspace({
                         }
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
+                        onKeyDown={(event) => {
+                          if (
+                            event.key === "Enter" &&
+                            !event.shiftKey &&
+                            !event.nativeEvent.isComposing &&
+                            viewportMode !== "narrow"
+                          ) {
+                            event.preventDefault();
+                            void handleSendMessage(event);
+                          }
+                        }}
                         onPaste={(event) => {
                           if (!supportsFileDropAndPaste) {
                             return;
@@ -3430,19 +3430,171 @@ export function TopicsWorkspace({
                 </main>
               )}
             </div>
+    );
+  }
+
+  function renderEmptyDetail() {
+    return (
+      <>
+        {reauthRequired && !settingsOpen && !creating ? renderReauthBanner() : null}
+        <section aria-label="Topic 引导" className="waypoint-empty-detail">
+          <div className="waypoint-empty-card">
+            <p>
+              {topics.length === 0
+                ? "还没有 Topic，新建一条 Topic 开始交流。"
+                : "选择一条 Topic，或新建一条 Topic 开始交流。"}
+            </p>
+            <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
+              <PlusIcon aria-hidden="true" size={14} />
+              新建一条 Topic
+            </button>
+            <div className="waypoint-empty-shortcut-hint">
+              快捷键 <kbd className="waypoint-kbd-hint">Alt + N</kbd>
+            </div>
+          </div>
+        </section>
+      </>
+    );
+  }
+  return (
+    <div
+      className="waypoint-workspace"
+      data-viewport={viewportMode}
+      style={{ "--keyboard-inset": `${safeInset}px` } as CSSProperties}
+    >
+      {showSidebar ? (
+        <aside className="waypoint-sidebar" aria-label="Topic 列表">
+          <p>已连接</p>
+          <div className="waypoint-sidebar-header">
+            <h1>Topic</h1>
+            <div className="waypoint-sidebar-actions">
+              <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
+                <PlusIcon aria-hidden="true" size={13} />
+                新建 Topic
+              </button>
+              <button type="button" onClick={openSettings}>
+                <SettingsIcon aria-hidden="true" size={13} />
+                设置
+              </button>
+            </div>
+          </div>
+          {reauthRequired && !showDetail ? renderReauthBanner() : null}
+          {topics.length === 0 ? (
+            <p>暂无 Topic</p>
+          ) : (
+            <ul className="waypoint-topic-list">
+              {topics.map((topic) => (
+                <li key={topic.roomId}>
+                  <button
+                    type="button"
+                    aria-label={topic.name}
+                    className={[
+                      "waypoint-topic-row",
+                      topic.roomId === activeTopic?.roomId ? "active" : "",
+                      topic.unavailable ? "unavailable" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                    data-unread={topic.unread ? "true" : undefined}
+                    data-pinned={topic.pinned ? "true" : undefined}
+                    data-unavailable={topic.unavailable ? "true" : undefined}
+                    onClick={() => openTopic(topic.roomId)}
+                  >
+                    <span className="waypoint-topic-row-header">
+                      <span className="waypoint-topic-row-title">
+                        {topic.unread ? (
+                          <span className="waypoint-unread-dot" aria-hidden="true" />
+                        ) : null}
+                        <span
+                          className={
+                            topic.unread
+                              ? "waypoint-topic-name unread"
+                              : "waypoint-topic-name"
+                          }
+                          style={{ fontWeight: topic.unread ? 700 : 400 }}
+                        >
+                          {topic.name}
+                        </span>
+                        {topic.unavailable ? (
+                          <span className="waypoint-topic-row-unavailable">不可用</span>
+                        ) : null}
+                      </span>
+                      <span className="waypoint-topic-row-trailing">
+                        {topic.pinned ? (
+                          <span className="waypoint-topic-row-pin" aria-label="已置顶">
+                            <PinIcon aria-hidden="true" size={11} />
+                            置顶
+                          </span>
+                        ) : null}
+                        {topic.sendStatus === "failed" ? (
+                          <span
+                            role="img"
+                            aria-label="失败"
+                            className="waypoint-topic-row-failed"
+                          >
+                            !
+                          </span>
+                        ) : topic.sendStatus === "unconfirmed" ? (
+                          <span
+                            role="img"
+                            aria-label="未确认"
+                            className="waypoint-unconfirmed-spinner"
+                          />
+                        ) : null}
+                        {topic.lastActivityTs !== undefined ? (
+                          <span className="waypoint-topic-row-time">
+                            {formatTopicListTime(topic.lastActivityTs, nowMs)}
+                          </span>
+                        ) : null}
+                      </span>
+                    </span>
+                    {(registeredAgents.length > 1 && topic.botDisplayName) || topic.responding ? (
+                      <span className="waypoint-topic-row-secondary">
+                        {registeredAgents.length > 1 && topic.botDisplayName ? (
+                          <span className="waypoint-topic-row-bot">{topic.botDisplayName}</span>
+                        ) : null}
+                        {topic.responding ? (
+                          <span className="waypoint-topic-row-responding">正在回应</span>
+                        ) : null}
+                      </span>
+                    ) : null}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+      ) : null}
+
+      {showDetail ? (
+        <div className="waypoint-detail">
+          {isNarrow ? (
+            settingsOpen ? (
+              renderSettingsDialog(false)
+            ) : creating ? (
+              renderCreateDialog(false)
+            ) : activeTopic ? (
+              renderTopicView()
+            ) : (
+              renderEmptyDetail()
+            )
           ) : (
             <>
-              {reauthRequired ? renderReauthBanner() : null}
-              <section aria-label="Topic 引导" className="waypoint-empty-detail">
-                <p>
-                  {topics.length === 0
-                    ? "还没有 Topic，新建一条 Topic 开始交流。"
-                    : "选择一条 Topic，或新建一条 Topic 开始交流。"}
-                </p>
-                <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
-                  新建一条 Topic
-                </button>
-              </section>
+              <div
+                style={{ display: "contents" }}
+                aria-hidden={settingsOpen || creating ? "true" : undefined}
+              >
+                {activeTopic ? renderTopicView() : renderEmptyDetail()}
+              </div>
+              {settingsOpen ? (
+                <div className="waypoint-modal-backdrop" onClick={closeSettings}>
+                  {renderSettingsDialog(true)}
+                </div>
+              ) : creating ? (
+                <div className="waypoint-modal-backdrop" onClick={closeCreateForm}>
+                  {renderCreateDialog(true)}
+                </div>
+              ) : null}
             </>
           )}
         </div>

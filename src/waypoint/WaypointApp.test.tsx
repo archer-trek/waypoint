@@ -21051,3 +21051,201 @@ test("已进入 Topic 列表后刷新重开，不等下一次 sync 完成就立�
   await user.click(screen.getByRole("button", { name: /本地缓存话题/ }));
   expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("缓存里的消息");
 });
+
+
+test("桌面宽视口下通过 Esc 键与点击毛玻璃遮罩关闭「新建 Topic」与「设置」模态弹窗，保持底层对话上下文连贯 (#81)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!desktop-modal:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "模态弹窗话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "-modal-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 2000,
+                      content: { msgtype: "m.text", body: "底层阅读上下文消息" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  await user.click(await screen.findByRole("button", { name: "模态弹窗话题" }));
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("底层阅读上下文消息");
+
+  // 打开「新建 Topic」：弹出居中模态弹窗，底层内容保持挂载
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  const createModal = screen.getByRole("region", { name: "新建 Topic" });
+  expect(createModal).toBeVisible();
+  expect(createModal).toHaveAttribute("aria-modal", "true");
+  expect(document.querySelector(".waypoint-modal-backdrop")).not.toBeNull();
+
+  // 按 Esc 键关闭新建弹窗，底层上下文保持可见
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("底层阅读上下文消息");
+
+  // 再次打开并点击遮罩外部关闭
+  await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  fireEvent.click(document.querySelector(".waypoint-modal-backdrop")!);
+  expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+
+  // 打开「设置」：弹出居中模态弹窗
+  await user.click(screen.getByRole("button", { name: "设置" }));
+  const settingsModal = screen.getByRole("region", { name: "设置" });
+  expect(settingsModal).toBeVisible();
+  expect(settingsModal).toHaveAttribute("aria-modal", "true");
+
+  // 按 Esc 键退出设置
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("region", { name: "设置" })).not.toBeInTheDocument();
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("底层阅读上下文消息");
+});
+
+test("桌面端回车直接发送消息，且未选 Topic 时展示 Muse 式引导卡与 Alt+N 快捷键提示并支持快捷键触发新建 (#81)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sendCalls: Array<{ url: string; body: unknown }> = [];
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!enter-send:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "回车发送话题" } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.url.includes("/send/")) {
+      sendCalls.push({ url: input.url, body: typeof input.body === "string" ? JSON.parse(input.body) : input.body });
+      return {
+        type: "response",
+        status: 200,
+        body: { event_id: `-sent-${sendCalls.length}` },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  // 未选 Topic 时展示 Muse 式引导卡与快捷键提示
+  const emptyGuide = await screen.findByRole("region", { name: "Topic 引导" });
+  expect(emptyGuide).toHaveTextContent("Alt + N");
+  expect(within(emptyGuide).getByRole("button", { name: "新建一条 Topic" })).toBeInTheDocument();
+
+  // 触发 Alt+N 快捷键打开新建 Topic 弹窗
+  fireEvent.keyDown(window, { key: "n", altKey: true });
+  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  fireEvent.keyDown(window, { key: "Escape" });
+  expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+
+  // 进入话题输入消息：Enter 直接发送
+  await user.click(screen.getByRole("button", { name: "回车发送话题" }));
+  const inputEl = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(inputEl, "回车直接发出");
+  fireEvent.keyDown(inputEl, { key: "Enter", code: "Enter" });
+
+  await waitFor(() => {
+    expect(sendCalls.length).toBe(1);
+    expect((sendCalls[0]?.body as { body?: string })?.body).toBe("回车直接发出");
+  });
+
+  // Shift + Enter 不发送消息
+  await user.type(inputEl, "第二条消息");
+  fireEvent.keyDown(inputEl, { key: "Enter", code: "Enter", shiftKey: true });
+  expect(sendCalls.length).toBe(1);
+});
+
+test("CSS Design Tokens 验证：包含素纸与夜读语义变量定义，无未声明硬编码色值 (#81)", async () => {
+  // @ts-expect-error Node.js built-in fs in Vitest test runner
+  const { readFileSync } = await import("node:fs");
+  // @ts-expect-error Node.js built-in path in Vitest test runner
+  const { resolve } = await import("node:path");
+  const css = readFileSync(resolve((globalThis as unknown as { process: { cwd: () => string } }).process.cwd(), "src/App.css"), "utf-8");
+
+  // 验证关键语义 Token 声明
+  const requiredTokens = [
+    "--bg",
+    "--sidebar",
+    "--header",
+    "--ink",
+    "--muted",
+    "--line",
+    "--accent",
+    "--owner-bg",
+    "--owner-ink",
+    "--code-bg",
+    "--danger",
+    "--warn-bg",
+  ];
+  for (const token of requiredTokens) {
+    expect(css).toContain(`${token}:`);
+  }
+
+  // 验证 prefers-color-scheme: dark 声明
+  expect(css).toContain("@media (prefers-color-scheme: dark)");
+
+  // 验证规则体内无硬编码十六进制色值（仅允许在变量定义区出现）
+  const lines = css.split(String.fromCharCode(10));
+  let insideTokens = false;
+  const offendingLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.includes(":root {") || line.includes("prefers-color-scheme: dark")) {
+      insideTokens = true;
+    }
+    if (insideTokens && line.trim() === "}") {
+      insideTokens = false;
+    }
+    if (!insideTokens && /#[0-9a-fA-F]{3,6}/.test(line)) {
+      offendingLines.push(line.trim());
+    }
+  }
+  expect(offendingLines).toEqual([]);
+});
