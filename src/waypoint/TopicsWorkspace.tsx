@@ -170,6 +170,9 @@ export function TopicsWorkspace({
   const [openFailedMenuId, setOpenFailedMenuId] = useState<string | null>(null);
   const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
   const [showScrollBottomFab, setShowScrollBottomFab] = useState(false);
+  const [composerMultiline, setComposerMultiline] = useState(false);
+  const overflowMenuRef = useRef<HTMLDivElement | null>(null);
+  const composerFormRef = useRef<HTMLFormElement | null>(null);
   const resendingLocalIdsRef = useRef(new Set<string>());
   const discardingLocalIdsRef = useRef(new Set<string>());
   const visibleComposerRoomRef = useRef<string | null>(null);
@@ -447,13 +450,59 @@ export function TopicsWorkspace({
   const currentDraftText = draftsByRoom[activeRoomId ?? ""]?.text ?? "";
 
   useEffect(() => {
+    if (normalizeInset(keyboardInsetBottom) > 0) {
+      setOverflowMenuOpen(false);
+    }
+  }, [keyboardInsetBottom]);
+
+  useEffect(() => {
+    if (!overflowMenuOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      const root = overflowMenuRef.current;
+      if (root && event.target instanceof Node && root.contains(event.target)) {
+        return;
+      }
+      setOverflowMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [overflowMenuOpen]);
+
+  useEffect(() => {
     const textarea = composerTextareaRef.current;
+    const form = composerFormRef.current;
     if (!textarea) return;
+    const style = getComputedStyle(textarea);
+    const line = Number.parseFloat(style.lineHeight) || 22;
+    const maxHeight = line * 4;
+    const textValue = currentDraftText;
+    let exceeds = textValue.includes("\n");
+    if (!exceeds && textValue.length > 0 && form) {
+      const probe = document.createElement("span");
+      probe.style.position = "absolute";
+      probe.style.visibility = "hidden";
+      probe.style.whiteSpace = "pre";
+      probe.style.font = style.font;
+      probe.textContent = textValue;
+      document.body.appendChild(probe);
+      const textWidth = probe.getBoundingClientRect().width;
+      probe.remove();
+      const formStyle = getComputedStyle(form);
+      const padX =
+        (Number.parseFloat(formStyle.paddingLeft) || 0) +
+        (Number.parseFloat(formStyle.paddingRight) || 0);
+      const available = form.clientWidth - padX - 32 - 32 - 8 - 8 - 12;
+      exceeds = textWidth > Math.max(available, 48);
+    }
+    setComposerMultiline(exceeds);
     textarea.style.height = "auto";
     const scrollHeight = textarea.scrollHeight;
-    const isMulti = currentDraftText.includes("\n") || scrollHeight > 34;
-    const clampedHeight = isMulti ? Math.min(scrollHeight, 180) : 24;
-    textarea.style.height = `${clampedHeight}px`;
+    const nextHeight = exceeds
+      ? Math.min(Math.max(scrollHeight, line), maxHeight)
+      : Math.max(line, 24);
+    textarea.style.height = `${nextHeight}px`;
   }, [currentDraftText, activeRoomId]);
 
   function openSettings() {
@@ -2948,28 +2997,23 @@ export function TopicsWorkspace({
                   ) : null}
                   <div className="waypoint-topic-header-main">
                     <h2>{activeTopic.name}</h2>
-                    <div className="waypoint-topic-header-sub">
-                      {activeTopic.botDisplayName ? (
-                        <span className="waypoint-topic-header-bot">{activeTopic.botDisplayName}</span>
-                      ) : null}
-                      {activeTopic.description ? (
-                        <button
-                          type="button"
-                          className={
-                            descriptionExpanded
-                              ? "waypoint-topic-description expanded"
-                              : "waypoint-topic-description"
-                          }
-                          aria-expanded={descriptionExpanded}
-                          onClick={() => setDescriptionExpanded((expanded) => !expanded)}
-                        >
-                          {activeTopic.description}
-                        </button>
-                      ) : null}
-                    </div>
+                    {activeTopic.description ? (
+                      <button
+                        type="button"
+                        className={
+                          descriptionExpanded
+                            ? "waypoint-topic-description expanded"
+                            : "waypoint-topic-description"
+                        }
+                        aria-expanded={descriptionExpanded}
+                        onClick={() => setDescriptionExpanded((expanded) => !expanded)}
+                      >
+                        {activeTopic.description}
+                      </button>
+                    ) : null}
                   </div>
                   <div className="waypoint-header-actions-group">
-                    <div className="waypoint-overflow-wrapper">
+                    <div className="waypoint-overflow-wrapper" ref={overflowMenuRef}>
                       <button
                         type="button"
                         aria-label="话题操作"
@@ -3407,20 +3451,20 @@ export function TopicsWorkspace({
                       ),
                     )}
                   </div>
-                  {showScrollBottomFab ? (
-                    <button
-                      type="button"
-                      aria-label="回到底部"
-                      className="waypoint-scroll-bottom-fab"
-                      onClick={scrollToBottom}
-                    >
-                      <ArrowDownIcon aria-hidden="true" size={18} />
-                    </button>
-                  ) : null}
                   <div
                     className="waypoint-composer-safe-area"
                     data-keyboard-inset={safeInset}
                   >
+                    {showScrollBottomFab && safeInset === 0 && !composerMultiline ? (
+                      <button
+                        type="button"
+                        aria-label="回到底部"
+                        className="waypoint-scroll-bottom-fab"
+                        onClick={scrollToBottom}
+                      >
+                        <ArrowDownIcon aria-hidden="true" size={18} />
+                      </button>
+                    ) : null}
                     {composerError ? <p role="alert">{composerError}</p> : null}
                     {draftsByRoom[activeTopic.roomId]?.attachment ? (
                       <div
@@ -3467,7 +3511,11 @@ export function TopicsWorkspace({
                         </ul>
                       </div>
                     ) : null}
-                    <form className={`waypoint-composer${(draftsByRoom[activeTopic.roomId]?.text ?? "").includes("\n") ? " multiline" : ""}`} onSubmit={handleSendMessage}>
+                    <form
+                      ref={composerFormRef}
+                      className={`waypoint-composer${composerMultiline ? " multiline" : ""}`}
+                      onSubmit={handleSendMessage}
+                    >
                       <label className="waypoint-attach-button">
                         <PlusIcon aria-hidden="true" size={16} />
                         <span className="waypoint-attach-button-text">附件</span>
@@ -3490,8 +3538,8 @@ export function TopicsWorkspace({
                         name="message"
                         rows={1}
                         disabled={persistingSend || activeTopic.unavailable || reauthRequired}
-                        placeholder={activeTopic.unavailable ? "Topic 不可用，无法发送消息" : undefined}
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
+                        onFocus={() => setOverflowMenuOpen(false)}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
                         onKeyDown={(event) => {
                           if (
