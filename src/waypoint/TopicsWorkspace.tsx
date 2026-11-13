@@ -1359,6 +1359,13 @@ export function TopicsWorkspace({
     }
     return () => {
       mountedRef.current = false;
+      // StrictMode remounts this effect while the first sync is still in flight.
+      // Drop that generation so the restarted effect can sync again; otherwise
+      // the aborted call keeps the in-flight flag and the list never refreshes.
+      syncEpochRef.current += 1;
+      syncRunIdRef.current += 1;
+      syncInFlightRef.current = false;
+      syncWakePendingRef.current = false;
       syncAbortControllerRef.current?.abort();
       syncAbortControllerRef.current = null;
       clearSyncTimer();

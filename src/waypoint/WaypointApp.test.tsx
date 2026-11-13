@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
@@ -1202,6 +1203,85 @@ function deferred<T>() {
 const validAgents = {
   events: [{ type: "im.waypoint.agents", content: { agents: [{ user_id: "@bot:example.com" }] } }],
 };
+
+test("开发模式重挂载中止已有游标的前台同步后，仍会再同步并刷新列表", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let phase: "login" | "restore" = "login";
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (!input.url.includes("/sync")) {
+      throw new Error(input.url);
+    }
+    if (phase === "login") {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    {
+                      type: "im.waypoint.topic",
+                      state_key: "",
+                      content: { v: 1, agent_user_id: "@bot:example.com" },
+                    },
+                    { type: "m.room.name", state_key: "", content: { name: "旧话题" } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    await Promise.resolve();
+    if (input.signal?.aborted) {
+      return new Promise(() => {});
+    }
+    return {
+      type: "response",
+      status: 200,
+      body: {
+        next_batch: "batch-2",
+        rooms: {
+          join: {
+            "!t1:example.com": {
+              state: {
+                events: [{ type: "m.room.name", state_key: "", content: { name: "刷新后的话题" } }],
+              },
+            },
+          },
+        },
+      },
+    };
+  });
+
+  const first = renderApp(homeserver);
+  await login(user);
+  expect(await screen.findByRole("button", { name: "旧话题" })).toBeInTheDocument();
+  first.unmount();
+
+  phase = "restore";
+  const clock = new ManualClock();
+  render(
+    <StrictMode>
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{ deviceDisplayName: "Waypoint macOS" }}
+        clock={clock}
+      />
+    </StrictMode>,
+  );
+
+  expect(await screen.findByRole("button", { name: "刷新后的话题" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "旧话题" })).not.toBeInTheDocument();
+});
+
 
 test("增量同步只有别的 account data 时，仍留在 Topic 列表", async () => {
   const user = userEvent.setup();
