@@ -3618,15 +3618,28 @@ export function TopicsWorkspace({
         <aside className="waypoint-sidebar" aria-label="Topic 列表">
           <p className="sr-only">已连接</p>
           <div className="waypoint-sidebar-header" data-tauri-drag-region>
-            <h1>Topic</h1>
-            <div className="waypoint-sidebar-actions">
-              <button type="button" disabled={reauthRequired} onClick={openCreateForm}>
-                <PlusIcon aria-hidden="true" size={13} />
-                新建 Topic
+            <h1 className="sr-only">Topic</h1>
+            <div className="waypoint-sidebar-header-left">
+              <button
+                type="button"
+                className="waypoint-sidebar-icon-btn"
+                aria-label="设置"
+                onClick={openSettings}
+              >
+                <SettingsIcon aria-hidden="true" size={18} />
+                <span className="sr-only">设置</span>
               </button>
-              <button type="button" onClick={openSettings}>
-                <SettingsIcon aria-hidden="true" size={13} />
-                设置
+            </div>
+            <div className="waypoint-sidebar-header-right">
+              <button
+                type="button"
+                className="waypoint-sidebar-icon-btn waypoint-create-topic-btn"
+                disabled={reauthRequired}
+                aria-label="新建 Topic"
+                onClick={openCreateForm}
+              >
+                <PlusIcon aria-hidden="true" size={18} />
+                <span className="sr-only">新建 Topic</span>
               </button>
             </div>
           </div>
