@@ -1,23 +1,23 @@
 :root {
-  --bg: #f7f6f2;
-  --bg-subtle: #f0eee6;
-  --sidebar: #f2f0ea;
-  --header: rgba(247, 246, 242, 0.92);
+  --bg: #f8f7f4;
+  --bg-subtle: #f1efe8;
+  --sidebar: #f3f1ea;
+  --header: rgba(248, 247, 244, 0.92);
   --card: #ffffff;
   --card-subtle: #f9f8f5;
-  --ink: #1a1a1a;
-  --ink-secondary: #4a5056;
-  --muted: #747b84;
-  --line: #dedad0;
+  --ink: #1a1c1e;
+  --ink-secondary: #4a5058;
+  --muted: #747b85;
+  --line: #ddd9cf;
   --line-subtle: #eae7df;
   --accent: #1e429f;
-  --accent-hover: #1a367d;
+  --accent-hover: #173377;
   --accent-ink: #ffffff;
-  --accent-subtle: #ebf4ff;
-  --owner-bg: #1f2937;
-  --owner-ink: #f9fafb;
-  --code-bg: #f3f1ec;
-  --code-header-bg: #eae7df;
+  --accent-subtle: #eff4fc;
+  --owner-bg: #1e2530;
+  --owner-ink: #f8fafc;
+  --code-bg: #f3f1eb;
+  --code-header-bg: #eae6dd;
   --code-body-bg: #ffffff;
   --danger: #dc2626;
   --danger-bg: #fef2f2;
@@ -25,6 +25,7 @@
   --warn-bg: #fef3c7;
   --warn-ink: #92400e;
   --warn-border: #fde68a;
+  --pinned-accent: #d97706;
   --modal-backdrop: rgba(15, 23, 42, 0.45);
   --modal-bg: rgba(255, 255, 255, 0.96);
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "SF Pro Text", "SF Pro", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
@@ -46,34 +47,35 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #131518;
-    --bg-subtle: #191c20;
-    --sidebar: #17191d;
-    --header: rgba(19, 21, 24, 0.92);
-    --card: #1c2026;
-    --card-subtle: #22262d;
-    --ink: #e5e7eb;
-    --ink-secondary: #9ca3af;
-    --muted: #6b7280;
-    --line: #2b2f36;
-    --line-subtle: #22262c;
-    --accent: #e08c2a;
-    --accent-hover: #f59e0b;
-    --accent-ink: #000000;
-    --accent-subtle: rgba(224, 140, 42, 0.15);
-    --owner-bg: #282e38;
-    --owner-ink: #f3f4f6;
-    --code-bg: #0d0f12;
-    --code-header-bg: #16191f;
-    --code-body-bg: #0f1115;
-    --danger: #ef4444;
-    --danger-bg: #381414;
+    --bg: #16181d;
+    --bg-subtle: #1e222a;
+    --sidebar: #131518;
+    --header: rgba(22, 24, 29, 0.92);
+    --card: #1f232b;
+    --card-subtle: #262b35;
+    --ink: #eaedf1;
+    --ink-secondary: #9da3b0;
+    --muted: #6f7684;
+    --line: #2b303c;
+    --line-subtle: #222630;
+    --accent: #e5933a;
+    --accent-hover: #f0a04b;
+    --accent-ink: #16120a;
+    --accent-subtle: rgba(229, 147, 58, 0.14);
+    --owner-bg: #2b3240;
+    --owner-ink: #f3f5f8;
+    --code-bg: #1d2129;
+    --code-header-bg: #242933;
+    --code-body-bg: #171920;
+    --danger: #f87171;
+    --danger-bg: #371717;
     --danger-border: #7f1d1d;
-    --warn-bg: #281e11;
+    --warn-bg: #2a2214;
     --warn-ink: #fbbf24;
-    --warn-border: #543b17;
-    --modal-backdrop: rgba(0, 0, 0, 0.72);
-    --modal-bg: rgba(25, 28, 34, 0.96);
+    --warn-border: #523e1c;
+    --pinned-accent: #f59e0b;
+    --modal-backdrop: rgba(0, 0, 0, 0.75);
+    --modal-bg: rgba(29, 33, 41, 0.96);
     --sdm-bg: transparent;
     --sdm-fg: var(--ink);
   }
@@ -292,8 +294,11 @@ main {
 }
 
 .waypoint-topic-row-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
   font-size: 0.6875rem;
-  padding: 0.0625rem 0.25rem;
+  padding: 0.0625rem 0.3rem;
   border-radius: var(--radius-sm);
   background: var(--line-subtle);
   color: var(--ink-secondary);
@@ -351,7 +356,7 @@ main {
 .waypoint-topic-header-bar {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
+  gap: 0.5rem;
   height: 44px;
   min-height: 44px;
   max-height: 44px;
@@ -369,7 +374,7 @@ main {
 
 .waypoint-topic-header-main h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 600;
   color: var(--ink);
   overflow: hidden;
@@ -398,15 +403,17 @@ main {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  height: 1.75rem;
-  padding: 0 0.5rem;
+  height: 1.85rem;
+  padding: 0 0.55rem;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--ink-secondary);
   font-size: 0.8125rem;
+  font-weight: 500;
   cursor: pointer;
   transition: all 0.15s ease;
+  white-space: nowrap;
 }
 
 .waypoint-topic-pin-button:hover,
@@ -414,39 +421,64 @@ main {
 .waypoint-topic-delete-button:hover,
 .waypoint-back-button:hover {
   background: var(--bg-subtle);
-  border-color: var(--line);
+  border-color: var(--line-subtle);
   color: var(--ink);
 }
 
 .waypoint-topic-pin-button[aria-pressed="true"] {
-  color: var(--accent);
-  background: var(--accent-subtle);
-  border-color: transparent;
+  color: var(--pinned-accent);
+  border-color: rgba(245, 158, 11, 0.25);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+/* Narrow View Header Optimization: keep title readable */
+.waypoint-workspace[data-viewport="narrow"] .waypoint-topic-header-bar {
+  padding: 0 0.65rem;
+  gap: 0.35rem;
+}
+
+.waypoint-workspace[data-viewport="narrow"] .waypoint-topic-header-bar button {
+  padding: 0 0.45rem;
+  font-size: 0.75rem;
+}
+
+@media (max-width: 480px) {
+  .waypoint-topic-header-bar .waypoint-btn-text {
+    display: none;
+  }
+  .waypoint-topic-header-bar button {
+    padding: 0 0.4rem;
+    min-width: 1.85rem;
+    justify-content: center;
+  }
 }
 
 /* Description sticky beneath header */
 .waypoint-topic-description {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   width: 100%;
   text-align: left;
-  background: var(--bg);
+  background: var(--bg-subtle);
   border: none;
-  border-bottom: 1px solid var(--line-subtle);
+  border-bottom: 1px solid var(--line);
   padding: 0.35rem 1rem 0.45rem;
   margin: 0;
   color: var(--muted);
   font-size: 0.8125rem;
+  line-height: 1.4;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   box-sizing: border-box;
-  transition: background-color 0.15s ease;
+  transition: all 0.15s ease;
 }
 
 .waypoint-topic-description:hover {
-  background: var(--bg-subtle);
+  background: var(--line-subtle);
   color: var(--ink);
 }
 
@@ -493,7 +525,17 @@ main {
   padding: 1.25rem 1.5rem;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 1.125rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.waypoint-timeline::-webkit-scrollbar {
+  width: 6px;
+}
+.waypoint-timeline::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--radius-pill);
 }
 
 .waypoint-day-separator {
@@ -600,7 +642,8 @@ main {
 }
 
 .waypoint-message-row.right .waypoint-bubble a {
-  color: inherit; text-decoration: underline;
+  color: inherit;
+  text-decoration: underline;
 }
 
 .waypoint-message-reactions {
@@ -646,7 +689,7 @@ main {
   }
 }
 
-/* Code Blocks & Tables */
+/* Headings & Document Typography inside Markdown */
 .waypoint-markdown {
   min-width: 0;
   white-space: normal;
@@ -658,6 +701,48 @@ main {
 
 .waypoint-markdown > *:last-child {
   margin-bottom: 0;
+}
+
+.waypoint-markdown h1,
+.waypoint-markdown h2,
+.waypoint-markdown h3,
+.waypoint-markdown h4 {
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.4;
+  margin-top: 1.4rem;
+  margin-bottom: 0.6rem;
+  letter-spacing: -0.01em;
+}
+
+.waypoint-markdown h1 { font-size: 1.35rem; }
+.waypoint-markdown h2 { font-size: 1.2rem; }
+.waypoint-markdown h3 { font-size: 1.05rem; }
+.waypoint-markdown h4 { font-size: 0.95rem; }
+
+.waypoint-markdown [data-streamdown="ordered-list"],
+.waypoint-markdown [data-streamdown="unordered-list"] {
+  margin: 0.65rem 0;
+  padding-left: 1.45rem;
+  line-height: 1.65;
+  color: var(--ink);
+}
+
+.waypoint-markdown li {
+  margin: 0.35rem 0;
+}
+
+.waypoint-markdown li > [data-streamdown="ordered-list"],
+.waypoint-markdown li > [data-streamdown="unordered-list"] {
+  margin: 0.25rem 0;
+}
+
+.waypoint-markdown hr,
+hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.5rem 0;
+  opacity: 0.5;
 }
 
 .waypoint-md-p {
@@ -675,7 +760,7 @@ main {
 }
 
 .waypoint-markdown [data-streamdown="inline-code"] {
-  padding: 0.1rem 0.35rem;
+  padding: 0.125rem 0.35rem;
   border-radius: var(--radius-sm);
   background: rgba(125, 125, 125, 0.14);
   font-family: var(--font-mono);
@@ -687,9 +772,10 @@ main {
   color: var(--owner-ink);
 }
 
+/* Code Blocks */
 .waypoint-markdown [data-streamdown="code-block"] {
   position: relative;
-  margin: 0.85rem 0;
+  margin: 1rem 0;
   max-width: 100%;
   min-width: 0;
   border: 1px solid var(--line);
@@ -697,18 +783,19 @@ main {
   background: var(--code-bg);
   box-sizing: border-box;
   overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .waypoint-markdown [data-streamdown="code-block-header"] {
   display: flex;
   align-items: center;
-  min-height: 1.85rem;
-  padding: 0.25rem 3.5rem 0.25rem 0.75rem;
+  min-height: 2rem;
+  padding: 0.35rem 3.5rem 0.35rem 0.85rem;
   font-family: var(--font-mono);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   color: var(--muted);
   background: var(--code-header-bg);
   border-bottom: 1px solid var(--line);
@@ -716,9 +803,9 @@ main {
 
 .waypoint-markdown [data-streamdown="code-block-actions"] {
   position: absolute;
-  top: 0.25rem;
-  right: 0.375rem;
-  z-index: 1;
+  top: 0.3rem;
+  right: 0.4rem;
+  z-index: 2;
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -726,23 +813,27 @@ main {
 
 .waypoint-markdown [data-streamdown="code-block-copy-button"] {
   margin-top: 0;
-  padding: 0.2rem 0.5rem;
+  padding: 0.25rem 0.55rem;
+  height: 1.65rem;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--card);
   color: var(--ink-secondary);
   font-size: 0.75rem;
+  font-weight: 500;
   font-family: var(--font-sans);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 0.3rem;
   transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .waypoint-markdown [data-streamdown="code-block-copy-button"]:hover {
   background: var(--bg-subtle);
   color: var(--ink);
+  border-color: var(--muted);
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"] {
@@ -750,11 +841,27 @@ main {
   overflow-y: auto;
   max-width: 100%;
   background: var(--code-body-bg);
-  padding: 0.75rem 1rem;
+  padding: 0.85rem 1rem;
   font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 13.5px;
+  line-height: 1.55;
   white-space: pre;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar {
+  height: 6px;
+  width: 6px;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: var(--radius-pill);
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"] pre {
@@ -782,8 +889,17 @@ main {
   background: var(--sdm-tbg, transparent);
 }
 
+/* CRITICAL: dark mode syntax highlighting contrast fix */
+@media (prefers-color-scheme: dark) {
+  .waypoint-markdown [data-streamdown="code-block-body"] pre code span[style] {
+    color: var(--shiki-dark, var(--sdm-c, inherit)) !important;
+    background: var(--shiki-dark-bg, var(--sdm-tbg, transparent)) !important;
+  }
+}
+
+/* Tables */
 .waypoint-markdown [data-streamdown="table-wrapper"] {
-  margin: 0.85rem 0;
+  margin: 1.25rem 0;
   max-width: 100%;
   min-width: 0;
   border: 1px solid var(--line);
@@ -791,53 +907,91 @@ main {
   background: var(--card);
   box-sizing: border-box;
   overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child {
   overflow-x: auto;
   overflow-y: auto;
   max-width: 100%;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
 }
 
 .waypoint-markdown [data-streamdown="table"] {
-  border-collapse: collapse;
-  width: max-content;
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
   min-width: 100%;
-  font-size: 13px;
+  font-size: 13.5px;
+  line-height: 1.5;
 }
 
 .waypoint-markdown [data-streamdown="table-header"] {
-  background: var(--code-header-bg);
+  background: var(--bg-subtle);
   font-weight: 600;
+}
+
+.waypoint-markdown [data-streamdown="table-header-cell"] {
+  padding: 0.65rem 0.95rem;
+  border-bottom: 1px solid var(--line);
+  border-right: 1px solid var(--line-subtle);
+  text-align: left;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.waypoint-markdown [data-streamdown="table-cell"] {
+  padding: 0.6rem 0.95rem;
+  border-bottom: 1px solid var(--line-subtle);
+  border-right: 1px solid var(--line-subtle);
+  text-align: left;
+  white-space: nowrap;
+  color: var(--ink-secondary);
+  transition: background-color 0.12s ease;
+}
+
+.waypoint-markdown [data-streamdown="table-cell"]:last-child,
+.waypoint-markdown [data-streamdown="table-header-cell"]:last-child {
+  border-right: none;
+}
+
+.waypoint-markdown [data-streamdown="table"] tr:last-child [data-streamdown="table-cell"] {
+  border-bottom: none;
+}
+
+.waypoint-markdown [data-streamdown="table"] tr:hover [data-streamdown="table-cell"] {
+  background: var(--bg-subtle);
   color: var(--ink);
 }
 
-.waypoint-markdown [data-streamdown="table-header-cell"],
-.waypoint-markdown [data-streamdown="table-cell"] {
-  padding: 0.45rem 0.75rem;
-  border: 1px solid var(--line);
-  text-align: left;
-  white-space: nowrap;
-}
-
+/* Blockquote */
 .waypoint-markdown [data-streamdown="blockquote"] {
-  margin: 0.65rem 0;
-  padding-left: 0.75rem;
-  border-left: 3px solid var(--line);
+  margin: 1.25rem 0;
+  padding: 0.75rem 1.125rem;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--bg-subtle);
   color: var(--ink-secondary);
+  font-size: 0.9375rem;
+  line-height: 1.65;
 }
 
-.waypoint-markdown [data-streamdown="ordered-list"],
-.waypoint-markdown [data-streamdown="unordered-list"] {
-  margin: 0.65rem 0;
-  padding-left: 1.25rem;
+.waypoint-markdown [data-streamdown="blockquote"] > *:first-child {
+  margin-top: 0;
+}
+
+.waypoint-markdown [data-streamdown="blockquote"] > *:last-child {
+  margin-bottom: 0;
 }
 
 .waypoint-markdown .katex-display {
   overflow-x: auto;
   overflow-y: hidden;
   max-width: 100%;
-  margin: 0.65rem 0;
+  margin: 0.75rem 0;
 }
 
 .waypoint-markdown .katex-error {
@@ -903,33 +1057,36 @@ main {
 /* Floating Adaptive Composer */
 .waypoint-composer-safe-area {
   flex-shrink: 0;
-  padding: 0.75rem 1.25rem 1rem;
+  padding: 0.75rem 1.25rem 1.125rem;
   box-sizing: border-box;
   background: var(--bg);
+  border-top: 1px solid var(--line-subtle);
 }
 
 .waypoint-composer {
   position: relative;
   display: flex;
-  gap: 0.5rem;
-  align-items: flex-end;
-  padding: 0.5rem 0.625rem;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.375rem 0.5rem 0.375rem 0.625rem;
+  min-height: 44px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   background: var(--card);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  box-sizing: border-box;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .waypoint-composer:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent), 0 2px 8px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(0, 0, 0, 0.14);
 }
 
 .waypoint-composer textarea {
   flex: 1;
-  margin-top: 0;
-  padding: 0.25rem 0.35rem;
+  margin: 0;
+  padding: 0.35rem 0.25rem;
   border: none;
   outline: none;
   background: transparent;
@@ -937,8 +1094,8 @@ main {
   font-size: 15px;
   line-height: 1.45;
   color: var(--ink);
-  min-height: 2.25rem;
-  max-height: 11.25rem;
+  min-height: 24px;
+  max-height: 12rem;
   resize: none;
   overflow-y: auto;
   box-sizing: border-box;
@@ -946,37 +1103,11 @@ main {
 
 .waypoint-composer textarea::placeholder {
   color: var(--muted);
+  font-size: 14px;
 }
 
 .waypoint-composer textarea:disabled {
   opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.waypoint-composer button[type="submit"] {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 2rem;
-  margin-top: 0;
-  padding: 0 0.875rem;
-  border: none;
-  border-radius: var(--radius-md);
-  background: var(--accent);
-  color: var(--accent-ink);
-  font-size: 0.875rem;
-  font-weight: 500;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-}
-
-.waypoint-composer button[type="submit"]:hover:not(:disabled) {
-  opacity: 0.92;
-}
-
-.waypoint-composer button[type="submit"]:disabled {
-  opacity: 0.45;
   cursor: not-allowed;
 }
 
@@ -985,27 +1116,66 @@ main {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 2rem;
-  padding: 0 0.625rem;
+  gap: 0.25rem;
+  height: 32px;
+  padding: 0 0.55rem;
   margin: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   background: var(--bg-subtle);
   color: var(--ink-secondary);
   font-size: 0.8125rem;
+  font-weight: 500;
   cursor: pointer;
   flex-shrink: 0;
   transition: all 0.15s ease;
 }
 
 .waypoint-attach-button:hover {
-  background: var(--line-subtle);
+  background: var(--card);
+  border-color: var(--muted);
   color: var(--ink);
 }
 
 .waypoint-attach-button:has(input:disabled) {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.waypoint-composer button[type="submit"] {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  height: 32px;
+  min-width: 4rem;
+  margin: 0;
+  padding: 0 0.85rem;
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.84375rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.waypoint-composer button[type="submit"]:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-1px);
+}
+
+.waypoint-composer button[type="submit"]:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.waypoint-composer button[type="submit"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .waypoint-draft-attachment {

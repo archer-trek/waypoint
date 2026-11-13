@@ -2948,27 +2948,31 @@ export function TopicsWorkspace({
                       Boolean(pinPendingByRoom[activeTopic.roomId])
                     }
                     aria-pressed={activeTopic.pinned}
+                    aria-label={activeTopic.pinned ? "取消置顶" : "置顶"}
                     onClick={() => void handleTogglePin(activeTopic.roomId, activeTopic.pinned)}
                   >
-                    <PinIcon aria-hidden="true" size={13} /> {activeTopic.pinned ? "取消置顶" : "置顶"}
+                    <PinIcon aria-hidden="true" size={13} />
+                    <span className="waypoint-btn-text">{activeTopic.pinned ? "取消置顶" : "置顶"}</span>
                   </button>
                   <button
                     type="button"
                     className="waypoint-topic-edit-button"
                     disabled={editing || deleteConfirmOpen || deleting}
+                    aria-label="编辑"
                     onClick={openEditForm}
                   >
                     <EditIcon aria-hidden="true" size={13} />
-                    编辑
+                    <span className="waypoint-btn-text">编辑</span>
                   </button>
                   <button
                     type="button"
                     className="waypoint-topic-delete-button"
                     disabled={editing || deleteConfirmOpen || deleting}
+                    aria-label="删除"
                     onClick={openDeleteConfirm}
                   >
                     <TrashIcon aria-hidden="true" size={13} />
-                    删除
+                    <span className="waypoint-btn-text">删除</span>
                   </button>
                 </div>
                 {activeTopic.description ? (
@@ -3389,7 +3393,9 @@ export function TopicsWorkspace({
                         name="message"
                         disabled={persistingSend || activeTopic.unavailable || reauthRequired}
                         placeholder={
-                          activeTopic.unavailable ? "Topic 不可用，无法发送消息" : undefined
+                          activeTopic.unavailable
+                            ? "Topic 不可用，无法发送消息"
+                            : "输入消息… (Enter 发送，Shift + Enter 换行)"
                         }
                         value={draftsByRoom[activeTopic.roomId]?.text ?? ""}
                         onChange={(event) => updateDraftText(activeTopic.roomId, event.target.value)}
