@@ -1385,7 +1385,7 @@ export function deriveRoomTimelineItems(
           ? event.event_id
           : undefined;
       const media = extractMediaFromContent(event.content);
-      let body = "";
+      let body: string;
       if (!media) {
         if (
           event.content.msgtype !== "m.text" ||

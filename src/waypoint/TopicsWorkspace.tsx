@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -7,6 +8,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
+  type SetStateAction,
 } from "react";
 import { cn } from "@/lib/utils";
 import { normalizeInset } from "../adapters/inset";
@@ -123,6 +125,8 @@ export function TopicsWorkspace({
   const [quickSubmitting, setQuickSubmitting] = useState(false);
   const [quickError, setQuickError] = useState<string | undefined>(undefined);
   const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
+  const activeTopicIdRef = useRef(activeTopicId);
+  activeTopicIdRef.current = activeTopicId;
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editSubmitting, setEditSubmitting] = useState(false);
@@ -147,7 +151,7 @@ export function TopicsWorkspace({
   const [composerError, setComposerError] = useState<string | undefined>(undefined);
   const [persistingSend, setPersistingSend] = useState(false);
   const persistingSendRef = useRef(false);
-  const [openFailedMenuId, setOpenFailedMenuId] = useState<string | null>(null);
+  const [openFailedMenu, setOpenFailedMenu] = useState<{ roomId: string; id: string } | null>(null);
   const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
   const [showScrollBottomFab, setShowScrollBottomFab] = useState(false);
   const [composerMultiline, setComposerMultiline] = useState(false);
@@ -226,6 +230,21 @@ export function TopicsWorkspace({
   const activeTopic = activeTopicId
     ? topics.find((topic) => topic.roomId === activeTopicId)
     : undefined;
+  const visibleComposerRoomId =
+    !settingsOpen && !creating && !editing && activeTopic ? activeTopic.roomId : null;
+  activeVisibleRoomRef.current = visibleComposerRoomId;
+  const openFailedMenuId =
+    visibleComposerRoomId !== null && openFailedMenu?.roomId === visibleComposerRoomId
+      ? openFailedMenu.id
+      : null;
+  function setOpenFailedMenuId(next: SetStateAction<string | null>) {
+    setOpenFailedMenu((prev) => {
+      const prevId =
+        visibleComposerRoomId !== null && prev?.roomId === visibleComposerRoomId ? prev.id : null;
+      const nextId = typeof next === "function" ? next(prevId) : next;
+      return nextId && visibleComposerRoomId ? { roomId: visibleComposerRoomId, id: nextId } : null;
+    });
+  }
   const nowMs = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
   const activeTimelineItems = activeTopic
     ? deriveRoomTimelineItems(
@@ -248,24 +267,6 @@ export function TopicsWorkspace({
     })
     .join("\0");
 
-  useLayoutEffect(() => {
-    setOpenFailedMenuId(null);
-  }, [activeTopic?.roomId]);
-
-
-  useEffect(() => {
-    if (activeTopicId && !topics.some((topic) => topic.roomId === activeTopicId)) {
-      setActiveTopicId(null);
-      setDescriptionExpanded(false);
-      setEditSubmitting(false);
-      resetEditForm();
-      if (!deletingRef.current) {
-        setDeleteConfirmOpen(false);
-        setDeleteError(undefined);
-      }
-    }
-  }, [activeTopicId, topics]);
-
   const navDepthRef = useRef(0);
   const targetDepth =
     viewportMode === "narrow" && !exiting
@@ -286,8 +287,12 @@ export function TopicsWorkspace({
     }
   }
 
+  const applyNavigationDepth = useEffectEvent((desiredDepth: number) => {
+    syncNavigationDepth(desiredDepth);
+  });
+
   useEffect(() => {
-    syncNavigationDepth(targetDepth);
+    applyNavigationDepth(targetDepth);
   }, [targetDepth, platform]);
 
   const backHandlerRef = useRef<() => boolean>(() => false);
@@ -380,70 +385,61 @@ export function TopicsWorkspace({
 
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  useEffect(() => {
-    const handleGlobalKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (event.defaultPrevented) return;
-        if (overflowMenuOpen) {
-          setOverflowMenuOpen(false);
-        } else if (creating) {
-          if (quickRegisterOpen) {
-            closeQuickRegister();
-          } else {
-            closeCreateForm();
-          }
-        } else if (settingsOpen) {
-          if (agentsForm) {
-            cancelAgentsAction();
-          } else if (exitConfirmOpen) {
-            cancelExitConfirm();
-          } else {
-            closeSettings();
-          }
-        } else if (editing) {
-          closeEditForm();
-        } else if (deleteConfirmOpen) {
-          cancelDeleteConfirm();
+  const onGlobalKeyDown = useEffectEvent((event: globalThis.KeyboardEvent) => {
+    if (event.key === "Escape") {
+      if (event.defaultPrevented) return;
+      if (overflowMenuOpen) {
+        setOverflowMenuOpen(false);
+      } else if (creating) {
+        if (quickRegisterOpen) {
+          closeQuickRegister();
+        } else {
+          closeCreateForm();
+        }
+      } else if (settingsOpen) {
+        if (agentsForm) {
+          cancelAgentsAction();
         } else if (exitConfirmOpen) {
           cancelExitConfirm();
+        } else {
+          closeSettings();
         }
-      } else if (
-        (event.key === "n" || event.key === "N") &&
-        (event.altKey || (!isInputTarget(event.target) && (event.metaKey || event.ctrlKey)))
-      ) {
-        if (!creating && !settingsOpen && !reauthRequiredRef.current) {
-          event.preventDefault();
-          openCreateForm();
-        }
+      } else if (editing) {
+        closeEditForm();
+      } else if (deleteConfirmOpen) {
+        cancelDeleteConfirm();
+      } else if (exitConfirmOpen) {
+        cancelExitConfirm();
       }
-    };
-    window.addEventListener("keydown", handleGlobalKeyDown);
-    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [
-    overflowMenuOpen,
-    creating,
-    submitting,
-    quickRegisterOpen,
-    quickSubmitting,
-    settingsOpen,
-    agentsForm,
-    agentsSubmitting,
-    exitConfirmOpen,
-    exiting,
-    editing,
-    editSubmitting,
-    deleteConfirmOpen,
-    deleting,
-  ]);
+    } else if (
+      (event.key === "n" || event.key === "N") &&
+      (event.altKey || (!isInputTarget(event.target) && (event.metaKey || event.ctrlKey)))
+    ) {
+      if (!creating && !settingsOpen && !reauthRequiredRef.current) {
+        event.preventDefault();
+        openCreateForm();
+      }
+    }
+  });
+
+  useEffect(() => {
+    window.addEventListener("keydown", onGlobalKeyDown);
+    return () => window.removeEventListener("keydown", onGlobalKeyDown);
+  }, []);
 
   const activeRoomId = activeTopic?.roomId;
   const currentDraftText = draftsByRoom[activeRoomId ?? ""]?.text ?? "";
 
   useEffect(() => {
-    if (normalizeInset(keyboardInsetBottom) > 0) {
-      setOverflowMenuOpen(false);
+    if (!platform?.subscribeKeyboardInsetBottom) {
+      return undefined;
     }
-  }, [keyboardInsetBottom]);
+    return platform.subscribeKeyboardInsetBottom((inset) => {
+      if (normalizeInset(inset) > 0) {
+        setOverflowMenuOpen(false);
+      }
+    });
+  }, [platform]);
 
   useEffect(() => {
     if (!overflowMenuOpen) {
@@ -1145,6 +1141,7 @@ export function TopicsWorkspace({
         if (!mountedRef.current || isSyncPaused() || syncEpochRef.current !== mySyncEpoch) {
           return;
         }
+        reconcileRoomsAfterSync();
         setRevision((value) => value + 1);
         if (wasBackedOff && (retryQueue.isActive() || client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0)) {
           retryQueue.wake();
@@ -1178,15 +1175,42 @@ export function TopicsWorkspace({
     }
   }
 
-  const visibleComposerRoomId =
-    !settingsOpen && !creating && !editing && activeTopic ? activeTopic.roomId : null;
-  activeVisibleRoomRef.current = visibleComposerRoomId;
-
-  useEffect(() => {
-    if (visibleComposerRoomId === null) {
-      setOpenFailedMenuId(null);
+  function reconcileRoomsAfterSync() {
+    const currentRooms = client.rooms();
+    for (const roomId of Object.keys(lastRequestedReadRef.current)) {
+      if (!(roomId in currentRooms)) {
+        delete lastRequestedReadRef.current[roomId];
+      }
     }
-  }, [visibleComposerRoomId]);
+    setDraftsByRoom((prev) => {
+      const staleIds = Object.keys(prev).filter((roomId) => !(roomId in currentRooms));
+      if (staleIds.length === 0) {
+        return prev;
+      }
+      const next = { ...prev };
+      for (const id of staleIds) {
+        delete next[id];
+      }
+      return next;
+    });
+    const currentTopics = deriveTopics(
+      currentRooms,
+      parseRegisteredAgents(client.accountData("im.waypoint.agents"), client.ownerId),
+      client.ownerId,
+      client.pendingRoomEvents(),
+    );
+    const selectedId = activeTopicIdRef.current;
+    if (selectedId && !currentTopics.some((topic) => topic.roomId === selectedId)) {
+      setActiveTopicId(null);
+      setDescriptionExpanded(false);
+      setEditSubmitting(false);
+      resetEditForm();
+      if (!deletingRef.current) {
+        setDeleteConfirmOpen(false);
+        setDeleteError(undefined);
+      }
+    }
+  }
 
   useEffect(() => {
     if (!openFailedMenuId) {
@@ -1194,7 +1218,7 @@ export function TopicsWorkspace({
     }
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
-        setOpenFailedMenuId(null);
+        setOpenFailedMenu(null);
       }
     };
     const handlePointerDown = (event: PointerEvent) => {
@@ -1202,7 +1226,7 @@ export function TopicsWorkspace({
       if (target instanceof Element && target.closest(".waypoint-failed-controls")) {
         return;
       }
-      setOpenFailedMenuId(null);
+      setOpenFailedMenu(null);
     };
     window.addEventListener("keydown", handleKeyDown);
     document.addEventListener("pointerdown", handlePointerDown);
@@ -1239,28 +1263,52 @@ export function TopicsWorkspace({
     }
   }, [visibleComposerRoomId]);
 
-  useEffect(() => {
-    setDraftsByRoom(client.drafts());
-  }, [client]);
+  const onCredentialRejected = useEffectEvent(() => {
+    pauseForCredentialRejection();
+  });
 
-  useEffect(() => {
-    for (const roomId of Object.keys(lastRequestedReadRef.current)) {
-      if (!(roomId in rooms)) {
-        delete lastRequestedReadRef.current[roomId];
+  const onStartInitialSync = useEffectEvent(() => {
+    if (suspendInBackground && !readAppVisible()) {
+      backgroundSuspendedRef.current = true;
+      retryQueue.pause();
+    } else {
+      backgroundSuspendedRef.current = false;
+      if (initialSyncImmediate && !initialReauthRequired) {
+        void runForegroundSync();
+      } else {
+        scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
+      }
+      if (
+        (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
+        !retryQueue.isActive()
+      ) {
+        void retryQueue.flush();
       }
     }
-    setDraftsByRoom((prev) => {
-      const staleIds = Object.keys(prev).filter((roomId) => !(roomId in rooms));
-      if (staleIds.length === 0) {
-        return prev;
+  });
+
+  const onVisibilityChange = useEffectEvent((visible: boolean) => {
+    if (!mountedRef.current) {
+      return;
+    }
+    if (suspendInBackground) {
+      if (!visible) {
+        suspendForBackground();
+      } else {
+        resumeFromBackground();
       }
-      const next = { ...prev };
-      for (const id of staleIds) {
-        delete next[id];
-      }
-      return next;
-    });
-  }, [rooms]);
+    } else if (visible) {
+      resumeFromBackground();
+    }
+  });
+
+  const onNetworkResume = useEffectEvent(() => {
+    handleNetworkResume();
+  });
+
+  const onClearSyncTimer = useEffectEvent(() => {
+    clearSyncTimer();
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1268,11 +1316,10 @@ export function TopicsWorkspace({
     pausedRef.current = isReauth;
     if (isReauth) {
       retryQueue.pause();
-      setReauthRequired(true);
     }
     client.setCredentialRejectedHandler(() => {
       if (mountedRef.current) {
-        pauseForCredentialRejection();
+        onCredentialRejected();
       }
     });
     retryQueue.setCallbacks({
@@ -1288,54 +1335,28 @@ export function TopicsWorkspace({
       },
       onCredentialRejected: () => {
         if (mountedRef.current) {
-          pauseForCredentialRejection();
+          onCredentialRejected();
         }
       },
       isRoomUnavailable: (roomId) =>
         deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable,
     });
     if (!pausedRef.current) {
-      if (suspendInBackground && !readAppVisible()) {
-        backgroundSuspendedRef.current = true;
-        retryQueue.pause();
-      } else {
-        backgroundSuspendedRef.current = false;
-        if (initialSyncImmediate && !initialReauthRequired) {
-          void runForegroundSync();
-        } else {
-          scheduleForegroundSync(FOREGROUND_SYNC_INTERVAL_MS);
-        }
-        if (
-          (client.pendingRoomEvents().length > 0 || client.pendingReadMarkers().length > 0) &&
-          !retryQueue.isActive()
-        ) {
-          void retryQueue.flush();
-        }
-      }
+      onStartInitialSync();
     }
-    const handleVisibility = (visible: boolean) => {
-      if (!mountedRef.current) {
-        return;
-      }
-      if (suspendInBackground) {
-        if (!visible) {
-          suspendForBackground();
-        } else {
-          resumeFromBackground();
-        }
-      } else if (visible) {
-        resumeFromBackground();
-      }
-    };
     let unsubVisibility: () => void;
     if (platform?.subscribeAppVisibility) {
-      unsubVisibility = platform.subscribeAppVisibility(handleVisibility);
+      unsubVisibility = platform.subscribeAppVisibility(onVisibilityChange);
     } else {
       const onVis = () =>
-        handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
-      const onHide = () => handleVisibility(false);
+        onVisibilityChange(
+          typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+        );
+      const onHide = () => onVisibilityChange(false);
       const onShow = () =>
-        handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
+        onVisibilityChange(
+          typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+        );
       document?.addEventListener("visibilitychange", onVis);
       window?.addEventListener("pagehide", onHide);
       window?.addEventListener("pageshow", onShow);
@@ -1347,11 +1368,13 @@ export function TopicsWorkspace({
     }
     let unsubResume: () => void;
     if (platform?.subscribeNetworkResume) {
-      unsubResume = platform.subscribeNetworkResume(handleNetworkResume);
+      unsubResume = platform.subscribeNetworkResume(onNetworkResume);
     } else {
-      window.addEventListener("online", handleNetworkResume);
-      unsubResume = () => window.removeEventListener("online", handleNetworkResume);
+      window.addEventListener("online", onNetworkResume);
+      unsubResume = () => window.removeEventListener("online", onNetworkResume);
     }
+    const downloadedMediaCache = downloadedMediaCacheRef.current;
+    const localMediaUrlCache = localMediaUrlCacheRef.current;
     return () => {
       mountedRef.current = false;
       // StrictMode remounts this effect while the first sync is still in flight.
@@ -1363,28 +1386,28 @@ export function TopicsWorkspace({
       syncWakePendingRef.current = false;
       syncAbortControllerRef.current?.abort();
       syncAbortControllerRef.current = null;
-      clearSyncTimer();
+      onClearSyncTimer();
       if (toastNoticeTimerRef.current !== undefined) {
         clock.clearTimeout(toastNoticeTimerRef.current);
         toastNoticeTimerRef.current = undefined;
       }
       unsubVisibility();
       unsubResume();
-      for (const entry of downloadedMediaCacheRef.current.values()) {
+      for (const entry of downloadedMediaCache.values()) {
         entry.revoke?.();
       }
-      downloadedMediaCacheRef.current.clear();
-      for (const entry of localMediaUrlCacheRef.current.values()) {
+      downloadedMediaCache.clear();
+      for (const entry of localMediaUrlCache.values()) {
         entry.revoke?.();
       }
-      localMediaUrlCacheRef.current.clear();
+      localMediaUrlCache.clear();
       client.setCredentialRejectedHandler(undefined);
       retryQueue.setCallbacks({});
       if (!providedRetryQueue) {
         retryQueue.dispose();
       }
     };
-  }, [client, clock, retryQueue, providedRetryQueue, platform]);
+  }, [client, clock, retryQueue, providedRetryQueue, platform, initialReauthRequired]);
 
   function setTimelineScrollTop(container: HTMLElement, nextTop: number) {
     programmaticScrollRef.current = { active: true, top: nextTop };
@@ -1458,6 +1481,8 @@ export function TopicsWorkspace({
     }
   }
 
+  const activeTopicReadPositionUnknown = Boolean(activeTopic?.readPositionUnknown);
+
   useEffect(() => {
     if (userScrolledRoomRef.current !== visibleComposerRoomId) {
       userScrolledRoomRef.current = null;
@@ -1467,7 +1492,7 @@ export function TopicsWorkspace({
         openBackfillStoppedRoomsRef.current.delete(roomId);
       }
     }
-    if (!visibleComposerRoomId || !activeTopic || !activeTopic.readPositionUnknown) {
+    if (!visibleComposerRoomId || !activeTopicReadPositionUnknown) {
       return;
     }
     if (
@@ -1529,7 +1554,7 @@ export function TopicsWorkspace({
             break;
           }
           if (isCredentialRejected(result)) {
-            pauseForCredentialRejection();
+            onCredentialRejected();
             break;
           }
           if (result.type !== "response" || result.status !== 200) {
@@ -1581,7 +1606,7 @@ export function TopicsWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [visibleComposerRoomId, activeTopic?.readPositionUnknown, backfillTick, client, exiting, reauthRequired]);
+  }, [visibleComposerRoomId, activeTopicReadPositionUnknown, backfillTick, client, exiting, reauthRequired]);
 
   function collapseDescription() {
     setDescriptionExpanded(false);
@@ -2000,7 +2025,7 @@ export function TopicsWorkspace({
     return created.url;
   }
 
-  useEffect(() => {
+  const downloadMissingMedia = useEffectEvent(() => {
     if (reauthRequired || !client.hasToken || exiting) {
       return;
     }
@@ -2027,7 +2052,7 @@ export function TopicsWorkspace({
             return;
           }
           if (isCredentialRejected(result)) {
-            pauseForCredentialRejection();
+            onCredentialRejected();
             return;
           }
           const bytes =
@@ -2054,6 +2079,10 @@ export function TopicsWorkspace({
           downloadingMediaRef.current.delete(mxcUrl);
         });
     }
+  });
+
+  useEffect(() => {
+    downloadMissingMedia();
   }, [timelineContentKey, visibleComposerRoomId, client, exiting, reauthRequired]);
 
   function handleOpenExternalUrl(url: string) {
@@ -2712,7 +2741,7 @@ export function TopicsWorkspace({
           isNarrow={isNarrow}
           topic={activeTopic}
           descriptionExpanded={descriptionExpanded}
-          overflowMenuOpen={overflowMenuOpen}
+          overflowMenuOpen={overflowMenuOpen && safeInset === 0}
           overflowMenuRef={overflowMenuRef}
           editing={editing}
           editSubmitting={editSubmitting}
@@ -2724,7 +2753,11 @@ export function TopicsWorkspace({
           onToggleDescription={() =>
             setDescriptionExpanded((expanded) => !expanded)
           }
-          onToggleOverflowMenu={() => setOverflowMenuOpen((prev) => !prev)}
+          onToggleOverflowMenu={() => {
+            if (safeInset === 0) {
+              setOverflowMenuOpen((prev) => !prev);
+            }
+          }}
           onCloseOverflowMenu={() => setOverflowMenuOpen(false)}
           onTogglePin={() => void handleTogglePin(roomId, activeTopic.pinned)}
           onOpenEditForm={openEditForm}

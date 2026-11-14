@@ -65,22 +65,22 @@ function createPandocMathPlugin(): MathPlugin {
         ...dollarConstruct,
         _pandocWrapped: true,
         tokenize(effects, ok, nok) {
-          const self = this;
+          const { events } = this;
           const wrappedOk = (code: number | null) => {
             let enterIdx = -1;
-            for (let i = self.events.length - 1; i >= 0; i -= 1) {
-              const entry = self.events[i];
+            for (let i = events.length - 1; i >= 0; i -= 1) {
+              const entry = events[i];
               if (entry && entry[0] === "enter" && entry[1].type === "mathText") {
                 enterIdx = i;
                 break;
               }
             }
             if (enterIdx !== -1) {
-              const openSeq = self.events[enterIdx + 1]?.[1];
+              const openSeq = events[enterIdx + 1]?.[1];
               const openLen = openSeq ? openSeq.end.offset - openSeq.start.offset : 0;
               if (openLen === 1) {
-                const afterOpen = self.events[enterIdx + 3]?.[1];
-                const beforeClose = self.events[self.events.length - 4]?.[1];
+                const afterOpen = events[enterIdx + 3]?.[1];
+                const beforeClose = events[events.length - 4]?.[1];
                 const followedByDigit = code !== null && code >= 48 && code <= 57;
                 if (
                   isWhitespaceToken(afterOpen) ||
