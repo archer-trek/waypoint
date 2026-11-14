@@ -41,7 +41,7 @@ function isWhitespaceToken(token: { type: string } | undefined): boolean {
 function createPandocMathPlugin(): MathPlugin {
   const baseMath = createMathPlugin({
     singleDollarTextMath: true,
-    errorColor: "#b91c1c",
+    errorColor: "var(--destructive)",
   });
   const baseRemark = baseMath.remarkPlugin;
 
@@ -156,7 +156,7 @@ const STREAMDOWN_COMPONENTS: Components = {
   },
   img: ({ alt, src }: ComponentProps<"img"> & ExtraProps) => {
     const label = alt?.trim() ? alt : (src ?? "");
-    return <span className="waypoint-md-image-placeholder">{label}</span>;
+    return <span className="waypoint-md-image-placeholder text-muted-foreground">{label}</span>;
   },
 };
 
@@ -218,11 +218,11 @@ class RichMessageErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 
 function RawFallbackBody({ body }: { body: string }) {
   return (
-    <div className="waypoint-bubble-fallback">
-      <div role="note" className="waypoint-render-fallback-hint">
+    <div className="waypoint-bubble-fallback whitespace-normal">
+      <div role="note" className="waypoint-render-fallback-hint mb-1.5 text-xs text-warning-foreground">
         渲染异常，已显示原文
       </div>
-      <div className="waypoint-bubble-raw">{body}</div>
+      <div className="waypoint-bubble-raw whitespace-pre-wrap break-words">{body}</div>
     </div>
   );
 }
