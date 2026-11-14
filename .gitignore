@@ -2,6 +2,7 @@ node_modules
 dist
 .vite
 src-tauri/target
-src-tauri/gen
+src-tauri/gen/*
+!src-tauri/gen/android/
 .DS_Store
 *.log
