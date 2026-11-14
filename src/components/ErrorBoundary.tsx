@@ -1,7 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AlertCircle, RefreshCw, RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 
 export type ErrorBoundaryProps = {
   children: ReactNode;
@@ -10,7 +9,6 @@ export type ErrorBoundaryProps = {
   resetKeys?: readonly unknown[];
   title?: string;
   description?: string;
-  className?: string;
 };
 
 type ErrorBoundaryState = {
@@ -65,7 +63,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   state: ErrorBoundaryState = INITIAL_STATE;
 
   static getDerivedStateFromError(error: unknown): Partial<ErrorBoundaryState> {
-    return { hasError: true, error };
+    return { hasError: true, error, componentStack: null };
   }
 
   componentDidCatch(_error: unknown, info: ErrorInfo): void {
@@ -112,10 +110,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       <div
         role="alert"
         aria-live="assertive"
-        className={cn(
-          "flex h-full min-h-0 w-full flex-1 items-center justify-center bg-background p-6 text-foreground",
-          this.props.className,
-        )}
+        className="flex h-full min-h-0 w-full flex-1 items-center justify-center bg-background p-6 text-foreground"
       >
         <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xs">
           <div className="flex items-start gap-3">

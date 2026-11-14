@@ -95,8 +95,8 @@ describe("TopicsWorkspace detail ErrorBoundary", () => {
         "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com", name: "Hermes" }] },
       },
       rooms: {
-        "!broken:example.com": makeRoom("异常话题", "$e1", "TRIGGER_CRASH", 2000),
-        "!healthy:example.com": makeRoom("正常话题", "$e2", "正常消息内容", 3000),
+        "!broken:example.com": makeRoom("故障 Topic", "$e1", "TRIGGER_CRASH", 2000),
+        "!healthy:example.com": makeRoom("正常 Topic", "$e2", "正常消息内容", 3000),
       },
     });
 
@@ -105,12 +105,12 @@ describe("TopicsWorkspace detail ErrorBoundary", () => {
 
     render(<TopicsWorkspace client={client} clock={new TestClock()} viewportMode="wide" />);
 
-    await user.click(screen.getByRole("button", { name: /异常话题/ }));
+    await user.click(screen.getByRole("button", { name: /故障 Topic/ }));
 
     expect(screen.getByRole("alert")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Topic 视图出现意外错误" })).toBeInTheDocument();
     // Sidebar remains accessible on wide viewport
-    const healthyBtn = screen.getByRole("button", { name: /正常话题/ });
+    const healthyBtn = screen.getByRole("button", { name: /正常 Topic/ });
     expect(healthyBtn).toBeInTheDocument();
 
     // Switching to another topic automatically resets the detail ErrorBoundary

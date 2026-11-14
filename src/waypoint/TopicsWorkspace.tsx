@@ -2919,7 +2919,11 @@ export function TopicsWorkspace({
           <ErrorBoundary
             resetKeys={[activeTopic?.roomId, settingsOpen, creating, editing]}
             title="Topic 视图出现意外错误"
-            description="当前 Topic 的内容渲染遇到意外错误，你可以尝试重试或切换到其他 Topic。"
+            description={
+              isNarrow
+                ? "当前 Topic 的内容渲染遇到意外错误，你可以尝试重试或重新加载应用。"
+                : "当前 Topic 的内容渲染遇到意外错误，你可以尝试重试或切换到其他 Topic。"
+            }
           >
             {isNarrow ? (
               settingsOpen ? (
