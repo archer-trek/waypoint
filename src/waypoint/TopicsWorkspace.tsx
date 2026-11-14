@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
   type SetStateAction,
 } from "react";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { cn } from "@/lib/utils";
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, TransportResult, ViewportMode } from "../adapters/types";
@@ -2915,35 +2916,45 @@ export function TopicsWorkspace({
             pageEnterClass,
           )}
         >
-          {isNarrow ? (
-            settingsOpen ? (
-              renderSettingsDialog(false)
-            ) : creating ? (
-              renderCreateDialog(false)
-            ) : activeTopic && editing ? (
-              renderEditDialog(false)
-            ) : activeTopic ? (
-              renderTopicView()
+          <ErrorBoundary
+            resetKeys={[activeTopic?.roomId, settingsOpen, creating, editing]}
+            title="Topic 视图出现意外错误"
+            description={
+              isNarrow
+                ? "当前 Topic 的内容渲染遇到意外错误，你可以尝试重试或重新加载应用。"
+                : "当前 Topic 的内容渲染遇到意外错误，你可以尝试重试或切换到其他 Topic。"
+            }
+          >
+            {isNarrow ? (
+              settingsOpen ? (
+                renderSettingsDialog(false)
+              ) : creating ? (
+                renderCreateDialog(false)
+              ) : activeTopic && editing ? (
+                renderEditDialog(false)
+              ) : activeTopic ? (
+                renderTopicView()
+              ) : (
+                renderEmptyDetail()
+              )
             ) : (
-              renderEmptyDetail()
-            )
-          ) : (
-            <>
-              <div
-                style={{ display: "contents" }}
-                aria-hidden={settingsOpen || creating || editing ? "true" : undefined}
-              >
-                {activeTopic ? renderTopicView() : renderEmptyDetail()}
-              </div>
-              {settingsOpen
-                ? renderSettingsDialog(true)
-                : creating
-                  ? renderCreateDialog(true)
-                  : activeTopic && editing
-                    ? renderEditDialog(true)
-                    : null}
-            </>
-          )}
+              <>
+                <div
+                  style={{ display: "contents" }}
+                  aria-hidden={settingsOpen || creating || editing ? "true" : undefined}
+                >
+                  {activeTopic ? renderTopicView() : renderEmptyDetail()}
+                </div>
+                {settingsOpen
+                  ? renderSettingsDialog(true)
+                  : creating
+                    ? renderCreateDialog(true)
+                    : activeTopic && editing
+                      ? renderEditDialog(true)
+                      : null}
+              </>
+            )}
+          </ErrorBoundary>
         </div>
       ) : null}
       {toastNotice ? (
