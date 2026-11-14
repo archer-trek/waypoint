@@ -21310,48 +21310,55 @@ test("桌面端回车直接发送消息，且未选 Topic 时展示 Muse 式引�
   expect(sendCalls.length).toBe(1);
 });
 
-test("CSS Design Tokens 验证：包含素纸与夜读语义变量定义，无未声明硬编码色值 (#81)", async () => {
+test("CSS Design Tokens 验证：包含 Grokbot Light/Dark 语义变量定义，无未声明硬编码色值 (#81 #90)", async () => {
   // @ts-expect-error Node.js built-in fs in Vitest test runner
   const { readFileSync } = await import("node:fs");
   // @ts-expect-error Node.js built-in path in Vitest test runner
   const { resolve } = await import("node:path");
   const css = readFileSync(resolve((globalThis as unknown as { process: { cwd: () => string } }).process.cwd(), "src/App.css"), "utf-8");
 
-  // 验证关键语义 Token 声明
+  // 验证关键 Grokbot 语义 Token 声明
   const requiredTokens = [
-    "--bg",
-    "--sidebar",
-    "--header",
-    "--ink",
+    "--background",
+    "--foreground",
+    "--card",
+    "--popover",
+    "--primary",
+    "--primary-foreground",
+    "--secondary",
     "--muted",
-    "--line",
+    "--muted-foreground",
     "--accent",
-    "--owner-bg",
-    "--owner-ink",
-    "--code-bg",
-    "--danger",
-    "--warn-bg",
+    "--destructive",
+    "--border",
+    "--input",
+    "--ring",
+    "--warning",
+    "--warning-foreground",
+    "--warning-border",
   ];
   for (const token of requiredTokens) {
     expect(css).toContain(`${token}:`);
   }
 
-  // 验证 prefers-color-scheme: dark 声明
+  // 验证系统暗黑模式与显式暗黑主题声明
   expect(css).toContain("@media (prefers-color-scheme: dark)");
+  expect(css).toContain(".dark");
+  expect(css).toContain('[data-theme="dark"]');
 
-  // 验证规则体内无硬编码十六进制色值（仅允许在变量定义区出现）
+  // 验证规则体内无硬编码十六进制色值（仅允许在 :root 变量定义区出现）
   const lines = css.split(String.fromCharCode(10));
-  let insideTokens = false;
+  let insideRootTokens = false;
   const offendingLines: string[] = [];
 
   for (const line of lines) {
-    if (line.includes(":root {") || line.includes("prefers-color-scheme: dark")) {
-      insideTokens = true;
+    if (line.trim() === ":root {") {
+      insideRootTokens = true;
     }
-    if (insideTokens && line.trim() === "}") {
-      insideTokens = false;
+    if (insideRootTokens && line.trim() === "}") {
+      insideRootTokens = false;
     }
-    if (!insideTokens && /#[0-9a-fA-F]{3,6}/.test(line)) {
+    if (!insideRootTokens && /#[0-9a-fA-F]{3,8}\b/.test(line)) {
       offendingLines.push(line.trim());
     }
   }

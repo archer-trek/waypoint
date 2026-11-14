@@ -8,6 +8,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { cn } from "@/lib/utils";
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, TransportResult, ViewportMode } from "../adapters/types";
 import {
@@ -2699,7 +2700,7 @@ export function TopicsWorkspace({
     const roomId = activeTopic.roomId;
     const currentDraft = draftsByRoom[roomId];
     return (
-      <div className="waypoint-topic-view">
+      <div className="waypoint-topic-view flex min-h-0 flex-1 flex-col bg-background">
         <TopicHeaderView
           isNarrow={isNarrow}
           topic={activeTopic}
@@ -2727,7 +2728,7 @@ export function TopicsWorkspace({
           <div
             role="status"
             aria-label="Topic 不可用"
-            className="waypoint-unavailable-banner"
+            className="waypoint-unavailable-banner flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-5 py-2.5 text-sm font-medium text-warning-foreground"
           >
             {activeTopic.unavailableReason}
           </div>
@@ -2742,7 +2743,7 @@ export function TopicsWorkspace({
           />
         ) : null}
         <main
-          className="waypoint-timeline-container"
+          className="waypoint-timeline-container m-0 box-border flex min-h-0 w-full max-w-none flex-1 flex-col overflow-hidden bg-background p-0"
             style={{ paddingBottom: `${safeInset}px` }}
             onDragOver={(event) => {
               if (!supportsFileDropAndPaste) {
@@ -2844,7 +2845,7 @@ export function TopicsWorkspace({
   }
   return (
     <div
-      className="waypoint-workspace"
+      className="waypoint-workspace flex h-full w-full overflow-hidden bg-background text-foreground"
       data-viewport={viewportMode}
       style={{ "--keyboard-inset": `${safeInset}px` } as CSSProperties}
     >
@@ -2866,7 +2867,14 @@ export function TopicsWorkspace({
       ) : null}
 
       {showDetail ? (
-        <div key={isNarrow ? narrowPageKey : "wide"} className={`waypoint-detail${pageEnterClass ? ` ${pageEnterClass}` : ""}`}>
+        <div
+          key={isNarrow ? narrowPageKey : "wide"}
+          className={cn(
+            "waypoint-detail relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background",
+            isNarrow && "w-full",
+            pageEnterClass,
+          )}
+        >
           {isNarrow ? (
             settingsOpen ? (
               renderSettingsDialog(false)
@@ -2899,7 +2907,11 @@ export function TopicsWorkspace({
         </div>
       ) : null}
       {toastNotice ? (
-        <div role="status" aria-live="polite" className="waypoint-toast">
+        <div
+          role="status"
+          aria-live="polite"
+          className="waypoint-toast fixed bottom-6 left-1/2 z-[60] -translate-x-1/2 rounded-md bg-primary px-3.5 py-2 text-sm text-primary-foreground shadow-lg"
+        >
           {toastNotice}
         </div>
       ) : null}
