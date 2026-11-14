@@ -5,7 +5,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WaypointBrandIcon } from "./icons";
 import "../App.css";
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type FormEvent,
+} from "react";
 import { normalizeInset } from "../adapters/inset";
 import type {
   Clock,
@@ -60,13 +69,41 @@ export function WaypointApp({
   clock: Clock;
 }) {
   const [phase, setPhase] = useState<Phase>({ name: "booting" });
-  const [viewportMode, setViewportMode] = useState<ViewportMode>(() =>
-    platform.viewportMode ? platform.viewportMode() : "wide",
+  const subscribeViewport = useCallback(
+    (listener: () => void) =>
+      platform.subscribeViewportMode
+        ? platform.subscribeViewportMode(() => listener())
+        : () => undefined,
+    [platform],
   );
-  const [keyboardInsetBottom, setKeyboardInsetBottom] = useState<number>(() =>
-    normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+  const getViewportSnapshot = useCallback(
+    (): ViewportMode => (platform.viewportMode ? platform.viewportMode() : "wide"),
+    [platform],
   );
-  const [duplicateInstance, setDuplicateInstance] = useState(false);
+  const viewportMode = useSyncExternalStore(
+    subscribeViewport,
+    getViewportSnapshot,
+    getViewportSnapshot,
+  );
+  const subscribeKeyboardInset = useCallback(
+    (listener: () => void) =>
+      platform.subscribeKeyboardInsetBottom
+        ? platform.subscribeKeyboardInsetBottom(() => listener())
+        : () => undefined,
+    [platform],
+  );
+  const getKeyboardInsetSnapshot = useCallback(
+    () => normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
+    [platform],
+  );
+  const keyboardInsetBottom = useSyncExternalStore(
+    subscribeKeyboardInset,
+    getKeyboardInsetSnapshot,
+    getKeyboardInsetSnapshot,
+  );
+  const [duplicateInstance, setDuplicateInstance] = useState(
+    () => liveAppInstanceToken !== null,
+  );
   const clientRef = useRef<MatrixClient | undefined>(undefined);
   const retryQueueRef = useRef<RetryQueue | undefined>(undefined);
 
@@ -116,72 +153,59 @@ export function WaypointApp({
     return syncAppearanceLifecycle();
   }, []);
 
-  useEffect(() => {
-    setViewportMode(platform.viewportMode ? platform.viewportMode() : "wide");
-    if (!platform.subscribeViewportMode) {
-      return undefined;
-    }
-    return platform.subscribeViewportMode((mode) => {
-      setViewportMode(mode);
-    });
-  }, [platform]);
-
-  useEffect(() => {
-    setKeyboardInsetBottom(
-      normalizeInset(platform.keyboardInsetBottom ? platform.keyboardInsetBottom() : 0),
-    );
-    if (!platform.subscribeKeyboardInsetBottom) {
-      return undefined;
-    }
-    return platform.subscribeKeyboardInsetBottom((inset) => {
-      setKeyboardInsetBottom(normalizeInset(inset));
-    });
-  }, [platform]);
-
-  useEffect(() => {
-    if (liveAppInstanceToken !== null) {
-      setDuplicateInstance(true);
-      platformRef.current.focusMainWindow?.();
+  const restoreSessionOnMount = useEffectEvent(async (isCancelled: () => boolean) => {
+    const restored = await client().restore();
+    if (isCancelled()) {
       return;
+    }
+    const matrix = client();
+    if (restored === "sync") {
+      if (
+        matrix.hasSyncCursor &&
+        hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
+      ) {
+        setPhase({ name: "topics", initialSyncImmediate: true });
+        return;
+      }
+      setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
+      const suspended = shouldSuspendSyncInBackground(platformRef.current) && !readAppVisible();
+      backgroundSuspendedRef.current = suspended;
+      if (!suspended) {
+        void syncNow();
+      }
+      return;
+    }
+    if (restored === "password") {
+      setPhase({
+        name: "password",
+        address: matrix.address,
+        userId: matrix.ownerId,
+        password: "",
+      });
+      return;
+    }
+    setPhase({ name: "address", address: "" });
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    if (duplicateInstance || liveAppInstanceToken !== null) {
+      platformRef.current.focusMainWindow?.();
+      if (!duplicateInstance) {
+        void Promise.resolve().then(() => {
+          if (!cancelled) {
+            setDuplicateInstance(true);
+          }
+        });
+      }
+      return () => {
+        cancelled = true;
+      };
     }
     const myToken = Symbol("waypoint-app-instance");
     liveAppInstanceToken = myToken;
-    setDuplicateInstance(false);
 
-    let cancelled = false;
-    void (async () => {
-      const restored = await client().restore();
-      if (cancelled) {
-        return;
-      }
-      const matrix = client();
-      if (restored === "sync") {
-        if (
-          matrix.hasSyncCursor &&
-          hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
-        ) {
-          setPhase({ name: "topics", initialSyncImmediate: true });
-          return;
-        }
-        setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
-        const suspended = shouldSuspendSyncInBackground(platformRef.current) && !readAppVisible();
-        backgroundSuspendedRef.current = suspended;
-        if (!suspended) {
-          void syncNow();
-        }
-        return;
-      }
-      if (restored === "password") {
-        setPhase({
-          name: "password",
-          address: matrix.address,
-          userId: matrix.ownerId,
-          password: "",
-        });
-        return;
-      }
-      setPhase({ name: "address", address: "" });
-    })();
+    void restoreSessionOnMount(() => cancelled);
     return () => {
       cancelled = true;
       epoch.current += 1;
@@ -196,66 +220,74 @@ export function WaypointApp({
         liveAppInstanceToken = null;
       }
     };
-  }, [clock]);
+  }, [clock, duplicateInstance]);
+
+  const handleAppVisibilityChange = useEffectEvent((visible: boolean) => {
+    if (!shouldSuspendSyncInBackground(platform)) {
+      return;
+    }
+    if (!visible) {
+      backgroundSuspendedRef.current = true;
+      if (phaseNameRef.current === "syncing") {
+        syncGeneration.current += 1;
+        syncAbortControllerRef.current?.abort();
+        syncAbortControllerRef.current = null;
+        clearRetry();
+        retryQueue().pause();
+      }
+      return;
+    }
+    backgroundSuspendedRef.current = false;
+    if (phaseNameRef.current !== "syncing") {
+      return;
+    }
+    const matrix = client();
+    if (!matrix.hasToken) {
+      return;
+    }
+    backoffStep.current = 0;
+    clearRetry();
+    void syncNow();
+    if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
+      retryQueue().resume();
+      retryQueue().wake();
+    }
+  });
+
+  const handleAppNetworkResume = useEffectEvent(() => {
+    if (phaseNameRef.current !== "syncing" || backgroundSuspendedRef.current) {
+      return;
+    }
+    const matrix = client();
+    if (!matrix.hasToken) {
+      return;
+    }
+    syncGeneration.current += 1;
+    syncAbortControllerRef.current?.abort();
+    syncAbortControllerRef.current = null;
+    backoffStep.current = 0;
+    clearRetry();
+    void syncNow();
+    if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
+      retryQueue().resume();
+      retryQueue().wake();
+    }
+  });
 
   useEffect(() => {
-    const handleVisibility = (visible: boolean) => {
-      if (!shouldSuspendSyncInBackground(platform)) {
-        return;
-      }
-      if (!visible) {
-        backgroundSuspendedRef.current = true;
-        if (phaseNameRef.current === "syncing") {
-          syncGeneration.current += 1;
-          syncAbortControllerRef.current?.abort();
-          syncAbortControllerRef.current = null;
-          clearRetry();
-          retryQueue().pause();
-        }
-        return;
-      }
-      backgroundSuspendedRef.current = false;
-      if (phaseNameRef.current !== "syncing") {
-        return;
-      }
-      const matrix = client();
-      if (!matrix.hasToken) {
-        return;
-      }
-      backoffStep.current = 0;
-      clearRetry();
-      void syncNow();
-      if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
-        retryQueue().resume();
-        retryQueue().wake();
-      }
-    };
-    const handleResume = () => {
-      if (phaseNameRef.current !== "syncing" || backgroundSuspendedRef.current) {
-        return;
-      }
-      const matrix = client();
-      if (!matrix.hasToken) {
-        return;
-      }
-      syncGeneration.current += 1;
-      syncAbortControllerRef.current?.abort();
-      syncAbortControllerRef.current = null;
-      backoffStep.current = 0;
-      clearRetry();
-      void syncNow();
-      if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
-        retryQueue().resume();
-        retryQueue().wake();
-      }
-    };
     let unsubVisibility: () => void;
     if (platform.subscribeAppVisibility) {
-      unsubVisibility = platform.subscribeAppVisibility(handleVisibility);
+      unsubVisibility = platform.subscribeAppVisibility(handleAppVisibilityChange);
     } else {
-      const onVis = () => handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
-      const onHide = () => handleVisibility(false);
-      const onShow = () => handleVisibility(typeof document === "undefined" ? true : document.visibilityState !== "hidden");
+      const onVis = () =>
+        handleAppVisibilityChange(
+          typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+        );
+      const onHide = () => handleAppVisibilityChange(false);
+      const onShow = () =>
+        handleAppVisibilityChange(
+          typeof document === "undefined" ? true : document.visibilityState !== "hidden",
+        );
       document?.addEventListener("visibilitychange", onVis);
       window?.addEventListener("pagehide", onHide);
       window?.addEventListener("pageshow", onShow);
@@ -267,16 +299,16 @@ export function WaypointApp({
     }
     let unsubResume: () => void;
     if (platform.subscribeNetworkResume) {
-      unsubResume = platform.subscribeNetworkResume(handleResume);
+      unsubResume = platform.subscribeNetworkResume(handleAppNetworkResume);
     } else {
-      window.addEventListener("online", handleResume);
-      unsubResume = () => window.removeEventListener("online", handleResume);
+      window.addEventListener("online", handleAppNetworkResume);
+      unsubResume = () => window.removeEventListener("online", handleAppNetworkResume);
     }
     return () => {
       unsubVisibility();
       unsubResume();
     };
-  }, [clock, platform]);
+  }, [platform]);
 
   function clearRetry() {
     if (retryTimer.current !== undefined) {

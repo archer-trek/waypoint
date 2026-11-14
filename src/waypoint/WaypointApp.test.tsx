@@ -8506,7 +8506,7 @@ test("服务器不认 token 时暂停同步和重试队列，不丢队列也不�
   const homeserver = new FakeHomeserver();
   let syncCalls = 0;
   let sendCalls = 0;
-  let rejectTokenOnSend = true;
+  const rejectTokenOnSend = true;
 
   homeserver.handler = passwordLoginHandler(async (input) => {
     if (input.url.includes("/sync")) {
@@ -12720,7 +12720,7 @@ test("集成回归：本地未确认/失败占位不误判未读、不阻断 lim
   const homeserver = new FakeHomeserver();
   let syncRound = 0;
   let sendCount = 0;
-  let readMarkersPosted: Array<{ roomId: string; eventId: string }> = [];
+  const readMarkersPosted: Array<{ roomId: string; eventId: string }> = [];
 
   homeserver.handler = passwordLoginHandler(async (input) => {
     if (input.url.includes("/sync")) {
