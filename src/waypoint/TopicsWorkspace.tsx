@@ -488,15 +488,20 @@ export function TopicsWorkspace({
       probe.style.visibility = "hidden";
       probe.style.whiteSpace = "pre";
       probe.style.font = style.font;
+      if (!style.font) {
+        probe.style.fontFamily = style.fontFamily;
+        probe.style.fontSize = style.fontSize;
+        probe.style.fontWeight = style.fontWeight;
+      }
+      probe.style.letterSpacing = style.letterSpacing;
       probe.textContent = textValue;
       document.body.appendChild(probe);
       const textWidth = probe.getBoundingClientRect().width;
       probe.remove();
-      const formStyle = getComputedStyle(form);
-      const padX =
-        (Number.parseFloat(formStyle.paddingLeft) || 0) +
-        (Number.parseFloat(formStyle.paddingRight) || 0);
-      const available = form.clientWidth - padX - 32 - 32 - 8 - 8 - 12;
+      // Measure against fixed single-line padding rather than computed padding,
+      // because multiline mode narrows horizontal padding and would otherwise oscillate.
+      const singleLinePadX = viewportMode === "narrow" ? 112 : 104;
+      const available = form.clientWidth - singleLinePadX - 4;
       exceeds = textWidth > Math.max(available, 48);
     }
     if (exceeds !== composerMultiline) {
@@ -508,7 +513,7 @@ export function TopicsWorkspace({
       ? Math.min(Math.max(scrollHeight, line), maxHeight)
       : Math.max(scrollHeight, line);
     textarea.style.height = `${nextHeight}px`;
-  }, [currentDraftText, activeRoomId, composerMultiline, composerWidth]);
+  }, [currentDraftText, activeRoomId, composerMultiline, composerWidth, viewportMode]);
 
   function openSettings() {
     if (anyFormSubmitting) {

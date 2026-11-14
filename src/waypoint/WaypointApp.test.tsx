@@ -21364,3 +21364,100 @@ test("CSS Design Tokens 验证：包含 Grokbot Light/Dark 语义变量定义，
   }
   expect(offendingLines).toEqual([]);
 });
+
+test("输入框处于单行与多行临界宽度时不会因 padding 变化触发 Maximum update depth exceeded 白屏 (#84)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!borderline:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "临界宽度话题" } },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const origClientWidthDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+  const origGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+  const origGetComputedStyle = window.getComputedStyle;
+
+  Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+    configurable: true,
+    get() {
+      if ((this as HTMLElement).classList?.contains("waypoint-composer")) {
+        return 407;
+      }
+      return origClientWidthDesc?.get ? origClientWidthDesc.get.call(this) : 0;
+    },
+  });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.tagName === "SPAN" && this.style.whiteSpace === "pre") {
+      return {
+        width: this.textContent === "borderline-draft" ? 250 : 320,
+        height: 24,
+        top: 0,
+        left: 0,
+        bottom: 24,
+        right: 250,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    }
+    return origGetBoundingClientRect.call(this);
+  });
+  vi.spyOn(window, "getComputedStyle").mockImplementation((elt, pseudoElt) => {
+    const style = origGetComputedStyle(elt, pseudoElt);
+    if ((elt as HTMLElement).classList?.contains("waypoint-composer")) {
+      const isMultiline = (elt as HTMLElement).classList.contains("multiline");
+      return new Proxy(style, {
+        get(target, prop) {
+          if (prop === "paddingLeft" || prop === "paddingRight") {
+            return isMultiline ? "16px" : "56px";
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
+    return style;
+  });
+
+  try {
+    renderApp(homeserver, "Waypoint Android", { viewportMode: () => "narrow" });
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "临界宽度话题" }));
+
+    const inputEl = screen.getByRole("textbox", { name: "输入消息" });
+    await user.type(inputEl, "borderline-draft");
+    expect(inputEl).toHaveValue("borderline-draft");
+
+    await user.clear(inputEl);
+    await user.type(inputEl, "exceeds-single-line");
+    const form = document.querySelector("form.waypoint-composer") as HTMLFormElement;
+    expect(form).toHaveClass("multiline");
+  } finally {
+    if (origClientWidthDesc) {
+      Object.defineProperty(HTMLElement.prototype, "clientWidth", origClientWidthDesc);
+    }
+    vi.restoreAllMocks();
+  }
+});
