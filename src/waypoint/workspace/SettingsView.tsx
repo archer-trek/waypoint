@@ -1,4 +1,7 @@
 import type { FormEvent, ReactNode } from "react";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
+import { APPEARANCE_OPTIONS, useAppearancePreference } from "../appearance";
 import { BackIcon, CloseIcon } from "../icons";
 import type { StoredRoomEvents } from "../session-store";
 import { resolveBotName, type RegisteredAgent } from "../topics";
@@ -59,6 +62,8 @@ export function SettingsView({
   onConfirmExit,
   onCancelExit,
 }: SettingsViewProps) {
+  const [appearanceMode, setAppearanceMode] = useAppearancePreference();
+
   return (
     <section
       aria-label="设置"
@@ -266,15 +271,68 @@ export function SettingsView({
             </div>
           ) : null}
         </section>
-        <section aria-label="这台设备" className="waypoint-device-section">
-          <h3>这台设备</h3>
-          <button
+        <section aria-label="这台设备" className="mt-8 space-y-3">
+          <h3 className="ml-1 text-xs font-semibold tracking-wide text-muted-foreground">
+            这台设备
+          </h3>
+          <div className="rounded-xl border border-border bg-card p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm font-medium text-foreground">外观</span>
+              <span className="text-xs text-muted-foreground">仅作用于本机</span>
+            </div>
+            <div
+              role="radiogroup"
+              aria-label="外观"
+              className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-1"
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+                  return;
+                }
+                event.preventDefault();
+                const currentIndex = APPEARANCE_OPTIONS.findIndex(
+                  (option) => option.value === appearanceMode,
+                );
+                const delta = event.key === "ArrowRight" ? 1 : -1;
+                const nextIndex =
+                  (currentIndex + delta + APPEARANCE_OPTIONS.length) %
+                  APPEARANCE_OPTIONS.length;
+                setAppearanceMode(APPEARANCE_OPTIONS[nextIndex].value);
+                const radios = event.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]');
+                radios[nextIndex]?.focus();
+              }}
+            >
+              {APPEARANCE_OPTIONS.map((option) => {
+                const selected = appearanceMode === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={agentsSubmitting || exiting}
+                    onClick={() => setAppearanceMode(option.value)}
+                    className={cn(
+                      "inline-flex h-9 items-center justify-center rounded-md px-3 text-sm font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 cursor-pointer",
+                      selected
+                        ? "bg-background text-foreground shadow-xs"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {option.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <Button
             type="button"
+            variant="outline"
+            className="h-12 w-full rounded-xl border-border bg-card text-sm font-semibold text-destructive hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
             disabled={agentsSubmitting || exiting}
             onClick={onOpenExitConfirm}
           >
             退出这台设备
-          </button>
+          </Button>
           {exitConfirmOpen ? (
             <ExitConfirmDialog
               exiting={exiting}
