@@ -49,7 +49,7 @@ export type SettingsViewProps = {
   onCancelExit: () => void;
 };
 
-/** Settings dialog/page for Bot roster management, local appearance, and device sign-out. */
+/** Settings dialog/page for Registered Bots management, local appearance, and device sign-out. */
 export function SettingsView({
   isModal,
   isNarrow,
@@ -311,7 +311,6 @@ export function SettingsView({
           >
             <AlertDialogContent
               aria-label="确认移除 Bot"
-              className="!mt-0 !rounded-xl !border-border !bg-card !p-6 !shadow-lg"
               onEscapeKeyDown={(event) => {
                 if (agentsSubmitting) {
                   event.preventDefault();

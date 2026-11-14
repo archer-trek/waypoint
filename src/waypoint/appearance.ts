@@ -14,10 +14,66 @@ export const APPEARANCE_OPTIONS: ReadonlyArray<{
   { value: "dark", label: "深色" },
 ];
 
-const THEME_COLORS: Record<ResolvedAppearance, string> = {
-  light: "#ffffff",
-  dark: "#09090b",
+const THEME_RGB_FALLBACK: Record<
+  ResolvedAppearance,
+  readonly [number, number, number]
+> = {
+  light: [255, 255, 255],
+  dark: [9, 9, 11],
 };
+
+function rgbTupleToHex(r: number, g: number, b: number): string {
+  return `#${[r, g, b]
+    .map((channel) =>
+      Math.max(0, Math.min(255, channel)).toString(16).padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
+function readCssThemeColor(root: HTMLElement): string | null {
+  if (
+    typeof window === "undefined" ||
+    typeof window.getComputedStyle !== "function"
+  ) {
+    return null;
+  }
+  const styles = window.getComputedStyle(root);
+  let raw = styles.getPropertyValue("--background").trim();
+  for (let depth = 0; depth < 3 && raw.startsWith("var("); depth += 1) {
+    const match = raw.match(/^var\(\s*(--[^,\s)]+)/);
+    if (!match) {
+      break;
+    }
+    raw = styles.getPropertyValue(match[1]).trim();
+  }
+  if (!raw || raw.startsWith("var(")) {
+    return null;
+  }
+  if (raw.startsWith("#")) {
+    return raw.toLowerCase();
+  }
+  const rgbMatch = raw.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+  if (rgbMatch) {
+    return rgbTupleToHex(
+      Number(rgbMatch[1]),
+      Number(rgbMatch[2]),
+      Number(rgbMatch[3]),
+    );
+  }
+  return null;
+}
+
+function resolveThemeColor(resolved: ResolvedAppearance): string {
+  const fromCss =
+    typeof document !== "undefined"
+      ? readCssThemeColor(document.documentElement)
+      : null;
+  if (fromCss) {
+    return fromCss;
+  }
+  const [r, g, b] = THEME_RGB_FALLBACK[resolved];
+  return rgbTupleToHex(r, g, b);
+}
 
 const DARK_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 
@@ -88,7 +144,7 @@ function syncThemeColorMeta(resolved: ResolvedAppearance): void {
   if (typeof document === "undefined" || !document.head) {
     return;
   }
-  const color = THEME_COLORS[resolved];
+  const color = resolveThemeColor(resolved);
   const metas = Array.from(
     document.head.querySelectorAll('meta[name="theme-color"]'),
   );

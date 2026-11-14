@@ -139,16 +139,33 @@ export function ComposerView({
       <form
         ref={composerFormRef}
         className={cn(
-          "waypoint-composer relative block min-h-11 border border-border rounded-[22px] bg-card shadow-lg box-border transition-shadow focus-within:shadow-xl",
+          "waypoint-composer relative block border border-border rounded-[22px] bg-card shadow-lg box-border transition-shadow focus-within:shadow-xl",
+          viewportMode === "narrow" ? "min-h-12" : "min-h-11",
           composerMultiline
-            ? "multiline pt-2 px-3 pb-11"
-            : "py-1.5 px-11",
+            ? viewportMode === "narrow"
+              ? "multiline pt-2.5 px-3 pb-12"
+              : "multiline pt-2 px-3 pb-11"
+            : viewportMode === "narrow"
+              ? "py-2 px-12"
+              : "py-1.5 px-11",
         )}
         onSubmit={onSendMessage}
       >
+        {composerMultiline ? (
+          <div
+            aria-hidden="true"
+            className={cn(
+              "pointer-events-none absolute inset-x-3 border-t border-border/60",
+              viewportMode === "narrow" ? "bottom-12" : "bottom-11",
+            )}
+          />
+        ) : null}
         <label
           className={cn(
-            "waypoint-attach-button absolute bottom-1.5 left-1.5 z-1 m-0 inline-flex items-center justify-center size-8 min-w-8 p-0 border border-border rounded-full bg-secondary text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-card hover:text-foreground",
+            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border border-border rounded-full bg-secondary text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-card hover:text-foreground",
+            viewportMode === "narrow"
+              ? "bottom-0.5 left-0.5 size-11 min-w-11 min-h-11 active:scale-92"
+              : "bottom-1.5 left-1.5 size-8 min-w-8",
             inputDisabled && "opacity-50 cursor-not-allowed",
           )}
         >
@@ -211,7 +228,10 @@ export function ComposerView({
           size="icon"
           aria-label="发送"
           className={cn(
-            "waypoint-send-button absolute bottom-1.5 right-1.5 z-1 m-0 size-8 min-w-8 p-0 border-0 rounded-full shrink-0 transition-all",
+            "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-all",
+            viewportMode === "narrow"
+              ? "bottom-0.5 right-0.5 size-11 min-w-11 min-h-11 active:scale-92"
+              : "bottom-1.5 right-1.5 size-8 min-w-8",
             isSendActive
               ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
               : "bg-secondary text-muted-foreground hover:bg-secondary/80",

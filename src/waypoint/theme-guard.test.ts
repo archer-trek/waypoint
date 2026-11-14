@@ -8,15 +8,16 @@ const ROOT_DIR = (
   globalThis as unknown as { process: { cwd: () => string } }
 ).process.cwd();
 
-function collectTsxFiles(dir: string): string[] {
+function collectSourceFiles(dir: string): string[] {
   const results: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const fullPath = join(dir, entry.name);
     if (entry.isDirectory()) {
-      results.push(...collectTsxFiles(fullPath));
+      results.push(...collectSourceFiles(fullPath));
     } else if (
       entry.isFile() &&
-      entry.name.endsWith(".tsx") &&
+      (entry.name.endsWith(".tsx") || entry.name.endsWith(".ts")) &&
+      !entry.name.endsWith(".d.ts") &&
       !entry.name.includes(".test.")
     ) {
       results.push(fullPath);
@@ -26,11 +27,12 @@ function collectTsxFiles(dir: string): string[] {
 }
 
 describe("Theme & CSS architecture static guards (#90)", () => {
-  test("all UI TSX files contain zero raw hex color literals and zero non-semantic Tailwind palette classes", () => {
+  test("all UI TS/TSX files contain zero raw hex color literals and zero non-semantic Tailwind palette classes", () => {
     const targets = [
       resolve(ROOT_DIR, "src/App.tsx"),
-      ...collectTsxFiles(resolve(ROOT_DIR, "src/components")),
-      ...collectTsxFiles(resolve(ROOT_DIR, "src/waypoint")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/components")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/lib")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/waypoint")),
     ].sort();
 
     expect(targets.length).toBeGreaterThan(10);

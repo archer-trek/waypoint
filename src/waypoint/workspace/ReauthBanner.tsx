@@ -39,7 +39,6 @@ export function ExitConfirmDialog({
     >
       <AlertDialogContent
         aria-label="确认退出这台设备"
-        className="!mt-0 !rounded-xl !border-border !bg-card !p-6 !shadow-lg"
         onEscapeKeyDown={(event) => {
           if (exiting) {
             event.preventDefault();

@@ -40,7 +40,6 @@ export function DeleteTopicDialog({
     >
       <AlertDialogContent
         aria-label="确认删除 Topic"
-        className="!mt-0 !rounded-xl !border-border !bg-card !p-6 !shadow-lg"
         onEscapeKeyDown={(event) => {
           if (deleting) {
             event.preventDefault();

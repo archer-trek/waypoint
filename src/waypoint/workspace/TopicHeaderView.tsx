@@ -125,7 +125,12 @@ export function TopicHeaderView({
                   variant="ghost"
                   size="icon"
                   aria-label="话题操作"
-                  className="waypoint-overflow-trigger size-9 rounded-full text-foreground hover:bg-accent"
+                  className={cn(
+                    "waypoint-overflow-trigger rounded-full text-foreground hover:bg-accent",
+                    isNarrow
+                      ? "size-11 min-w-11 min-h-11 active:scale-92"
+                      : "size-9",
+                  )}
                 >
                   <MoreHorizontal aria-hidden="true" className="size-5" />
                 </Button>

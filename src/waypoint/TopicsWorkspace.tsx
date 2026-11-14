@@ -2582,9 +2582,11 @@ export function TopicsWorkspace({
       ? "settings"
       : creating
         ? "create"
-        : activeTopic
-          ? "topic"
-          : "list";
+        : editing
+          ? "edit-topic"
+          : activeTopic
+            ? "topic"
+            : "list";
   const pageMotionRef = useRef({
     key: narrowPageKey,
     depth: targetDepth,
@@ -2680,7 +2682,7 @@ export function TopicsWorkspace({
         isNarrow={isNarrow}
         safeInset={safeInset}
         nestedModalOpen={exitConfirmOpen}
-        reauthBanner={!isModal && reauthRequired ? renderReauthBanner() : null}
+        reauthBanner={reauthRequired ? renderReauthBanner() : null}
         editPendingFields={editPendingFields}
         editNameInput={editNameInput}
         editDescriptionInput={editDescriptionInput}
