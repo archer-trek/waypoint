@@ -139,33 +139,26 @@ export function ComposerView({
       <form
         ref={composerFormRef}
         className={cn(
-          "waypoint-composer relative block border border-border rounded-[22px] bg-card shadow-lg box-border transition-shadow focus-within:shadow-xl",
-          viewportMode === "narrow" ? "min-h-12" : "min-h-11",
+          "waypoint-composer relative block border border-border bg-card shadow-lg box-border transition-shadow focus-within:shadow-xl",
+          viewportMode === "narrow"
+            ? "min-h-[52px] rounded-[26px]"
+            : "min-h-12 rounded-[24px]",
           composerMultiline
             ? viewportMode === "narrow"
-              ? "multiline pt-2.5 px-3 pb-12"
-              : "multiline pt-2 px-3 pb-11"
+              ? "multiline pt-3 px-4 pb-[52px]"
+              : "multiline pt-3 px-4 pb-12"
             : viewportMode === "narrow"
-              ? "py-2 px-12"
-              : "py-1.5 px-11",
+              ? "py-2.5 px-14"
+              : "py-2 px-[52px]",
         )}
         onSubmit={onSendMessage}
       >
-        {composerMultiline ? (
-          <div
-            aria-hidden="true"
-            className={cn(
-              "pointer-events-none absolute inset-x-3 border-t border-border/60",
-              viewportMode === "narrow" ? "bottom-12" : "bottom-11",
-            )}
-          />
-        ) : null}
         <label
           className={cn(
             "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border border-border rounded-full bg-secondary text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-card hover:text-foreground",
             viewportMode === "narrow"
-              ? "bottom-0.5 left-0.5 size-11 min-w-11 min-h-11 active:scale-92"
-              : "bottom-1.5 left-1.5 size-8 min-w-8",
+              ? "bottom-2 left-2 size-9 min-w-9 min-h-9 after:absolute after:-inset-1 after:content-[''] active:scale-92"
+              : "bottom-2 left-2 size-8 min-w-8",
             inputDisabled && "opacity-50 cursor-not-allowed",
           )}
         >
@@ -230,8 +223,8 @@ export function ComposerView({
           className={cn(
             "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-all",
             viewportMode === "narrow"
-              ? "bottom-0.5 right-0.5 size-11 min-w-11 min-h-11 active:scale-92"
-              : "bottom-1.5 right-1.5 size-8 min-w-8",
+              ? "bottom-2 right-2 size-9 min-w-9 min-h-9 after:absolute after:-inset-1 after:content-[''] active:scale-92"
+              : "bottom-2 right-2 size-8 min-w-8",
             isSendActive
               ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
               : "bg-secondary text-muted-foreground hover:bg-secondary/80",
