@@ -1,4 +1,14 @@
 import type { RefObject } from "react";
+import { FileText, MoreHorizontal } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
 import { MessageBody } from "../MessageBody";
 import type { DraftAttachment } from "../session-store";
 import type { TimelineItem, TimelineMedia } from "../topics";
@@ -44,7 +54,7 @@ export function TimelineView({
       ref={timelineRef}
       role="log"
       aria-label="对话时间线"
-      className="waypoint-timeline"
+      className="waypoint-timeline relative flex-1 min-h-0 overflow-y-auto px-4 py-5 sm:px-6 flex flex-col gap-4.5"
       onScroll={onScroll}
     >
       {items.map((item) =>
@@ -53,14 +63,18 @@ export function TimelineView({
             key={item.key}
             role="separator"
             aria-label={item.label}
-            className="waypoint-day-separator"
+            className="waypoint-day-separator self-center text-center text-xs font-medium text-muted-foreground my-4 px-3 py-1 bg-transparent border-0 rounded-full"
           >
             {item.label}
           </div>
         ) : (
           <div
             key={item.key}
-            className={`waypoint-message-row ${item.side}`}
+            className={cn(
+              "waypoint-message-row flex items-start gap-2 w-full box-border",
+              item.side,
+              item.side === "right" ? "justify-end" : "justify-start",
+            )}
             data-side={item.side}
             data-event-id={item.eventId}
           >
@@ -68,49 +82,80 @@ export function TimelineView({
               <span
                 role="status"
                 aria-label="未确认"
-                className="waypoint-unconfirmed-spinner"
+                className="waypoint-unconfirmed-spinner inline-block size-3.5 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin shrink-0 mt-1"
               />
             ) : item.status === "failed" && item.localId ? (
-              <div className="waypoint-failed-controls">
-                <button
-                  type="button"
-                  aria-label="更多操作"
-                  aria-haspopup="menu"
-                  aria-expanded={openFailedMenuId === item.localId}
-                  className="waypoint-bubble-menu-trigger"
-                  onClick={() => onToggleFailedMenu(item.localId!)}
+              <div className="waypoint-failed-controls relative inline-flex items-center gap-1 shrink-0 mt-1">
+                <DropdownMenu
+                  modal={false}
+                  open={openFailedMenuId === item.localId}
+                  onOpenChange={(nextOpen) => {
+                    const isOpen = openFailedMenuId === item.localId;
+                    if (nextOpen !== isOpen) {
+                      onToggleFailedMenu(item.localId!);
+                    }
+                  }}
                 >
-                  ⋯
-                </button>
-                <button
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="更多操作"
+                      className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
+                    >
+                      <MoreHorizontal aria-hidden="true" className="size-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    aria-labelledby={undefined}
+                    aria-label="消息操作"
+                    side="top"
+                    align="end"
+                    sideOffset={4}
+                    className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      event.nativeEvent.stopPropagation();
+                    }}
+                  >
+                    <DropdownMenuItem
+                      variant="destructive"
+                      className="min-h-8 px-2 py-1.5 text-sm"
+                      onSelect={() => onDiscardFailed(item.localId!)}
+                    >
+                      丢掉
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
                   type="button"
+                  variant="destructive"
+                  size="icon"
                   aria-label="失败"
-                  className="waypoint-failed-button"
+                  className="waypoint-failed-button size-4.5 min-w-4.5 rounded-full p-0 text-xs font-bold leading-none shrink-0"
                   disabled={reauthRequired}
                   onClick={() => onResendFailed(item.localId!)}
                 >
                   !
-                </button>
-                {openFailedMenuId === item.localId ? (
-                  <div
-                    role="menu"
-                    aria-label="消息操作"
-                    className="waypoint-failed-menu"
-                  >
-                    <button
-                      type="button"
-                      role="menuitem"
-                      onClick={() => onDiscardFailed(item.localId!)}
-                    >
-                      丢掉
-                    </button>
-                  </div>
-                ) : null}
+                </Button>
               </div>
             ) : null}
-            <div className="waypoint-message-content">
+            <div
+              className={cn(
+                "waypoint-message-content flex flex-col min-w-0 gap-1",
+                item.side === "right"
+                  ? "max-w-[min(38rem,85%)] items-end"
+                  : "w-full max-w-full items-start",
+              )}
+            >
               <div
-                className="waypoint-bubble"
+                className={cn(
+                  "waypoint-bubble",
+                  item.side === "right"
+                    ? "bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal break-words shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal"
+                    : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] leading-[1.65] text-foreground",
+                )}
                 onContextMenu={
                   item.status === "failed" && item.localId
                     ? (event) => {
@@ -121,12 +166,12 @@ export function TimelineView({
                 }
               >
                 {item.media ? (
-                  <div className="waypoint-media-bubble">
+                  <div className="waypoint-media-bubble flex flex-col gap-1.5 max-w-full">
                     {item.media.kind === "image" ? (
                       <button
                         type="button"
                         aria-label={`查看图片 ${item.media.filename}`}
-                        className="waypoint-media-image-button"
+                        className="waypoint-media-image-button m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer max-w-full rounded-lg overflow-hidden"
                         onClick={() => onOpenMedia(item.media!)}
                       >
                         {(() => {
@@ -142,10 +187,10 @@ export function TimelineView({
                             <img
                               src={imageSrc}
                               alt={item.media.filename}
-                              className="waypoint-bubble-image"
+                              className="waypoint-bubble-image block max-w-full h-auto rounded-lg"
                             />
                           ) : (
-                            <span className="waypoint-media-filename">
+                            <span className="waypoint-media-filename break-words">
                               {item.media.filename}
                             </span>
                           );
@@ -154,10 +199,11 @@ export function TimelineView({
                     ) : (
                       <button
                         type="button"
-                        className="waypoint-media-file-button"
+                        className="waypoint-media-file-button inline-flex items-center gap-1.5 m-0 px-2.5 py-1.5 rounded-md border border-border bg-secondary text-secondary-foreground text-left cursor-pointer max-w-full hover:bg-accent"
                         onClick={() => onOpenMedia(item.media!)}
                       >
-                        <span className="waypoint-media-filename">
+                        <FileText aria-hidden="true" className="size-3.5 shrink-0" />
+                        <span className="waypoint-media-filename break-words">
                           {item.media.filename}
                         </span>
                       </button>
@@ -177,17 +223,21 @@ export function TimelineView({
                 )}
               </div>
               {item.reactions && item.reactions.length > 0 ? (
-                <div className="waypoint-message-reactions">
+                <div className="waypoint-message-reactions flex flex-wrap gap-1">
                   {item.reactions.map((key) => (
-                    <span key={key} className="waypoint-message-reaction">
+                    <Badge
+                      key={key}
+                      variant="secondary"
+                      className="waypoint-message-reaction font-normal text-xs px-2 py-0.5 border border-border/60 text-muted-foreground"
+                    >
                       {key}
-                    </span>
+                    </Badge>
                   ))}
                 </div>
               ) : null}
               {item.prompt && item.eventId ? (
                 <div
-                  className="waypoint-message-prompt"
+                  className="waypoint-message-prompt inline-flex flex-wrap gap-2 items-center mt-2"
                   role="group"
                   aria-label={
                     item.prompt.kind === "approval" ? "审批操作" : "选择操作"
@@ -203,10 +253,15 @@ export function TimelineView({
                       activeTopicUnavailable ||
                       reauthRequired;
                     return (
-                      <button
+                      <Button
                         key={option.key}
                         type="button"
-                        className={`waypoint-prompt-button${isSelected ? " selected" : ""}`}
+                        variant={isSelected ? "default" : "outline"}
+                        size="sm"
+                        className={cn(
+                          "waypoint-prompt-button h-auto rounded-full px-3.5 py-1.5 text-[0.8125rem] font-medium gap-1.5 transition-transform",
+                          isSelected && "selected font-semibold scale-[1.03] shadow-xs",
+                        )}
                         aria-pressed={isSelected}
                         disabled={isDisabled}
                         onClick={() =>
@@ -217,20 +272,26 @@ export function TimelineView({
                           {option.label}
                         </span>
                         {option.scope ? (
-                          <>
-                            {" "}
-                            <span className="waypoint-prompt-button-scope">
-                              {option.scope}
-                            </span>
-                          </>
+                          <span
+                            className={cn(
+                              "waypoint-prompt-button-scope text-xs",
+                              isSelected
+                                ? "text-primary-foreground/85"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {option.scope}
+                          </span>
                         ) : null}
-                      </button>
+                      </Button>
                     );
                   })}
                 </div>
               ) : null}
               {item.responding ? (
-                <div className="waypoint-message-responding">正在回应</div>
+                <div className="waypoint-message-responding text-xs font-medium text-muted-foreground px-1">
+                  正在回应
+                </div>
               ) : null}
             </div>
           </div>
