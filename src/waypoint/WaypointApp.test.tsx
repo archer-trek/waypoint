@@ -2429,13 +2429,16 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
   await login(user);
 
   await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
-  const botSelect = screen.getByLabelText("绑定 Bot") as HTMLSelectElement;
-  expect(botSelect.value).toBe("");
+  const botSelect = screen.getByRole("combobox", { name: "绑定 Bot" });
+  expect(botSelect).toHaveTextContent("请选择 Bot");
+  await user.click(botSelect);
+  const botListbox = await screen.findByRole("listbox");
   // 不显示完整用户 ID
-  expect(botSelect).not.toHaveTextContent("@bot1:example.com");
-  expect(botSelect).not.toHaveTextContent("@bot2:example.com");
-  expect(botSelect).toHaveTextContent("一号助理");
-  expect(botSelect).toHaveTextContent("bot2");
+  expect(botListbox).not.toHaveTextContent("@bot1:example.com");
+  expect(botListbox).not.toHaveTextContent("@bot2:example.com");
+  expect(screen.getByRole("option", { name: "一号助理" })).toBeInTheDocument();
+  expect(screen.getByRole("option", { name: "bot2" })).toBeInTheDocument();
+  await user.keyboard("{Escape}");
 
   await user.type(screen.getByLabelText("Topic 名字"), "重复名字");
   await user.type(screen.getByLabelText(/Description/), "第一段上下文\n第二行内容");
@@ -2446,7 +2449,8 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
   expect(homeserver.requests.some((r) => r.url.endsWith("/createRoom"))).toBe(false);
 
   // 选择 bot2 后创建
-  await user.selectOptions(botSelect, "@bot2:example.com");
+  await user.click(botSelect);
+  await user.click(await screen.findByRole("option", { name: "bot2" }));
   await user.click(screen.getByRole("button", { name: "创建 Topic" }));
 
   const header = await screen.findByRole("banner");
@@ -2480,9 +2484,10 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
 
   // 再次新建：此时有最近活动的 Topic（绑定 bot2），默认预选 bot2，且确认前可以改选 bot1，并允许重名
   await user.click(screen.getByRole("button", { name: "新建 Topic" }));
-  const secondSelect = screen.getByLabelText("绑定 Bot") as HTMLSelectElement;
-  expect(secondSelect.value).toBe("@bot2:example.com");
-  await user.selectOptions(secondSelect, "@bot1:example.com");
+  const secondSelect = screen.getByRole("combobox", { name: "绑定 Bot" });
+  expect(secondSelect).toHaveTextContent("bot2");
+  await user.click(secondSelect);
+  await user.click(await screen.findByRole("option", { name: "一号助理" }));
   await user.type(screen.getByLabelText("Topic 名字"), "重复名字");
   await user.click(screen.getByRole("button", { name: "创建 Topic" }));
 
@@ -2562,7 +2567,7 @@ test("预选最近有活动 Topic 绑定的 Bot；若该 Bot 不在名册则不�
   const view = renderApp(homeserver);
   await login(user);
   await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
-  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  expect(screen.getByRole("combobox", { name: "绑定 Bot" })).toHaveTextContent("二号");
   view.unmount();
 
   // Case 2: 最近有活动的 Topic 绑定的 Bot 已不在名册，不预选
@@ -2625,7 +2630,7 @@ test("预选最近有活动 Topic 绑定的 Bot；若该 Bot 不在名册则不�
   renderApp(hs2);
   await login(user);
   await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
-  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("");
+  expect(screen.getByRole("combobox", { name: "绑定 Bot" })).toHaveTextContent("请选择 Bot");
 });
 
 test("建房失败时表单保持打开且保留输入，不留残留房间，可立即重试成功", async () => {
@@ -2686,7 +2691,8 @@ test("建房失败时表单保持打开且保留输入，不留残留房间，�
   await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
   await user.type(screen.getByLabelText("Topic 名字"), "不丢草稿的话题");
   await user.type(screen.getByLabelText(/Description/), "保留这些描述");
-  await user.selectOptions(screen.getByLabelText("绑定 Bot"), "@bot2:example.com");
+  await user.click(screen.getByRole("combobox", { name: "绑定 Bot" }));
+  await user.click(await screen.findByRole("option", { name: "二号" }));
   await user.click(screen.getByRole("button", { name: "创建 Topic" }));
 
   const alert = await screen.findByRole("alert");
@@ -2695,7 +2701,7 @@ test("建房失败时表单保持打开且保留输入，不留残留房间，�
   expect(alert).not.toHaveTextContent("500");
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("不丢草稿的话题");
   expect(screen.getByLabelText(/Description/)).toHaveValue("保留这些描述");
-  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  expect(screen.getByRole("combobox", { name: "绑定 Bot" })).toHaveTextContent("二号");
   expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
   expect(homeserver.requests.some((r) => r.url.includes("/leave") || r.url.includes("/forget"))).toBe(false);
 
@@ -3393,7 +3399,7 @@ test("宽视口常驻左右两栏、不自动打开第一条 Topic，未选中�
   // 点击右侧快捷新建按钮打开新建表单，且左栏依然常驻可见
   await user.click(quickCreate);
   expect(screen.getByRole("region", { name: "新建 Topic" })).toBeInTheDocument();
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toBeVisible();
 
   await user.click(screen.getByRole("button", { name: "取消" }));
   await user.click(screen.getByRole("button", { name: "首条话题" }));
@@ -3774,7 +3780,7 @@ test("宽窄视口切换时保留已打开 Topic 与新建表单草稿且不重�
   act(() => {
     setViewport("wide");
   });
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toBeVisible();
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("草稿标题");
   expect(screen.getByLabelText(/Description/)).toHaveValue("未提交上下文");
   expect(syncCount).toBe(1);
@@ -4442,7 +4448,7 @@ test("按房间保存原始事件：m.replace 编辑不提前抬高 Topic 活动
   await login(user);
   await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
   // m.replace (ts=9000) 不算作新活动，最新活动仍是 !t2 (ts=3000) -> 预选 @bot2
-  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  expect(screen.getByRole("combobox", { name: "绑定 Bot" })).toHaveTextContent("二号");
   first.unmount();
 
   // 重启后增量同步带来的 m.room.name 更新保留原 im.waypoint.topic 状态并生效
@@ -4671,7 +4677,7 @@ test("进入 Topic 列表后可在设置里查看 Bot 名册（展示名字优�
 
   // 宽视口不显示返回按钮，左侧栏仍可见
   expect(screen.queryByRole("button", { name: "返回" })).not.toBeInTheDocument();
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toBeVisible();
 
   // 切到窄视口后，设置全屏显示并推入导航栈，顶栏有返回按钮
   act(() => {
@@ -5090,7 +5096,7 @@ test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅�
   await user.click(screen.getByRole("button", { name: "确认移除" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("移除 Bot 失败，因为超时。");
   expect(screen.getByRole("alertdialog", { name: "确认移除 Bot" })).toBeInTheDocument();
-  const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
+  const agentsSection = screen.getByRole("region", { name: "Bot 名册", hidden: true });
   expect(agentsSection).toHaveTextContent("@bot2:example.com");
 
   // 重试确认成功移除 @bot2
@@ -5113,10 +5119,11 @@ test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅�
 
   // 不调用 leave 或 forget，已有 Topic 仍留在列表
   expect(homeserver.requests.some((req) => req.url.includes("/leave") || req.url.includes("/forget"))).toBe(false);
-  expect(screen.getByRole("button", { name: /二号的话题/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /三号的话题/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /二号的话题/, hidden: true })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /三号的话题/, hidden: true })).toBeInTheDocument();
 
-  // 名册只剩一个 Bot 后，顶栏不放解析名，也不显示完整用户 ID
+  // 关闭设置弹窗后，名册只剩一个 Bot，顶栏不放解析名，也不显示完整用户 ID
+  await user.click(screen.getByRole("button", { name: "关闭" }));
   await user.click(screen.getByRole("button", { name: /二号的话题/ }));
   const banner2 = screen.getByRole("banner");
   expect(banner2).toHaveTextContent("二号的话题");
@@ -5221,8 +5228,8 @@ test("新建 Topic 内可直接登记新 Bot：单 Bot 时不显示选择器，�
 
   // 重试登记成功：显示绑定 Bot 下拉框并自动选中刚登记的 @bot2:example.com
   await user.click(screen.getByRole("button", { name: "登记 Bot" }));
-  const select = (await screen.findByLabelText("绑定 Bot")) as HTMLSelectElement;
-  expect(select.value).toBe("@bot2:example.com");
+  const select = await screen.findByRole("combobox", { name: "绑定 Bot" });
+  expect(select).toHaveTextContent("协作二号");
   expect(screen.queryByRole("region", { name: "登记新 Bot" })).not.toBeInTheDocument();
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("跨项目协作");
   expect(screen.getByLabelText(/Description/)).toHaveValue("需要二号 Bot 协助");
@@ -5423,10 +5430,10 @@ test("在 Topic 固定顶栏可编辑名字和 Description：提交期间锁定�
   expect(topicPuts[0]?.body).toEqual({ topic: "新上下文" });
   expect(homeserver.requests.some((r) => r.url.includes("/account_data/"))).toBe(false);
 
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("旧名字");
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).not.toHaveTextContent("新名字");
-  expect(screen.getByRole("banner")).toHaveTextContent("旧名字");
-  expect(screen.getByRole("banner")).toHaveTextContent("旧上下文");
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toHaveTextContent("旧名字");
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).not.toHaveTextContent("新名字");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("旧名字");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("旧上下文");
 
   await act(async () => {
     namePutDeferred.resolve({ type: "response", status: 200, body: { event_id: "$ev-name" } });
@@ -5619,8 +5626,8 @@ test("编辑 Topic 全部失败时留在表单并保留所有输入，重试可�
   expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("失败保留名");
   expect(screen.getByLabelText(/Description/)).toHaveValue("失败保留说明");
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("原话题");
-  expect(screen.getByRole("banner")).toHaveTextContent("原说明");
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toHaveTextContent("原话题");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("原说明");
 
   shouldFail = false;
   await user.click(screen.getByRole("button", { name: "保存" }));
@@ -5702,9 +5709,9 @@ test("同时修改名字和 Description 且只有一项成功时，成功的立�
   expect(screen.queryByLabelText("Topic 名字")).not.toBeInTheDocument();
   expect(screen.getByLabelText(/Description/)).toHaveValue("未成新说明");
   // 成功项立即在列表与顶栏生效
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("已成新名");
-  expect(screen.getByRole("banner")).toHaveTextContent("已成新名");
-  expect(screen.getByRole("banner")).toHaveTextContent("最初说明");
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("最初说明");
 
   // 重试：只补发 m.room.topic，不重发 m.room.name
   const putCountBeforeRetryA = homeserver.requests.filter((r) => r.method === "PUT").length;
@@ -5735,9 +5742,9 @@ test("同时修改名字和 Description 且只有一项成功时，成功的立�
   expect(screen.queryByLabelText(/Description/)).not.toBeInTheDocument();
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("未成新名二");
   // 清空 Description 已立即生效，名字仍保持上一步的已成新名
-  expect(screen.getByRole("banner").querySelector(".waypoint-topic-description")).toBeNull();
-  expect(screen.getByRole("complementary", { name: "Topic 列表" })).toHaveTextContent("已成新名");
-  expect(screen.getByRole("banner")).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner", { hidden: true }).querySelector(".waypoint-topic-description")).toBeNull();
+  expect(screen.getByRole("complementary", { name: "Topic 列表", hidden: true })).toHaveTextContent("已成新名");
+  expect(screen.getByRole("banner", { hidden: true })).toHaveTextContent("已成新名");
 
   // 重试：只补发 m.room.name，不重发 m.room.topic
   failName = false;
@@ -6735,7 +6742,8 @@ test("新建尚未加入的 Topic 顶栏可从其他房间解析 Bot 的 Matrix 
 
   await user.click(screen.getByRole("button", { name: "新建 Topic" }));
   await user.type(screen.getByLabelText("Topic 名字"), "新主题");
-  await user.selectOptions(screen.getByLabelText("绑定 Bot"), "@bot2:example.com");
+  await user.click(screen.getByRole("combobox", { name: "绑定 Bot" }));
+  await user.click(await screen.findByRole("option", { name: "二号矩阵显示名" }));
   await user.click(screen.getByRole("button", { name: "创建 Topic" }));
 
   await waitFor(() => {
@@ -11314,9 +11322,9 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
     const dialog = await screen.findByRole("alertdialog", { name: "确认删除 Topic" });
     expect(await screen.findByRole("alert")).toHaveTextContent(failureCase.expectedAlert);
     expect(dialog).toBeVisible();
-    expect(screen.getByRole("button", { name: "保留验证话题" })).toBeInTheDocument();
-    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("已有历史消息");
-    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认排队消息");
+    expect(screen.getByRole("button", { name: "保留验证话题", hidden: true })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "对话时间线", hidden: true })).toHaveTextContent("已有历史消息");
+    expect(screen.getByRole("log", { name: "对话时间线", hidden: true })).toHaveTextContent("未确认排队消息");
     expect(screen.getByLabelText("输入消息")).toHaveValue("还没发出的草稿");
     expect(homeserver.requests.some((r) => r.url.endsWith("/forget"))).toBe(false);
     expect(homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/m.direct"))).toBe(
@@ -13223,7 +13231,7 @@ test("置顶写在 Owner 的 im.waypoint.pinned 标签（不用 order 和 favour
 
   // 新建 Topic 仍预选最近活动的话题二所绑定的二号 Bot
   await user.click(screen.getByRole("button", { name: "新建 Topic" }));
-  expect((screen.getByLabelText("绑定 Bot") as HTMLSelectElement).value).toBe("@bot2:example.com");
+  expect(screen.getByRole("combobox", { name: "绑定 Bot" })).toHaveTextContent("二号");
   await user.click(screen.getByRole("button", { name: "取消" }));
 
   // 置顶话题二 -> 发送 PUT tags/im.waypoint.pinned { order: 0 }，三条全部可置顶

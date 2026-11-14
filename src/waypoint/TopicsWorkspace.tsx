@@ -382,6 +382,7 @@ export function TopicsWorkspace({
   useEffect(() => {
     const handleGlobalKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (event.defaultPrevented) return;
         if (overflowMenuOpen) {
           setOverflowMenuOpen(false);
         } else if (creating) {
@@ -402,6 +403,8 @@ export function TopicsWorkspace({
           closeEditForm();
         } else if (deleteConfirmOpen) {
           cancelDeleteConfirm();
+        } else if (exitConfirmOpen) {
+          cancelExitConfirm();
         }
       } else if (
         (event.key === "n" || event.key === "N") &&
@@ -416,13 +419,20 @@ export function TopicsWorkspace({
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [
+    overflowMenuOpen,
     creating,
+    submitting,
     quickRegisterOpen,
+    quickSubmitting,
     settingsOpen,
     agentsForm,
+    agentsSubmitting,
     exitConfirmOpen,
+    exiting,
     editing,
+    editSubmitting,
     deleteConfirmOpen,
+    deleting,
   ]);
 
   const activeRoomId = activeTopic?.roomId;
@@ -2631,6 +2641,7 @@ export function TopicsWorkspace({
         isModal={isModal}
         isNarrow={isNarrow}
         safeInset={safeInset}
+        nestedModalOpen={exitConfirmOpen}
         reauthRequired={reauthRequired}
         reauthBanner={reauthRequired ? renderReauthBanner() : null}
         registeredAgents={registeredAgents}
@@ -2657,6 +2668,28 @@ export function TopicsWorkspace({
         onQuickHandwrittenNameChange={setQuickHandwrittenName}
         onQuickRegisterKeyDown={handleQuickRegisterKeyDown}
         onQuickRegister={() => void handleQuickRegister()}
+      />
+    );
+  }
+
+  function renderEditDialog(isModal: boolean) {
+    return (
+      <EditTopicView
+        isModal={isModal}
+        isNarrow={isNarrow}
+        safeInset={safeInset}
+        nestedModalOpen={exitConfirmOpen}
+        reauthBanner={!isModal && reauthRequired ? renderReauthBanner() : null}
+        editPendingFields={editPendingFields}
+        editNameInput={editNameInput}
+        editDescriptionInput={editDescriptionInput}
+        editSubmitting={editSubmitting}
+        editError={editError}
+        onSubmit={(event) => void handleEditSubmit(event)}
+        onEditNameInputChange={setEditNameInput}
+        onEditDescriptionInputChange={setEditDescriptionInput}
+        onCloseEditForm={closeEditForm}
+        onGoBack={goBack}
       />
     );
   }
@@ -2708,22 +2741,8 @@ export function TopicsWorkspace({
             onCancel={cancelDeleteConfirm}
           />
         ) : null}
-        {editing ? (
-          <EditTopicView
-            safeInset={safeInset}
-            editPendingFields={editPendingFields}
-            editNameInput={editNameInput}
-            editDescriptionInput={editDescriptionInput}
-            editSubmitting={editSubmitting}
-            editError={editError}
-            onSubmit={(event) => void handleEditSubmit(event)}
-            onEditNameInputChange={setEditNameInput}
-            onEditDescriptionInputChange={setEditDescriptionInput}
-            onCloseEditForm={closeEditForm}
-          />
-        ) : (
-          <main
-            className="waypoint-timeline-container"
+        <main
+          className="waypoint-timeline-container"
             style={{ paddingBottom: `${safeInset}px` }}
             onDragOver={(event) => {
               if (!supportsFileDropAndPaste) {
@@ -2806,8 +2825,7 @@ export function TopicsWorkspace({
               onDraftTextChange={(text) => updateDraftText(roomId, text)}
               extractDataTransferFiles={extractDataTransferFiles}
             />
-          </main>
-        )}
+        </main>
       </div>
     );
   }
@@ -2854,6 +2872,8 @@ export function TopicsWorkspace({
               renderSettingsDialog(false)
             ) : creating ? (
               renderCreateDialog(false)
+            ) : activeTopic && editing ? (
+              renderEditDialog(false)
             ) : activeTopic ? (
               renderTopicView()
             ) : (
@@ -2863,19 +2883,17 @@ export function TopicsWorkspace({
             <>
               <div
                 style={{ display: "contents" }}
-                aria-hidden={settingsOpen || creating ? "true" : undefined}
+                aria-hidden={settingsOpen || creating || editing ? "true" : undefined}
               >
                 {activeTopic ? renderTopicView() : renderEmptyDetail()}
               </div>
-              {settingsOpen ? (
-                <div className="waypoint-modal-backdrop" onClick={closeSettings}>
-                  {renderSettingsDialog(true)}
-                </div>
-              ) : creating ? (
-                <div className="waypoint-modal-backdrop" onClick={closeCreateForm}>
-                  {renderCreateDialog(true)}
-                </div>
-              ) : null}
+              {settingsOpen
+                ? renderSettingsDialog(true)
+                : creating
+                  ? renderCreateDialog(true)
+                  : activeTopic && editing
+                    ? renderEditDialog(true)
+                    : null}
             </>
           )}
         </div>

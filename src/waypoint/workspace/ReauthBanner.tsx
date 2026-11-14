@@ -1,4 +1,20 @@
 import type { FormEvent } from "react";
+import { AlertCircle, AlertTriangle } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { cn } from "@/lib/utils";
 
 export type ExitConfirmDialogProps = {
   exiting: boolean;
@@ -6,29 +22,59 @@ export type ExitConfirmDialogProps = {
   onCancelExit: () => void;
 };
 
-/** Confirmation dialog rendered before clearing local session state on device exit. */
+/** Centered AlertDialog rendered before clearing local session state on device exit. */
 export function ExitConfirmDialog({
   exiting,
   onConfirmExit,
   onCancelExit,
 }: ExitConfirmDialogProps) {
   return (
-    <div
-      role="alertdialog"
-      aria-label="确认退出这台设备"
-      className="waypoint-agents-form"
+    <AlertDialog
+      open
+      onOpenChange={(open) => {
+        if (!open && !exiting) {
+          onCancelExit();
+        }
+      }}
     >
-      <h4>确认退出这台设备</h4>
-      <p>退出将清空这台设备上的本地时间线、未发送草稿和重试队列。</p>
-      <div className="waypoint-form-actions">
-        <button type="button" disabled={exiting} onClick={onConfirmExit}>
-          {exiting ? "正在退出…" : "确认退出"}
-        </button>
-        <button type="button" disabled={exiting} onClick={onCancelExit}>
-          取消
-        </button>
-      </div>
-    </div>
+      <AlertDialogContent
+        aria-label="确认退出这台设备"
+        className="!mt-0 !rounded-xl !border-border !bg-card !p-6 !shadow-lg"
+        onEscapeKeyDown={(event) => {
+          if (exiting) {
+            event.preventDefault();
+          }
+        }}
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>确认退出这台设备</AlertDialogTitle>
+          <AlertDialogDescription>
+            退出将清空这台设备上的本地时间线、未发送草稿和重试队列。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel
+            className="min-h-11 sm:min-h-9"
+            disabled={exiting}
+          >
+            取消
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className={cn(
+              buttonVariants({ variant: "destructive" }),
+              "min-h-11 sm:min-h-9",
+            )}
+            disabled={exiting}
+            onClick={(event) => {
+              event.preventDefault();
+              onConfirmExit();
+            }}
+          >
+            {exiting ? "正在退出…" : "确认退出"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -68,72 +114,115 @@ export function ReauthBanner({
   onConfirmExit,
   onCancelExit,
 }: ReauthBannerProps) {
+  const busy = exiting || reauthSubmitting;
+
   return (
     <section
       role="status"
       aria-label="重新验证提示"
-      className="waypoint-reauth-banner"
+      className="shrink-0 border-b border-warning-border bg-warning px-4 py-3 text-warning-foreground"
     >
-      <div className="waypoint-reauth-banner-row">
-        <p className="waypoint-reauth-banner-text">
-          服务器不认这台设备的登录，已暂停同步与发送，本地时间线、草稿和重试队列仍保留。
-        </p>
-        <div className="waypoint-reauth-banner-actions">
-          <button
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-start gap-2">
+          <AlertTriangle
+            className="mt-0.5 size-4 shrink-0 text-warning-foreground"
+            aria-hidden="true"
+          />
+          <p className="m-0 text-sm leading-snug">
+            服务器不认这台设备的登录，已暂停同步与发送，本地时间线、草稿和重试队列仍保留。
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
             type="button"
-            disabled={exiting || reauthSubmitting}
+            variant="outline"
+            size="sm"
+            className="border-warning-border bg-background/80 text-foreground hover:bg-background"
+            disabled={busy}
             onClick={onOpenReauthForm}
           >
             重新验证
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            disabled={exiting || reauthSubmitting}
+            variant="ghost"
+            size="sm"
+            className="text-warning-foreground hover:bg-background/40 hover:text-warning-foreground"
+            disabled={busy}
             onClick={onOpenExitConfirm}
           >
             退出这台设备
-          </button>
+          </Button>
         </div>
       </div>
+
       {reauthOpen ? (
         <form
           aria-label="重新验证"
-          className="waypoint-reauth-form"
+          className="mt-3 space-y-3 rounded-xl border border-warning-border bg-card p-4 text-card-foreground shadow-xs"
           onSubmit={onReauthSubmit}
         >
-          <label>
-            Homeserver 地址
-            <input name="reauth-address" value={address} readOnly disabled />
-          </label>
-          <label>
-            用户 ID
-            <input name="reauth-user-id" value={ownerId} readOnly disabled />
-          </label>
-          <label>
-            密码
-            <input
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="reauth-address">Homeserver 地址</Label>
+            <Input
+              id="reauth-address"
+              name="reauth-address"
+              value={address}
+              readOnly
+              disabled
+              className="h-10 bg-muted font-mono text-xs select-text"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="reauth-user-id">用户 ID</Label>
+            <Input
+              id="reauth-user-id"
+              name="reauth-user-id"
+              value={ownerId}
+              readOnly
+              disabled
+              className="h-10 bg-muted font-mono text-xs select-text"
+            />
+          </div>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor="reauth-password">密码</Label>
+            <Input
+              id="reauth-password"
               name="reauth-password"
               type="password"
               value={reauthPassword}
-              disabled={reauthSubmitting || exiting}
+              disabled={busy}
               onChange={(event) => onReauthPasswordChange(event.target.value)}
+              className="h-10 bg-background select-text"
             />
-          </label>
-          {reauthError ? <p role="alert">{reauthError}</p> : null}
-          <div className="waypoint-form-actions">
-            <button type="submit" disabled={reauthSubmitting || exiting}>
-              {reauthSubmitting ? "正在验证…" : "确认验证"}
-            </button>
-            <button
+          </div>
+          {reauthError ? (
+            <Alert variant="destructive">
+              <AlertCircle aria-hidden="true" />
+              <AlertDescription>{reauthError}</AlertDescription>
+            </Alert>
+          ) : null}
+          <div className="flex flex-col-reverse gap-2 pt-1 sm:flex-row sm:justify-end">
+            <Button
               type="button"
-              disabled={reauthSubmitting || exiting}
+              variant="outline"
+              className="min-h-11 sm:min-h-9"
+              disabled={busy}
               onClick={onCloseReauthForm}
             >
               取消
-            </button>
+            </Button>
+            <Button
+              type="submit"
+              className="min-h-11 sm:min-h-9"
+              disabled={busy}
+            >
+              {reauthSubmitting ? "正在验证…" : "确认验证"}
+            </Button>
           </div>
         </form>
       ) : null}
+
       {showInlineExitConfirm ? (
         <ExitConfirmDialog
           exiting={exiting}

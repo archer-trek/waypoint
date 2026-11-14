@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import type { ComponentProps, MouseEventHandler } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -48,6 +48,8 @@ function DialogOverlay({
 
 type DialogContentProps = ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
+  overlayClassName?: string;
+  onOverlayClick?: MouseEventHandler<HTMLDivElement>;
 };
 
 /** Centered modal surface with focus trap and optional close button. */
@@ -55,11 +57,13 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  overlayClassName,
+  onOverlayClick,
   ...props
 }: DialogContentProps) {
   return (
     <DialogPortal>
-      <DialogOverlay />
+      <DialogOverlay className={overlayClassName} onClick={onOverlayClick} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
