@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { PlusIcon } from "../icons";
+import { Plus } from "lucide-react";
+import { Button } from "@/components/ui/button";
 
 export type EmptyInvitationProps = {
   topicsCount: number;
@@ -8,7 +9,7 @@ export type EmptyInvitationProps = {
   onOpenCreateForm: () => void;
 };
 
-/** Muse-style empty invitation card encouraging Topic creation. */
+/** Centered monochrome empty-state card encouraging Topic creation. */
 export function EmptyInvitation({
   topicsCount,
   reauthRequired,
@@ -16,20 +17,32 @@ export function EmptyInvitation({
   onOpenCreateForm,
 }: EmptyInvitationProps) {
   return (
-    <section aria-label="Topic 引导" className="waypoint-empty-detail">
-      <div className="waypoint-empty-card">
-        <p>
+    <section
+      aria-label="Topic 引导"
+      className="waypoint-empty-detail flex flex-1 flex-col items-center justify-center px-6 py-10 text-center text-muted-foreground"
+    >
+      <div className="waypoint-empty-card flex w-full max-w-sm flex-col items-center gap-5 rounded-2xl border border-dashed border-border bg-muted/40 px-6 py-8">
+        <p className="m-0 text-[0.9375rem] leading-relaxed text-muted-foreground">
           {topicsCount === 0
             ? "还没有 Topic，新建一条 Topic 开始交流。"
             : "选择一条 Topic，或新建一条 Topic 开始交流。"}
         </p>
-        <button type="button" disabled={reauthRequired} onClick={onOpenCreateForm}>
-          <PlusIcon aria-hidden="true" size={14} />
+        <Button
+          type="button"
+          size="lg"
+          className="min-h-11 gap-1.5"
+          disabled={reauthRequired}
+          onClick={onOpenCreateForm}
+        >
+          <Plus aria-hidden="true" className="size-4" />
           新建一条 Topic
-        </button>
+        </Button>
         {shortcut === false ? null : (
-          <div className="waypoint-empty-shortcut-hint">
-            快捷键 <kbd className="waypoint-kbd-hint">Alt + N</kbd>
+          <div className="waypoint-empty-shortcut-hint flex items-center gap-1.5 text-xs text-muted-foreground">
+            快捷键{" "}
+            <kbd className="waypoint-kbd-hint rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted-foreground">
+              Alt + N
+            </kbd>
           </div>
         )}
       </div>
