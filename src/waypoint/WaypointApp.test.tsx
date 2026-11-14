@@ -12666,9 +12666,14 @@ test("原处重发时若同步回声先于发送响应到达，仍收成原处�
   await login(user);
   await user.click(await screen.findByRole("button", { name: "同步先回声重发" }));
 
-  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条失败");
+  const composer = screen.getByRole("textbox", { name: "输入消息" });
+  await user.type(composer, "第一条失败");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条失败");
+  await waitFor(() => {
+    expect(composer).toBeEnabled();
+    expect(composer).toHaveValue("");
+  });
+  await user.type(composer, "第二条失败");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(2));
 
