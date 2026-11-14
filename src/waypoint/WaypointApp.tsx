@@ -1,3 +1,8 @@
+import { AlertCircle, Loader2 } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { WaypointBrandIcon } from "./icons";
 import "../App.css";
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
@@ -9,6 +14,7 @@ import type {
   TransportResult,
   ViewportMode,
 } from "../adapters/types";
+import { resetAppearancePreference, syncAppearanceLifecycle } from "./appearance";
 import { MatrixClient } from "./matrix-client";
 import { RetryQueue } from "./retry-queue";
 import {
@@ -105,6 +111,10 @@ export function WaypointApp({
     return true;
   };
   const backgroundSuspendedRef = useRef(suspendInBackground && !readAppVisible());
+
+  useEffect(() => {
+    return syncAppearanceLifecycle();
+  }, []);
 
   useEffect(() => {
     setViewportMode(platform.viewportMode ? platform.viewportMode() : "wide");
@@ -331,6 +341,7 @@ export function WaypointApp({
       if (epoch.current !== myEpoch) {
         return;
       }
+      resetAppearancePreference();
       setPhase({ name: "password", address, userId, password: "" });
     } finally {
       exiting.current = false;
@@ -627,10 +638,25 @@ export function WaypointApp({
     await syncNow();
   }
 
+  const authMainClassName =
+    "flex min-h-full w-full max-w-full items-center justify-center bg-background px-5 py-6 pt-[max(1.5rem,env(safe-area-inset-top,0px))] pb-[calc(max(1.5rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))] text-foreground";
+
+  const authMainStyle = {
+    "--keyboard-inset": `${keyboardInsetBottom}px`,
+    paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
+  } as CSSProperties;
+
   if (duplicateInstance) {
     return (
-      <main className="waypoint-auth-main">
-        <p role="status">Waypoint 已在主窗口中运行，请切回主窗口继续。</p>
+      <main className={authMainClassName}>
+        <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 text-center text-card-foreground shadow-xs select-none">
+          <div className="mx-auto mb-3 inline-flex size-12 items-center justify-center rounded-xl border border-border bg-secondary text-foreground">
+            <WaypointBrandIcon size={28} />
+          </div>
+          <p role="status" className="text-sm leading-relaxed text-muted-foreground">
+            Waypoint 已在主窗口中运行，请切回主窗口继续。
+          </p>
+        </div>
       </main>
     );
   }
@@ -668,23 +694,14 @@ export function WaypointApp({
 
   if (phase.name === "booting") {
     return (
-      <main
-        className="waypoint-auth-main"
-        aria-busy="true"
-        style={
-          {
-            "--keyboard-inset": `${keyboardInsetBottom}px`,
-            paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
-          } as CSSProperties
-        }
-      >
-        <div className="waypoint-auth-container">
-          <div className="waypoint-auth-card booting">
-            <div className="waypoint-auth-logo">
+      <main className={authMainClassName} aria-busy="true" style={authMainStyle}>
+        <div className="mx-auto w-full max-w-[25.5rem]">
+          <div className="flex flex-col items-center justify-center gap-6 rounded-2xl border border-border bg-card px-8 py-14 text-card-foreground shadow-xs select-none">
+            <div className="inline-flex size-14 items-center justify-center rounded-2xl border border-border bg-secondary text-foreground">
               <WaypointBrandIcon size={44} />
             </div>
-            <div className="waypoint-sync-indicator" aria-hidden="true">
-              <div className="waypoint-spinner" />
+            <div className="flex items-center justify-center" aria-hidden="true">
+              <Loader2 className="size-5 animate-spin text-muted-foreground" />
             </div>
           </div>
         </div>
@@ -693,160 +710,167 @@ export function WaypointApp({
   }
 
   return (
-    <main
-      className="waypoint-auth-main"
-      style={
-        {
-          "--keyboard-inset": `${keyboardInsetBottom}px`,
-          paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
-        } as CSSProperties
-      }
-    >
+    <main className={authMainClassName} style={authMainStyle}>
       <p className="sr-only">尚未进入 Topic 列表</p>
-      <div className="waypoint-auth-container">
-        <div className="waypoint-auth-card">
-          <header className="waypoint-auth-header">
-            <div className="waypoint-auth-logo">
+      <div className="mx-auto w-full max-w-[25.5rem]">
+        <div className="w-full rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xs select-none sm:p-7">
+          <header className="mb-6 flex flex-col items-center text-center">
+            <div className="mb-3.5 inline-flex size-14 items-center justify-center rounded-2xl border border-border bg-secondary text-foreground">
               <WaypointBrandIcon size={40} />
             </div>
-            <h1 className="waypoint-auth-title">Waypoint</h1>
-            <p className="waypoint-auth-subtitle">面向 Personal Agent 的专属客户端</p>
+            <h1 className="m-0 text-2xl font-bold tracking-tight text-foreground">
+              Waypoint
+            </h1>
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              面向 Personal Agent 的专属客户端
+            </p>
           </header>
 
           {phase.name === "address" ? (
-            <form className="waypoint-auth-form" onSubmit={submitAddress}>
-              <div className="waypoint-form-group">
-                <label className="waypoint-label">
-                  Homeserver 地址
-                  <input
-                    className="waypoint-input"
-                    name="address"
-                    placeholder="https://matrix.example.com"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    value={phase.address}
-                    onChange={(event) => setPhase({ name: "address", address: event.target.value })}
-                  />
-                </label>
+            <form className="flex w-full flex-col gap-4" onSubmit={submitAddress}>
+              <div className="flex w-full flex-col gap-2">
+                <Label htmlFor="waypoint-address">Homeserver 地址</Label>
+                <Input
+                  id="waypoint-address"
+                  className="mt-0 h-11 bg-background select-text"
+                  name="address"
+                  placeholder="https://matrix.example.com"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={phase.address}
+                  onChange={(event) => setPhase({ name: "address", address: event.target.value })}
+                />
               </div>
-              <div className="waypoint-auth-actions">
-                <button className="waypoint-btn waypoint-btn-primary" type="submit">
+              <div className="mt-1 flex w-full flex-col gap-2.5">
+                <Button className="h-11 w-full" type="submit">
                   继续
-                </button>
+                </Button>
               </div>
             </form>
           ) : phase.name === "password" ? (
-            <form className="waypoint-auth-form" onSubmit={submitPassword}>
-              <div className="waypoint-auth-server-badge">
-                <span className="waypoint-auth-server-dot" aria-hidden="true" />
-                <p className="waypoint-auth-server-url">{phase.address}</p>
+            <form className="flex w-full flex-col gap-4" onSubmit={submitPassword}>
+              <div className="flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
+                <span
+                  className="size-1.5 shrink-0 rounded-full bg-foreground/60"
+                  aria-hidden="true"
+                />
+                <p className="m-0 truncate font-mono">{phase.address}</p>
               </div>
-              <div className="waypoint-form-group">
-                <label className="waypoint-label">
-                  用户标识
-                  <input
-                    className="waypoint-input"
-                    name="user-id"
-                    placeholder="@owner:example.com"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    value={phase.userId}
-                    onChange={(event) => setPhase({ ...phase, userId: event.target.value })}
-                  />
-                </label>
+              <div className="flex w-full flex-col gap-2">
+                <Label htmlFor="waypoint-user-id">用户标识</Label>
+                <Input
+                  id="waypoint-user-id"
+                  className="mt-0 h-11 bg-background select-text"
+                  name="user-id"
+                  placeholder="@owner:example.com"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={phase.userId}
+                  onChange={(event) => setPhase({ ...phase, userId: event.target.value })}
+                />
               </div>
-              <div className="waypoint-form-group">
-                <label className="waypoint-label">
-                  密码
-                  <input
-                    className="waypoint-input"
-                    name="password"
-                    type="password"
-                    value={phase.password}
-                    onChange={(event) => setPhase({ ...phase, password: event.target.value })}
-                  />
-                </label>
+              <div className="flex w-full flex-col gap-2">
+                <Label htmlFor="waypoint-password">密码</Label>
+                <Input
+                  id="waypoint-password"
+                  className="mt-0 h-11 bg-background select-text"
+                  name="password"
+                  type="password"
+                  value={phase.password}
+                  onChange={(event) => setPhase({ ...phase, password: event.target.value })}
+                />
               </div>
-              <div className="waypoint-auth-actions">
-                <button className="waypoint-btn waypoint-btn-primary" type="submit">
+              <div className="mt-1 flex w-full flex-col gap-2.5">
+                <Button className="h-11 w-full" type="submit">
                   用密码登录
-                </button>
-                <button
-                  className="waypoint-btn waypoint-btn-ghost"
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-11 w-full"
                   type="button"
                   onClick={() => setPhase({ name: "address", address: phase.address })}
                 >
                   更改地址
-                </button>
+                </Button>
               </div>
             </form>
           ) : phase.name === "syncing" ? (
-            <div className="waypoint-auth-syncing">
-              <div className="waypoint-sync-indicator" aria-hidden="true">
-                <div className="waypoint-spinner" />
+            <div className="flex flex-col items-center gap-4 py-2 text-center">
+              <div className="flex items-center justify-center" aria-hidden="true">
+                <Loader2 className="size-6 animate-spin text-muted-foreground" />
               </div>
-              <p className="waypoint-sync-status">正在增量同步…</p>
-              <div className="waypoint-auth-actions horizontal">
-                <button
-                  className="waypoint-btn waypoint-btn-primary"
+              <p className="m-0 text-sm font-medium text-muted-foreground">
+                正在增量同步…
+              </p>
+              <div className="mt-1 flex w-full flex-row justify-center gap-2.5">
+                <Button
+                  className="h-11 flex-1"
                   type="button"
                   onClick={() => void syncNow()}
                 >
                   立刻再试
-                </button>
-                <button
-                  className="waypoint-btn waypoint-btn-ghost"
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-11 flex-1"
                   type="button"
                   onClick={() => void abandon()}
                 >
                   放弃
-                </button>
+                </Button>
               </div>
             </div>
           ) : phase.name === "register" ? (
-            <form className="waypoint-auth-form" onSubmit={submitRegistration}>
-              <h1 className="waypoint-register-heading">登记 Bot</h1>
-              <p className="waypoint-register-desc">名册为空，请为你的专属空间登记第一个 Bot</p>
-              <div className="waypoint-form-group">
-                <label className="waypoint-label">
-                  Matrix 用户 ID
-                  <input
-                    className="waypoint-input"
-                    name="agent-user-id"
-                    placeholder="@agent:example.com"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    value={phase.agentUserId}
-                    disabled={phase.submitting}
-                    onChange={(event) => setPhase({ ...phase, agentUserId: event.target.value })}
-                  />
-                </label>
+            <form className="flex w-full flex-col gap-4" onSubmit={submitRegistration}>
+              <div className="space-y-1">
+                <h1 className="m-0 text-lg font-semibold tracking-tight text-foreground">
+                  登记 Bot
+                </h1>
+                <p className="m-0 text-sm leading-relaxed text-muted-foreground">
+                  名册为空，请为你的专属空间登记第一个 Bot
+                </p>
               </div>
-              <div className="waypoint-auth-actions">
-                <button
-                  className="waypoint-btn waypoint-btn-primary"
+              <div className="flex w-full flex-col gap-2">
+                <Label htmlFor="waypoint-agent-user-id">Matrix 用户 ID</Label>
+                <Input
+                  id="waypoint-agent-user-id"
+                  className="mt-0 h-11 bg-background select-text"
+                  name="agent-user-id"
+                  placeholder="@agent:example.com"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={phase.agentUserId}
+                  disabled={phase.submitting}
+                  onChange={(event) => setPhase({ ...phase, agentUserId: event.target.value })}
+                />
+              </div>
+              <div className="mt-1 flex w-full flex-col gap-2.5">
+                <Button
+                  className="h-11 w-full"
                   type="submit"
                   disabled={phase.submitting}
                 >
                   登记 Bot
-                </button>
-                <button
-                  className="waypoint-btn waypoint-btn-ghost"
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-11 w-full"
                   type="button"
                   onClick={() => void abandon()}
                 >
                   放弃
-                </button>
+                </Button>
               </div>
             </form>
           ) : null}
           {"message" in phase && phase.message ? (
-            <div className="waypoint-alert" role="alert">
-              {phase.message}
-            </div>
+            <Alert variant="destructive" className="mt-4">
+              <AlertCircle aria-hidden="true" />
+              <AlertDescription>{phase.message}</AlertDescription>
+            </Alert>
           ) : null}
         </div>
       </div>

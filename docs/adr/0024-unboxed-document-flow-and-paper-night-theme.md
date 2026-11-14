@@ -1,5 +1,7 @@
 # Agent 消息彻底无框平铺为纯文档流，顶栏贴顶吸附，输入框单行纯净自适应
 
+> 注：本记录文件名中提及的「Paper/Night（暖纸色/夜读）」主题已由 [ADR-0026](./0026-tailwind-shadcn-and-grok-monochrome-theme.md) 废止并替换为 Grokbot 高对比黑白灰 Light/Dark 主题；下文锁定的文档流、吸顶顶栏与输入框交互法则继续生效。
+
 Waypoint 面向 Owner 与 Agent 之间的一对一深度工作交流。结合 t3code 极简工程美学对界面进行系统性收敛：顶栏采用标准紧贴式吸顶（不悬浮），仅展示 Topic 名字与 Description，右侧收敛为纯 Icon `···` 操作菜单；Agent 回复彻底不画任何气泡框与卡片背景，直接作为纯净平铺文档流展开；仅 Owner 消息保留右侧圆角气泡；底部输入盒无 Placeholder，初始紧凑单行（仅含左侧纯 Icon 附件入口与右侧纯 Icon 发送按钮），内容超过单行时平滑转为多行展开。
 
 ## Considered Options

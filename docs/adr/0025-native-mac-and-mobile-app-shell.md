@@ -9,7 +9,7 @@ Waypoint 追求在 macOS 桌面端具备原生 App 质感（对标 Slack、Claud
 ## Considered Options
 
 - 继续在页面顶部展示「尚未进入 Topic 列表」和「已连接」纯文本标签。否决：这是底层测试用例断言状态机偷懒引入的开发黑话，直接暴露给真实 Owner 极其粗糙突兀。
-- macOS 保持操作系统默认标题栏（White/Grey Titlebar Strip）。否决：系统原生标题栏割裂应用主题（夜读深色时尤为明显），只有 Overlay 沉浸式标题栏才能将交通灯与侧边栏融为一体。
+- macOS 保持操作系统默认标题栏（White/Grey Titlebar Strip）。否决：系统原生标题栏割裂应用主题（深色模式时尤为明显），只有 Overlay 沉浸式标题栏才能将交通灯与侧边栏融为一体。
 - 移动端依赖系统浏览器默认手势与安全区行为。否决：移动端默认橡皮筋露白和长按弹出 Web 菜单会瞬间暴露「简陋套壳网页」的破绽，必须全局注入移动 App 规范样式。
 
 ## Consequences
