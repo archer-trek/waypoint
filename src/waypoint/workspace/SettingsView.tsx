@@ -181,12 +181,11 @@ export function SettingsView({
               登记新 Bot
             </h4>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="agents-bot-user-id">Matrix 用户 ID</Label>
+              <Label htmlFor="agents-bot-user-id">Bot 用户名</Label>
               <Input
                 id="agents-bot-user-id"
                 name="agents-bot-user-id"
-                placeholder="@agent:example.com"
-                autoCapitalize="none"
+                                autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
                 value={agentsForm.userId}
@@ -235,7 +234,7 @@ export function SettingsView({
               <Button
                 type="submit"
                 className="min-h-11 sm:min-h-9"
-                disabled={agentsSubmitting}
+                disabled={agentsSubmitting || !agentsForm.userId.trim()}
               >
                 {agentsSubmitting ? "正在保存…" : "登记 Bot"}
               </Button>

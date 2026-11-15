@@ -2588,7 +2588,7 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
 
   // 回到保留地址和用户标识的密码步，密码为空，不再处于已连接
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
@@ -2629,7 +2629,7 @@ test("确认退出后尽量注销（不删设备），清空 token、device id�
   first.unmount();
   const second = renderApp(homeserver);
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
   expect(syncCalls).toBe(syncsBeforeAdvance);
@@ -2750,7 +2750,7 @@ test("退出这台设备时即使注销返回跨主机重定向、4xx、5xx、�
     await user.click(screen.getByRole("button", { name: "确认退出" }));
 
     expect(await screen.findByLabelText("密码")).toHaveValue("");
-    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
     expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
     expect(screen.queryByText("已连接")).not.toBeInTheDocument();
 
@@ -3905,12 +3905,12 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
     {
       name: "网络失败",
       respond: async () => ({ type: "failure", failure: { type: "network" } }),
-      expectedAlert: "删除 Topic 失败，因为到达不了。",
+      expectedAlert: "无法连接到服务器，请检查网络或地址。",
     },
     {
       name: "超时",
       respond: async () => ({ type: "failure", failure: { type: "timeout" } }),
-      expectedAlert: "删除 Topic 失败，因为超时。",
+      expectedAlert: "删除 Topic 超时，请稍后重试。",
     },
     {
       name: "500 错误",
@@ -3919,7 +3919,7 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
         status: 500,
         body: { errcode: "M_UNKNOWN", error: "Leave failed" },
       }),
-      expectedAlert: "删除 Topic 失败，因为 Homeserver 暂时不能完成请求：Leave failed。",
+      expectedAlert: "服务器暂时无法响应，请稍后重试。",
     },
     {
       name: "403 拒绝",
@@ -3928,7 +3928,7 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
         status: 403,
         body: { errcode: "M_FORBIDDEN", error: "Cannot leave" },
       }),
-      expectedAlert: "删除 Topic 失败，因为 Homeserver 拒绝了请求：Cannot leave。",
+      expectedAlert: "服务器拒绝了该请求。",
     },
   ];
 

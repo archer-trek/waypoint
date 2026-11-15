@@ -1,5 +1,7 @@
 # macOS 沉浸式标题栏与窗口拖拽、移动端安全区与去 Web 化，未连接态采用原生卡片
 
+> 注：未连接态及登录/同步/登记步骤的外层边框卡片容器已修订为无框居中画布排版（方案 A），取消同色套盒与双层缩进，并补齐步骤过渡与提交态 loading 反馈，见 `src/waypoint/WaypointApp.tsx`。
+
 Waypoint 追求在 macOS 桌面端具备原生 App 质感（对标 Slack、Claude Desktop、Things 3），在手机端具备独立 App 质感（无网页浮动、无露白回弹、触控热区严谨）。系统对应用外壳与首次连接流进行全面原生化改造：
 1. 首次连接（未连接态）重构为沉浸式 Waypoint 品牌连接卡片，隐藏「尚未进入 Topic 列表」内部测试黑话（收纳为 `sr-only` 保证测试契约），升级为优雅的表单组件与平滑状态转场；
 2. macOS 桌面端配置 Tauri `titleBarStyle: Overlay` 并隐藏原生标题，红黄绿系统交通灯融入侧边栏顶栏，标题区赋予 `data-tauri-drag-region` 支持随处拖拽窗口；整站 UI 框架禁用文字选中（`user-select: none`），滚动条对齐系统悬浮规范；

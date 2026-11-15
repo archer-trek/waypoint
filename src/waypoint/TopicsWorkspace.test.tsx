@@ -660,7 +660,7 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     await user.type(within(reauthForm).getByLabelText("密码"), "wrong-pw");
     await user.click(within(reauthForm).getByRole("button", { name: "确认验证" }));
 
-    expect(await within(reauthForm).findByRole("alert")).toHaveTextContent("密码被拒绝");
+    expect(await within(reauthForm).findByRole("alert")).toHaveTextContent("密码不正确");
     expect(within(reauthForm).getByLabelText("密码")).toHaveValue("");
     expect(tokenValid).toBe(false);
     expect(screen.getByRole("textbox", { name: "输入消息" })).toBeDisabled();

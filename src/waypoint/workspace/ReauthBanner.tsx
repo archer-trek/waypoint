@@ -214,7 +214,7 @@ export function ReauthBanner({
             <Button
               type="submit"
               className="min-h-11 sm:min-h-9"
-              disabled={busy}
+              disabled={busy || !reauthPassword}
             >
               {reauthSubmitting ? "正在验证…" : "确认验证"}
             </Button>

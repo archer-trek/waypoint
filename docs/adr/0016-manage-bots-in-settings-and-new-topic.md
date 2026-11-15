@@ -1,6 +1,6 @@
 # 在设置中管理 Bot 名册，锁定用户 ID 且至少保留一个
 
-进入 Topic 列表后，在全局设置中管理 Bot 名册，新建 Topic 时提供快捷登记入口。登记收集必填用户 ID 与选填手写名字；改名仅限手写名字，用户 ID 不可变；移除强制二次确认，名册仅剩一个 Bot 时禁止移除。写入失败留在表单提示重试，不进重试队列。面向 Owner 的界面文案统一使用 Bot。
+进入 Topic 列表后，在全局设置中管理 Bot 名册，新建 Topic 时提供快捷登记入口。登记收集必填「Bot 用户名」（支持只填 localpart 并按 Owner 的 `server name` 自动补全，也支持同服完整 Matrix 用户 ID）与选填手写名字；改名仅限手写名字，已登记后的 Matrix 用户 ID 不可变；移除强制二次确认，名册仅剩一个 Bot 时禁止移除。写入失败留在表单提示重试，不进重试队列。面向 Owner 的界面文案统一使用 Bot。
 
 ## Considered Options
 
@@ -14,7 +14,7 @@
 
 - 全局设置中提供独立的「Bot 名册」面板，展示已登记 Bot 列表、显示名字与用户 ID。
 - 在「新建 Topic」选择 Bot 的下拉/弹出层中提供「+ 登记新 Bot」快捷入口。
-- 登记表单包含必填的「Matrix 用户 ID」与选填的「手写名字」；用户 ID 严格复用单 Homeserver 校验规则（同 server name、非 Owner 自身、去前后空白、不改大小写）。
+- 登记表单包含必填的「Bot 用户名」与选填的「手写名字」；支持输入纯 localpart（按当前 Owner 的 `server name` 自动补全为 `@localpart:<server_name>`）或同服完整 Matrix 用户 ID，严格复用单 Homeserver 校验规则（同 server name、非 Owner 自身、拒绝残缺写法、去前后空白、不改大小写）。
 - 编辑 Bot 时锁定 Matrix 用户 ID（不可更改），仅允许修改或清空手写名字。清空后自动回落显示 Matrix 显示名或 localpart。
 - 移除 Bot 必须二次确认，并说明不影响已有 Topic。当名册中仅剩 1 个 Bot 时，移除按钮禁用。
 - 变更直接写入 Owner 的 Matrix `account_data`（`im.waypoint.agents`）；写入失败留在表单内提示错误，不进重试队列。多端并发冲突以后写入为准。

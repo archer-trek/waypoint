@@ -23,45 +23,63 @@ test("Owner 打开应用时尚未进入 Topic 列表，地址是空白的", asyn
   expect(homeserver.requests).toEqual([]);
 });
 
-test("Owner 提交 server name 时不把它当成 Homeserver 地址", async () => {
+test("Owner 提交不带 https:// 前缀的地址时默认补全为 https:// 确认 versions，不做 .well-known 发现", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
+  homeserver.handler = async (input) => {
+    if (input.url === "https://matrix.example.com:8448/synapse/_matrix/client/versions") {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    throw new Error(`不应请求 ${input.url}`);
+  };
   renderApp(homeserver);
 
   const address = await screen.findByLabelText("Homeserver 地址");
-  await user.type(address, "matrix.example.com");
+  expect(address).not.toHaveAttribute("placeholder");
+  await user.type(address, "matrix.example.com:8448/synapse/");
   await user.click(screen.getByRole("button", { name: "继续" }));
 
-  expect(homeserver.requests).toEqual([]);
-  expect(screen.getByRole("alert")).toHaveTextContent("确认 Homeserver 失败，因为只接受完整的 https 地址。");
-  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
-  expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
-  expect(screen.queryByText("已连接")).not.toBeInTheDocument();
+  expect(await screen.findByLabelText("密码")).toBeInTheDocument();
+  expect(screen.getByText("https://matrix.example.com:8448/synapse")).toBeInTheDocument();
+  expect(homeserver.requests.map((request) => [request.method, request.url])).toEqual([
+    ["GET", "https://matrix.example.com:8448/synapse/_matrix/client/versions"],
+  ]);
+  expect(homeserver.requests.some((request) => request.url.includes(".well-known"))).toBe(false);
 });
 
-test("Owner 提交 http 地址时不发送请求", async () => {
+test("Owner 提交显式 http 地址、非 https 协议、userinfo 或空白时不发送请求", async () => {
   const user = userEvent.setup();
-  const homeserver = new FakeHomeserver();
-  renderApp(homeserver);
+  const cases = [
+    { input: "http://matrix.example.com", expected: "仅支持通过 HTTPS 连接 Homeserver。" },
+    { input: "ftp://matrix.example.com", expected: "仅支持通过 HTTPS 连接 Homeserver。" },
+    { input: "https://", expected: "Homeserver 地址格式不正确，请填写域名或 https:// 地址。" },
+    { input: "user@matrix.example.com", expected: "Homeserver 地址格式不正确，请填写域名或 https:// 地址。" },
+  ];
+  for (const blank of ["", "   "]) {
+    const homeserver = new FakeHomeserver();
+    const view = renderApp(homeserver);
+    const addressInput = await screen.findByLabelText("Homeserver 地址");
+    if (blank) {
+      await user.type(addressInput, blank);
+    }
+    expect(screen.getByRole("button", { name: "继续" })).toBeDisabled();
+    expect(homeserver.requests).toEqual([]);
+    view.unmount();
+  }
+  for (const item of cases) {
+    const homeserver = new FakeHomeserver();
+    const view = renderApp(homeserver);
 
-  await user.type(await screen.findByLabelText("Homeserver 地址"), "http://matrix.example.com");
-  await user.click(screen.getByRole("button", { name: "继续" }));
+    await user.type(await screen.findByLabelText("Homeserver 地址"), item.input);
+    const continueBtn = screen.getByRole("button", { name: "继续" });
+    expect(continueBtn).toBeEnabled();
+    await user.click(continueBtn);
 
-  expect(homeserver.requests).toEqual([]);
-  expect(screen.getByRole("alert")).toHaveTextContent("确认 Homeserver 失败，因为只接受完整的 https 地址。");
-  expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
-});
-
-test("Owner 提交不带协议的主机名时不发送请求", async () => {
-  const user = userEvent.setup();
-  const homeserver = new FakeHomeserver();
-  renderApp(homeserver);
-
-  await user.type(await screen.findByLabelText("Homeserver 地址"), "homeserver.local");
-  await user.click(screen.getByRole("button", { name: "继续" }));
-
-  expect(homeserver.requests).toEqual([]);
-  expect(screen.getByRole("alert")).toHaveTextContent("确认 Homeserver 失败，因为只接受完整的 https 地址。");
+    expect(homeserver.requests).toEqual([]);
+    expect(screen.getByRole("alert")).toHaveTextContent(item.expected);
+    expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
+    view.unmount();
+  }
 });
 
 test("Owner 提交完整 https 地址时先请求 versions，并且不发送密码", async () => {
@@ -94,7 +112,7 @@ test("versions 为空列表时停住，说明这不是 Matrix Homeserver，并�
   await user.click(screen.getByRole("button", { name: "继续" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "确认 Homeserver 失败，因为这不是 Matrix Homeserver。",
+    "该地址不是有效的 Matrix Homeserver。",
   );
   expect(homeserver.requests).toHaveLength(1);
   expect(homeserver.requests[0]?.method).toBe("GET");
@@ -117,7 +135,7 @@ test("确认 Homeserver 时不跟随重定向，也不把重定向当成可用�
   await user.click(screen.getByRole("button", { name: "继续" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "确认 Homeserver 失败，因为这不是 Matrix Homeserver。",
+    "该地址不是有效的 Matrix Homeserver。",
   );
   expect(homeserver.requests.map((request) => request.url)).toEqual([
     "https://matrix.example.com/_matrix/client/versions",
@@ -139,7 +157,7 @@ test("versions 可用后才询问密码，并且这时还不发送密码", async
   await user.click(screen.getByRole("button", { name: "继续" }));
 
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("");
+  expect(screen.getByLabelText("用户名")).toHaveValue("");
   expect(screen.queryByLabelText("访问令牌")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /SSO|单点登录/ })).not.toBeInTheDocument();
   expect(screen.getByText("https://matrix.example.com/synapse")).toBeInTheDocument();
@@ -163,7 +181,7 @@ test("证书不受信任时停住，没有仍然信任", async () => {
   await user.click(screen.getByRole("button", { name: "继续" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "确认 Homeserver 失败，因为到达不了，证书不受信任。",
+    "服务器证书不受信任，无法建立连接。",
   );
   expect(screen.queryByText("仍然信任")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "仍然信任" })).not.toBeInTheDocument();
@@ -174,8 +192,8 @@ test("证书不受信任时停住，没有仍然信任", async () => {
 test("主机名对不上或 HTTPS 建不起来时停住，没有仍然信任", async () => {
   const user = userEvent.setup();
   for (const [failure, reason] of [
-    ["hostname-mismatch", "主机名对不上"],
-    ["https-unavailable", "HTTPS 建不起来"],
+    ["hostname-mismatch", "服务器证书与当前域名不匹配。"],
+    ["https-unavailable", "无法与该服务器建立安全的 HTTPS 连接。"],
   ] as const) {
     const homeserver = new FakeHomeserver();
     homeserver.handler = async () => ({ type: "failure", failure: { type: failure } });
@@ -183,7 +201,7 @@ test("主机名对不上或 HTTPS 建不起来时停住，没有仍然信任", a
     await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
     await user.click(screen.getByRole("button", { name: "继续" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      `确认 Homeserver 失败，因为到达不了，${reason}。`,
+      reason,
     );
     expect(screen.queryByText("仍然信任")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
@@ -205,7 +223,8 @@ test("确认 Homeserver 被限流时留下说明，不展示 errcode，也不自
   await user.click(screen.getByRole("button", { name: "继续" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("确认 Homeserver 失败，因为被限流：Too many requests。");
+  expect(alert).toHaveTextContent("请求过于频繁，请稍后再试。");
+  expect(alert).not.toHaveTextContent("Too many requests");
   expect(alert).not.toHaveTextContent("M_LIMIT_EXCEEDED");
   expect(alert).not.toHaveTextContent("429");
   clock.advance(60_000);
@@ -227,7 +246,7 @@ test("只去掉末尾一个斜杠后请求 versions", async () => {
   ]);
 });
 
-test("用户标识去掉空白后是空的时不发送，密码保留", async () => {
+test("用户名或密码为空时登录按钮不可点击，不发送请求且保留已输入内容", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   homeserver.handler = async (input) => {
@@ -240,17 +259,28 @@ test("用户标识去掉空白后是空的时不发送，密码保留", async ()
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("密码"), "secret");
-  await user.type(screen.getByLabelText("用户标识"), "   ");
-  await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  expect(homeserver.requests).toHaveLength(1);
+  const loginBtn = await screen.findByRole("button", { name: "用密码登录" });
+  expect(loginBtn).toBeDisabled();
+
+  await user.type(screen.getByLabelText("密码"), "secret");
+  expect(loginBtn).toBeDisabled();
+
+  await user.type(screen.getByLabelText("用户名"), "   ");
+  expect(loginBtn).toBeDisabled();
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
-  expect(await screen.findByRole("alert")).toHaveTextContent("登录失败，因为用户标识是空的。");
+
+  await user.clear(screen.getByLabelText("用户名"));
+  await user.type(screen.getByLabelText("用户名"), "alice");
+  expect(loginBtn).toBeEnabled();
+
+  await user.clear(screen.getByLabelText("密码"));
+  expect(loginBtn).toBeDisabled();
+  expect(homeserver.requests).toHaveLength(1);
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
 });
 
-test("用户标识是邮箱或电话时不发送，密码保留", async () => {
+test("用户名是邮箱或电话时不发送，密码保留", async () => {
   const user = userEvent.setup();
   for (const identifier of ["alice@example.com", "+15551212"]) {
     const homeserver = new FakeHomeserver();
@@ -263,14 +293,14 @@ test("用户标识是邮箱或电话时不发送，密码保留", async () => {
     const view = renderApp(homeserver);
     await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
     await user.click(screen.getByRole("button", { name: "继续" }));
-    await user.type(await screen.findByLabelText("用户标识"), identifier);
+    await user.type(await screen.findByLabelText("用户名"), identifier);
     await user.type(screen.getByLabelText("密码"), "secret");
     await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
     expect(homeserver.requests).toHaveLength(1);
     expect(screen.getByLabelText("密码")).toHaveValue("secret");
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "登录失败，因为用户标识只能是 localpart 或完整用户 ID，不接受邮箱或电话。",
+      "请输入有效的用户名或完整 Matrix 用户 ID，不支持邮箱和手机号。",
     );
     view.unmount();
   }
@@ -292,14 +322,14 @@ test("登录流程里没有密码登录时停住，这不是密码错误，并�
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "登录失败，因为这台 Homeserver 没有密码登录，这不是密码错误。",
+    "该 Homeserver 未开启密码登录。",
   );
-  expect(screen.getByRole("alert")).not.toHaveTextContent("用户标识或密码被拒绝");
+  expect(screen.getByRole("alert")).not.toHaveTextContent("用户名或密码被拒绝");
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
   expect(homeserver.requests.map((request) => [request.method, request.url])).toEqual([
     ["GET", "https://matrix.example.com/_matrix/client/versions"],
@@ -327,7 +357,7 @@ test("首次密码登录不携带 device id，设备显示名来自平台，也�
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "  alice  ");
+  await user.type(await screen.findByLabelText("用户名"), "  alice  ");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
@@ -403,7 +433,7 @@ test("同步成功且名册里有当前 Homeserver 的合法 Agent 时，进入 
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "@alice:example.com");
+  await user.type(await screen.findByLabelText("用户名"), "@alice:example.com");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
@@ -477,7 +507,7 @@ test("同步成功但名册没有合法 Agent 时不进入 Topic 列表，而是
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
@@ -487,14 +517,14 @@ test("同步成功但名册没有合法 Agent 时不进入 Topic 列表，而是
   expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
-  expect(await screen.findByLabelText("Matrix 用户 ID")).toHaveValue("");
+  expect(await screen.findByLabelText("Bot 用户名")).toHaveValue("");
   expect(screen.queryByLabelText(/名字|名称|昵称/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: /登记/ })).toBeInTheDocument();
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(homeserver.requests.some((request) => request.url.includes("account_data"))).toBe(false);
 });
 
-test("用户标识或密码被拒绝时清掉密码，停在密码步，不展示 errcode，也不自动重发", async () => {
+test("用户名或密码被拒绝时清掉密码，停在密码步，不展示 errcode，也不自动重发", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   homeserver.handler = async (input) => {
@@ -517,16 +547,17 @@ test("用户标识或密码被拒绝时清掉密码，停在密码步，不展�
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("登录失败，因为用户标识或密码被拒绝：Invalid username or password。");
+  expect(alert).toHaveTextContent("用户名或密码不正确。");
+  expect(alert).not.toHaveTextContent("Invalid username or password");
   expect(alert).not.toHaveTextContent("M_FORBIDDEN");
   expect(alert).not.toHaveTextContent("403");
   expect(screen.getByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("alice");
+  expect(screen.getByLabelText("用户名")).toHaveValue("alice");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
   clock.advance(60_000);
@@ -575,11 +606,11 @@ test("同步遇到网络问题时留在同步重试，不再要密码，退避�
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("同步失败，因为到达不了。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "立刻再试" })).toBeInTheDocument();
   expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
@@ -629,15 +660,16 @@ test("还没进列表时服务器不认 token，就停掉自动重试，只丢�
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("同步失败，因为服务器不认这台设备的登录：Unrecognised access token。");
+  expect(alert).toHaveTextContent("当前设备登录已失效，请重新登录。");
+  expect(alert).not.toHaveTextContent("Unrecognised access token");
   expect(alert).not.toHaveTextContent("M_UNKNOWN_TOKEN");
   expect(alert).not.toHaveTextContent("401");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "立刻再试" })).not.toBeInTheDocument();
@@ -649,7 +681,7 @@ test("还没进列表时服务器不认 token，就停掉自动重试，只丢�
 
   first.unmount();
   renderApp(homeserver);
-  expect(await screen.findByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(await screen.findByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.queryByLabelText("Homeserver 地址")).not.toBeInTheDocument();
@@ -672,11 +704,11 @@ test("登录请求到达不了时密码留着，不自动重发", async () => {
 
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("登录失败，因为到达不了。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
   expect(screen.getByRole("alert")).not.toHaveTextContent("密码错误");
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
   expect(homeserver.requests.some((request) => request.method === "POST")).toBe(false);
@@ -702,12 +734,13 @@ test("登录被限流时密码留着，不展示 errcode，也不自动重发", 
   const { clock } = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("登录失败，因为被限流：Too many requests。");
+  expect(alert).toHaveTextContent("请求过于频繁，请稍后再试。");
+  expect(alert).not.toHaveTextContent("Too many requests");
   expect(alert).not.toHaveTextContent("M_LIMIT_EXCEEDED");
   expect(alert).not.toHaveTextContent("429");
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
@@ -734,16 +767,17 @@ test("账号已停用时清掉密码，这不是密码错误", async () => {
   renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("登录失败，因为账号已停用：This account has been deactivated。");
+  expect(alert).toHaveTextContent("该账号已停用。");
+  expect(alert).not.toHaveTextContent("This account has been deactivated");
   expect(alert).not.toHaveTextContent("M_USER_DEACTIVATED");
-  expect(alert).not.toHaveTextContent("用户标识或密码被拒绝");
+  expect(alert).not.toHaveTextContent("用户名或密码被拒绝");
   expect(screen.getByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("alice");
+  expect(screen.getByLabelText("用户名")).toHaveValue("alice");
 });
 
 test("还要验证码或其他交互式验证时停住，不打开网页，不保存 token", async () => {
@@ -776,12 +810,12 @@ test("还要验证码或其他交互式验证时停住，不打开网页，不�
   const view = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("登录失败，因为还要验证码或其他交互式验证，Waypoint 做不了。");
+  expect(alert).toHaveTextContent("该服务器需要验证码或其他交互式验证，暂不支持登录。");
   expect(alert).not.toHaveTextContent("M_FORBIDDEN");
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
   expect(homeserver.requests.some((request) => request.url.includes("/sync"))).toBe(false);
@@ -811,11 +845,11 @@ test("登录响应缺 device id 时不写入，关掉再打开回到空白的地
   const view = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("登录失败，因为 Homeserver 没有返回完整的登录结果。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务器返回的登录信息不完整，请稍后重试。");
   expect(homeserver.requests.some((request) => request.url.includes("/sync"))).toBe(false);
   expect(screen.getByLabelText("密码")).toHaveValue("secret");
   view.unmount();
@@ -837,7 +871,7 @@ test("token 还没写入就关掉时，下次回到空白的地址步", async ()
   const view = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   view.unmount();
 
@@ -873,10 +907,10 @@ test("关掉再打开时，有 token 就从同步继续，不再要密码", asyn
   const first = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("同步失败，因为超时。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("连接超时，请稍后重试。");
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
   first.unmount();
 
@@ -896,17 +930,17 @@ test("同步遇到超时、5xx 或限流时留在同步重试，不展示状态�
     {
       name: "超时",
       respond: { type: "failure" as const, failure: { type: "timeout" as const } },
-      text: "同步失败，因为超时。",
+      text: "连接超时，请稍后重试。",
     },
     {
       name: "5xx",
       respond: { type: "response" as const, status: 502, body: { errcode: "M_UNKNOWN", error: "Bad gateway" } },
-      text: "同步失败，因为 Homeserver 暂时不能完成同步：Bad gateway。",
+      text: "服务器暂时无法响应，请稍后重试。",
     },
     {
       name: "限流",
       respond: { type: "response" as const, status: 429, body: { errcode: "M_LIMIT_EXCEEDED", error: "Slow down" } },
-      text: "同步失败，因为被限流：Slow down。",
+      text: "请求过于频繁，请稍后再试。",
     },
   ];
   for (const item of cases) {
@@ -916,7 +950,7 @@ test("同步遇到超时、5xx 或限流时留在同步重试，不展示状态�
     const view = renderApp(homeserver);
     await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
     await user.click(screen.getByRole("button", { name: "继续" }));
-    await user.type(await screen.findByLabelText("用户标识"), "alice");
+    await user.type(await screen.findByLabelText("用户名"), "alice");
     await user.type(screen.getByLabelText("密码"), "secret");
     await user.click(screen.getByRole("button", { name: "用密码登录" }));
     const alert = await screen.findByRole("alert");
@@ -942,14 +976,15 @@ test("还没进列表时账号已停用，就回到密码步并清掉密码", as
   const { clock } = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("同步失败，因为账号已停用：deactivated。");
+  expect(alert).toHaveTextContent("该账号已停用。");
+  expect(alert).not.toHaveTextContent("deactivated");
   expect(alert).not.toHaveTextContent("M_USER_DEACTIVATED");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
   expect(screen.queryByRole("button", { name: "立刻再试" })).not.toBeInTheDocument();
   clock.advance(60_000);
@@ -984,7 +1019,7 @@ test("名册里只要有一个合法的当前 Homeserver 用户 ID，就忽略�
   renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
@@ -1006,7 +1041,7 @@ test("名册缺事件、读不懂或没有合法条目时不进入 Topic 列表"
     const view = renderApp(homeserver);
     await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
     await user.click(screen.getByRole("button", { name: "继续" }));
-    await user.type(await screen.findByLabelText("用户标识"), "alice");
+    await user.type(await screen.findByLabelText("用户名"), "alice");
     await user.type(screen.getByLabelText("密码"), "secret");
     await user.click(screen.getByRole("button", { name: "用密码登录" }));
     await waitFor(() => {

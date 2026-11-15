@@ -179,12 +179,11 @@ export function CreateTopicView({
               登记新 Bot
             </h3>
             <div className="flex flex-col gap-2">
-              <Label htmlFor="quick-bot-user-id">Matrix 用户 ID</Label>
+              <Label htmlFor="quick-bot-user-id">Bot 用户名</Label>
               <Input
                 id="quick-bot-user-id"
                 name="quick-bot-user-id"
-                placeholder="@agent:example.com"
-                autoCapitalize="none"
+                                autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
                 value={quickUserId}
@@ -227,7 +226,7 @@ export function CreateTopicView({
               <Button
                 type="button"
                 className="min-h-11 sm:min-h-9"
-                disabled={busy}
+                disabled={busy || !quickUserId.trim()}
                 onClick={onQuickRegister}
               >
                 {quickSubmitting ? "正在保存…" : "登记 Bot"}
@@ -256,7 +255,12 @@ export function CreateTopicView({
           <Button
             type="submit"
             className="min-h-11 sm:min-h-9"
-            disabled={busy || reauthRequired}
+            disabled={
+              busy ||
+              reauthRequired ||
+              !nameInput.trim() ||
+              (registeredAgents.length > 1 && !selectedBotId)
+            }
           >
             {submitting ? "正在创建…" : "创建 Topic"}
           </Button>

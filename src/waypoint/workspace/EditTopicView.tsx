@@ -112,7 +112,7 @@ export function EditTopicView({
           <Button
             type="submit"
             className="min-h-11 sm:min-h-9"
-            disabled={editSubmitting}
+            disabled={editSubmitting || (editPendingFields.name && !editNameInput.trim())}
           >
             {editSubmitting ? "正在保存…" : "保存"}
           </Button>

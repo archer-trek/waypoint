@@ -20,23 +20,8 @@ export function errorText(body: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-export function sentence(reason: string, serverError?: string): string {
-  if (serverError) {
-    return `${reason}：${serverError}。`;
-  }
-  return `${reason}。`;
-}
-
-export function actionFailedPrefix(action: string): string {
-  return /[A-Za-z0-9]$/.test(action) ? `${action} 失败` : `${action}失败`;
-}
-
-export function disconnectedMessage(action: string): string {
-  return `${actionFailedPrefix(action)}，因为尚未连接。`;
-}
-
-function becauseReason(reason: string): string {
-  return /^[A-Za-z0-9]/.test(reason) ? `因为 ${reason}` : `因为${reason}`;
+export function disconnectedMessage(_action: string): string {
+  return "尚未连接到服务器，请先登录。";
 }
 
 export function isRateLimited(status: number, body: unknown): boolean {
@@ -65,29 +50,29 @@ export function isSyncCursorRejected(incremental: boolean, result: TransportResu
   return result.status === 400;
 }
 
-export function credentialRejectedMessage(action: string, result: TransportResult): string {
+export function credentialRejectedMessage(_action: string, result: TransportResult): string {
   const body = result.type === "response" ? result.body : undefined;
-  const prefix = actionFailedPrefix(action);
   return errcode(body) === "M_USER_DEACTIVATED"
-    ? sentence(`${prefix}，因为账号已停用`, errorText(body))
-    : sentence(`${prefix}，因为服务器不认这台设备的登录`, errorText(body));
+    ? "该账号已停用。"
+    : "当前设备登录已失效，请重新登录。";
 }
 
 export function transportFailureMessage(action: string, failure: TransportFailure): string {
-  const prefix = actionFailedPrefix(action);
   switch (failure.type) {
     case "timeout":
-      return `${prefix}，因为超时。`;
+      return action === "确认 Homeserver" || action === "同步" || action === "登录"
+        ? "连接超时，请稍后重试。"
+        : `${/[A-Za-z0-9]$/.test(action) ? `${action} 超时` : `${action}超时`}，请稍后重试。`;
     case "untrusted-certificate":
-      return `${prefix}，因为到达不了，证书不受信任。`;
+      return "服务器证书不受信任，无法建立连接。";
     case "hostname-mismatch":
-      return `${prefix}，因为到达不了，主机名对不上。`;
+      return "服务器证书与当前域名不匹配。";
     case "https-unavailable":
-      return `${prefix}，因为到达不了，HTTPS 建不起来。`;
+      return "无法与该服务器建立安全的 HTTPS 连接。";
     case "network":
-      return `${prefix}，因为到达不了。`;
+      return "无法连接到服务器，请检查网络或地址。";
     case "aborted":
-      return `${prefix}，因为已中止。`;
+      return "操作已取消。";
   }
 }
 
@@ -103,23 +88,16 @@ export function formatMatrixActionFailure(
   if (result.type === "failure") {
     return transportFailureMessage(action, result.failure);
   }
-  const prefix = actionFailedPrefix(action);
   if (isRateLimited(result.status, result.body)) {
-    return sentence(`${prefix}，因为被限流`, errorText(result.body));
+    return "请求过于频繁，请稍后再试。";
   }
   if (result.status >= 500) {
-    return sentence(
-      `${prefix}，${becauseReason(options?.serverErrorReason ?? "Homeserver 暂时不能完成请求")}`,
-      errorText(result.body),
-    );
+    return options?.serverErrorReason ?? "服务器暂时无法响应，请稍后重试。";
   }
   if (options?.fallbackMessage) {
     return options.fallbackMessage;
   }
-  return sentence(
-    `${prefix}，${becauseReason(options?.rejectedReason ?? "Homeserver 拒绝了请求")}`,
-    errorText(result.body),
-  );
+  return options?.rejectedReason ?? `${action}被服务器拒绝，请稍后重试。`;
 }
 
 export function isInteractiveLogin(body: Record<string, unknown>): boolean {
@@ -170,24 +148,23 @@ export function isDeviceIdRejected(result: TransportResult): boolean {
 export function classifyLoginFailure(
   result: TransportResult,
   action = "登录",
-  rejectedCredentialLabel = "用户标识或密码被拒绝",
+  rejectedCredentialLabel = "用户名或密码不正确",
 ): { message: string; clearPassword: boolean } {
-  const prefix = actionFailedPrefix(action);
   if (result.type === "response" && isRecord(result.body) && isInteractiveLogin(result.body)) {
     return {
-      message: `${prefix}，因为还要验证码或其他交互式验证，Waypoint 做不了。`,
+      message: "该服务器需要验证码或其他交互式验证，暂不支持登录。",
       clearPassword: false,
     };
   }
   if (result.type === "response" && errcode(result.body) === "M_USER_DEACTIVATED") {
     return {
-      message: sentence(`${prefix}，因为账号已停用`, errorText(result.body)),
+      message: "该账号已停用。",
       clearPassword: true,
     };
   }
   if (result.type === "response" && isRateLimited(result.status, result.body)) {
     return {
-      message: sentence(`${prefix}，因为被限流`, errorText(result.body)),
+      message: "请求过于频繁，请稍后再试。",
       clearPassword: false,
     };
   }
@@ -196,7 +173,7 @@ export function classifyLoginFailure(
     (errcode(result.body) === "M_FORBIDDEN" || errcode(result.body) === "M_UNAUTHORIZED")
   ) {
     return {
-      message: sentence(`${prefix}，因为${rejectedCredentialLabel}`, errorText(result.body)),
+      message: `${rejectedCredentialLabel}。`,
       clearPassword: true,
     };
   }
@@ -204,13 +181,13 @@ export function classifyLoginFailure(
     return { message: transportFailureMessage(action, result.failure), clearPassword: false };
   }
   if (result.type === "response" && result.status === 200) {
-    return { message: `${prefix}，因为 Homeserver 没有返回完整的登录结果。`, clearPassword: false };
+    return { message: "服务器返回的登录信息不完整，请稍后重试。", clearPassword: false };
   }
   if (result.type === "response" && result.status >= 500) {
     return {
-      message: sentence(`${prefix}，因为 Homeserver 暂时不能完成${action}`, errorText(result.body)),
+      message: "服务器暂时无法响应，请稍后重试。",
       clearPassword: false,
     };
   }
-  return { message: `${prefix}，因为 Homeserver 没有返回完整的登录结果。`, clearPassword: false };
+  return { message: "服务器返回的登录信息不完整，请稍后重试。", clearPassword: false };
 }

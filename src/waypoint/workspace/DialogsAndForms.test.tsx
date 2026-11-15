@@ -204,7 +204,7 @@ function createConnectedHomeserver({
 async function loginToWorkspace(user: ReturnType<typeof userEvent.setup>) {
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
   await screen.findByRole("button", { name: /已有话题/ });

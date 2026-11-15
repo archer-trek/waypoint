@@ -109,7 +109,7 @@ export async function login(user: ReturnType<typeof userEvent.setup>) {
     target: { value: "https://matrix.example.com" },
   });
   await user.click(screen.getByRole("button", { name: "继续" }));
-  fireEvent.change(await screen.findByLabelText("用户标识"), {
+  fireEvent.change(await screen.findByLabelText("用户名"), {
     target: { value: "alice" },
   });
   fireEvent.change(screen.getByLabelText("密码"), {
@@ -164,7 +164,7 @@ export async function enterRegistration(
     return baseHandler(input);
   };
   await login(user);
-  return await screen.findByLabelText("Matrix 用户 ID");
+  return await screen.findByLabelText("Bot 用户名");
 }
 
 export function withMockedTimelineLayout<T>(

@@ -93,7 +93,7 @@ function renderApp(
 async function loginToTopics(user: ReturnType<typeof userEvent.setup>) {
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
   await screen.findByText("暂无 Topic");
@@ -344,19 +344,21 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
 
     const addressInput = await screen.findByLabelText("Homeserver 地址");
     expect(addressInput).toHaveAttribute("name", "address");
+    expect(addressInput).not.toHaveAttribute("placeholder");
     expect(screen.getByText("尚未进入 Topic 列表")).toHaveClass("sr-only");
 
-    await user.type(addressInput, "invalid-url");
+    await user.type(addressInput, "http://invalid-url");
     await user.click(screen.getByRole("button", { name: "继续" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("只接受完整的 https 地址");
+    expect(screen.getByRole("alert")).toHaveTextContent("仅支持通过 HTTPS 连接 Homeserver。");
 
     await user.clear(addressInput);
     await user.type(addressInput, "https://matrix.example.com");
     await user.click(screen.getByRole("button", { name: "继续" }));
 
-    const userInput = await screen.findByLabelText("用户标识");
+    const userInput = await screen.findByLabelText("用户名");
     const passwordInput = screen.getByLabelText("密码");
     expect(userInput).toHaveAttribute("name", "user-id");
+    expect(userInput).not.toHaveAttribute("placeholder");
     expect(passwordInput).toHaveAttribute("name", "password");
     expect(screen.getByRole("button", { name: "更改地址" })).toBeInTheDocument();
 
@@ -364,8 +366,9 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
     await user.type(passwordInput, "secret");
     await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-    const agentInput = await screen.findByLabelText("Matrix 用户 ID");
+    const agentInput = await screen.findByLabelText("Bot 用户名");
     expect(agentInput).toHaveAttribute("name", "agent-user-id");
+    expect(agentInput).not.toHaveAttribute("placeholder");
     expect(screen.getByRole("heading", { name: "登记 Bot" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "登记 Bot" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "放弃" })).toBeInTheDocument();
@@ -405,5 +408,113 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
       const source = readFileSync(resolve(cwd, relPath), "utf-8");
       expect(source).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
     }
+  });
+
+  test("地址确认、密码登录与登记 Bot 过程中展示 loading 状态且支持随时放弃登记", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    let resolveVersions!: (value: TransportResult) => void;
+    let resolveLogin!: (value: TransportResult) => void;
+    let resolveRegister!: (value: TransportResult) => void;
+
+    homeserver.handler = async (input) => {
+      if (input.url.endsWith("/versions")) {
+        return new Promise<TransportResult>((r) => {
+          resolveVersions = r;
+        });
+      }
+      if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+        return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+        return new Promise<TransportResult>((r) => {
+          resolveLogin = r;
+        });
+      }
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-1", account_data: { events: [] } } };
+      }
+      if (
+        input.method === "GET" &&
+        input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com/account_data/im.waypoint.agents")
+      ) {
+        return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+      }
+      if (input.method === "PUT") {
+        return new Promise<TransportResult>((r) => {
+          resolveRegister = r;
+        });
+      }
+      if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    renderApp(homeserver);
+    const addressInput = await screen.findByLabelText("Homeserver 地址");
+    await user.type(addressInput, "https://matrix.example.com");
+    await user.click(screen.getByRole("button", { name: "继续" }));
+
+    expect(screen.getByRole("button", { name: "正在连接…" })).toBeDisabled();
+    expect(addressInput).toBeDisabled();
+
+    await act(async () => {
+      resolveVersions({ type: "response", status: 200, body: { versions: ["v1.11"] } });
+    });
+
+    const userInput = await screen.findByLabelText("用户名");
+    const passwordInput = screen.getByLabelText("密码");
+    await user.type(userInput, "alice");
+    await user.type(passwordInput, "secret");
+    await user.click(screen.getByRole("button", { name: "用密码登录" }));
+
+    expect(screen.getByRole("button", { name: "正在登录…" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "更改地址" })).toBeDisabled();
+    expect(userInput).toBeDisabled();
+    expect(passwordInput).toBeDisabled();
+
+    await act(async () => {
+      resolveLogin({
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+      });
+    });
+
+    const agentInput = await screen.findByLabelText("Bot 用户名");
+    await user.type(agentInput, "@bot:example.com");
+    await user.click(screen.getByRole("button", { name: "登记 Bot" }));
+
+    expect(screen.getByRole("button", { name: "正在登记…" })).toBeDisabled();
+    expect(agentInput).toBeDisabled();
+    expect(screen.getByRole("button", { name: "放弃" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "放弃" }));
+    expect(await screen.findByLabelText("密码")).toHaveValue("");
+
+    await act(async () => {
+      resolveRegister({ type: "response", status: 200, body: {} });
+    });
+  });
+
+  test("narrow 视口下以原生移动布局渲染连接页", async () => {
+    const homeserver = new FakeHomeserver();
+    const clock = new ManualClock();
+    render(
+      <WaypointApp
+        homeserver={homeserver}
+        platform={{
+          deviceDisplayName: "Waypoint Android",
+          viewportMode: () => "narrow",
+        }}
+        clock={clock}
+      />,
+    );
+
+    const addressInput = await screen.findByLabelText("Homeserver 地址");
+    expect(addressInput).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveAttribute("data-viewport", "narrow");
+    expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument();
   });
 });

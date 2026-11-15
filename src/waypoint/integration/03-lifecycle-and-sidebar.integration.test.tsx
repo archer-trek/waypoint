@@ -629,7 +629,7 @@ test("窄视口提交新建 Topic 期间触发系统返回时留在新建页并�
         body: { errcode: "M_UNKNOWN", error: "Temporary failure" },
       });
     });
-    expect(await screen.findByRole("alert")).toHaveTextContent("Temporary failure");
+    expect(await screen.findByRole("alert")).toHaveTextContent("服务器暂时无法创建 Topic，请稍后重试。");
     expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
 
     // 再次按下系统返回应回到 Topic 列表（不漏出应用外）
@@ -1349,40 +1349,43 @@ test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁
   await user.click(await screen.findByRole("button", { name: "设置" }));
   await user.click(screen.getByRole("button", { name: "登记新 Bot" }));
 
-  const userIdInput = screen.getByLabelText("Matrix 用户 ID");
+  const userIdInput = screen.getByLabelText("Bot 用户名");
+  expect(userIdInput).not.toHaveAttribute("placeholder");
   const nameInput = screen.getByLabelText("手写名字（可选）");
   const submitButton = screen.getByRole("button", { name: "登记 Bot" });
 
-  // 1. 空用户 ID
-  await user.click(submitButton);
-  expect(await screen.findByRole("alert")).toHaveTextContent("用户 ID 是空的");
+  // 1. 空或纯空白用户名时按钮不可点击
+  expect(submitButton).toBeDisabled();
+  await user.type(userIdInput, "   ");
+  expect(submitButton).toBeDisabled();
+  await user.clear(userIdInput);
   expect(putAttempt).toBe(0);
 
-  // 2. 不完整用户 ID（缺 @ 或 server）
-  await user.type(userIdInput, "bot2");
+  // 2. 残缺用户 ID（带 @ 但缺 :server）
+  await user.type(userIdInput, "@bot2");
   await user.click(submitButton);
-  expect(await screen.findByRole("alert")).toHaveTextContent("完整的 Matrix 用户 ID");
+  expect(await screen.findByRole("alert")).toHaveTextContent("有效的 Bot 用户名或完整 Matrix 用户 ID");
   expect(putAttempt).toBe(0);
 
   // 3. 跨 server name
   await user.clear(userIdInput);
   await user.type(userIdInput, "@bot2:other.org");
   await user.click(submitButton);
-  expect(await screen.findByRole("alert")).toHaveTextContent("server name 必须与当前账号完全一致");
+  expect(await screen.findByRole("alert")).toHaveTextContent("同一台 Homeserver");
   expect(putAttempt).toBe(0);
 
   // 4. Owner 自身
   await user.clear(userIdInput);
   await user.type(userIdInput, "@alice:example.com");
   await user.click(submitButton);
-  expect(await screen.findByRole("alert")).toHaveTextContent("不能把自己登记成 Bot");
+  expect(await screen.findByRole("alert")).toHaveTextContent("不能将自己登记为 Bot");
   expect(putAttempt).toBe(0);
 
   // 5. 名册内重复
   await user.clear(userIdInput);
   await user.type(userIdInput, "  @bot1:example.com  ");
   await user.click(submitButton);
-  expect(await screen.findByRole("alert")).toHaveTextContent("已经在名册里");
+  expect(await screen.findByRole("alert")).toHaveTextContent("已在名册中");
   expect(userIdInput).toHaveValue("@bot1:example.com");
   expect(putAttempt).toBe(0);
 
@@ -1399,7 +1402,7 @@ test("在设置里登记新 Bot：校验用户 ID 与重复项、提交期间锁
 
   // 7. 第一次写入失败：留在表单保留已填内容并报错，不进重试队列
   firstPutDeferred.resolve({ type: "failure", failure: { type: "network" } });
-  expect(await screen.findByRole("alert")).toHaveTextContent("登记 Bot 失败，因为到达不了。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
   expect(userIdInput).toHaveValue("@BotTwo:example.com");
   expect(nameInput).toHaveValue("  二号助理  ");
   expect(submitButton).not.toBeDisabled();
@@ -1549,7 +1552,7 @@ test("在设置里编辑 Bot 时用户 ID 锁死、可修改或清空手写名�
   await user.type(nameField, "改后名字");
   await user.click(screen.getByRole("button", { name: "保存" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("database busy");
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务器暂时无法响应，请稍后重试。");
   expect(screen.getByLabelText("手写名字（可选）")).toHaveValue("改后名字");
   const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
   expect(agentsSection).toHaveTextContent("初始手写名");
@@ -1692,7 +1695,7 @@ test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅�
   // 再次点移除 @bot2 并确认：第一次超时失败，留在确认框并报错，列表不做乐观更新
   await user.click(screen.getAllByRole("button", { name: "移除" })[1]);
   await user.click(screen.getByRole("button", { name: "确认移除" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("移除 Bot 失败，因为超时。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("移除 Bot 超时，请稍后重试。");
   expect(screen.getByRole("alertdialog", { name: "确认移除 Bot" })).toBeInTheDocument();
   const agentsSection = screen.getByRole("region", { name: "Bot 名册", hidden: true });
   expect(agentsSection).toHaveTextContent("@bot2:example.com");
@@ -1807,20 +1810,23 @@ test("新建 Topic 内可直接登记新 Bot：单 Bot 时不显示选择器，�
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("跨项目协作");
   expect(screen.getByLabelText(/Description/)).toHaveValue("需要二号 Bot 协助");
 
-  // 重复校验
-  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot1:example.com");
+  // 空用户名时快捷登记按钮不可点击
+  expect(screen.getByRole("button", { name: "登记 Bot" })).toBeDisabled();
+
+  // 重复校验（使用 localpart 也能识别重复）
+  await user.type(screen.getByLabelText("Bot 用户名"), "bot1");
   await user.click(screen.getByRole("button", { name: "登记 Bot" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("已经在名册里");
+  expect(await screen.findByRole("alert")).toHaveTextContent("已在名册中");
   expect(putAttempt).toBe(0);
 
-  // 填写新 Bot，第一次 PUT 失败保留输入并报错
-  await user.clear(screen.getByLabelText("Matrix 用户 ID"));
-  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot2:example.com");
+  // 填写新 Bot（用 localpart 自动补全），第一次 PUT 失败保留输入并报错
+  await user.clear(screen.getByLabelText("Bot 用户名"));
+  await user.type(screen.getByLabelText("Bot 用户名"), "bot2");
   await user.type(screen.getByLabelText("手写名字（可选）"), "协作二号");
   await user.click(screen.getByRole("button", { name: "登记 Bot" }));
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("temporary failure");
-  expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@bot2:example.com");
+  expect(await screen.findByRole("alert")).toHaveTextContent("服务器暂时无法响应，请稍后重试。");
+  expect(screen.getByLabelText("Bot 用户名")).toHaveValue("@bot2:example.com");
   expect(screen.getByLabelText("手写名字（可选）")).toHaveValue("协作二号");
   expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
 
@@ -1897,9 +1903,9 @@ test("名册写入失败不进重试队列；两台设备同时改名册时直�
   await user.click(screen.getByRole("button", { name: "登记新 Bot" }));
 
   // 第一次提交失败后推进时钟，不会自动重试 PUT
-  await user.type(screen.getByLabelText("Matrix 用户 ID"), "@bot3:example.com");
+  await user.type(screen.getByLabelText("Bot 用户名"), "@bot3:example.com");
   await user.click(screen.getByRole("button", { name: "登记 Bot" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("到达不了");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
   expect(putAttempt).toBe(1);
 
   act(() => {
@@ -2104,15 +2110,14 @@ test("编辑 Topic 只对实际变更的字段发请求：校验空名字、跳�
   await login(user);
   await user.click(await screen.findByRole("button", { name: "初始名" }));
 
-  // 1. 清空名字只填空白时在本地拒绝且保留 Description 输入，不发请求
+  // 1. 清空名字或只填空白时保存按钮不可点击，且保留 Description 输入不发请求
   await user.click(screen.getByRole("button", { name: "编辑" }));
   await user.clear(screen.getByLabelText("Topic 名字"));
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   await user.type(screen.getByLabelText("Topic 名字"), "   ");
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   await user.clear(screen.getByLabelText(/Description/));
   await user.type(screen.getByLabelText(/Description/), "保留的草稿说明");
-  await user.click(screen.getByRole("button", { name: "保存" }));
-
-  expect(await screen.findByRole("alert")).toHaveTextContent("请输入 Topic 名字");
   expect(screen.getByLabelText(/Description/)).toHaveValue("保留的草稿说明");
   expect(homeserver.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
 
@@ -2218,7 +2223,8 @@ test("编辑 Topic 全部失败时留在表单并保留所有输入，重试可�
   await user.click(screen.getByRole("button", { name: "保存" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Server busy");
+  expect(alert).toHaveTextContent("服务器暂时无法响应，请稍后重试。");
+  expect(alert).not.toHaveTextContent("Server busy");
   expect(alert).not.toHaveTextContent("M_UNKNOWN");
   expect(alert).not.toHaveTextContent("500");
   expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
@@ -2302,7 +2308,8 @@ test("同时修改名字和 Description 且只有一项成功时，成功的立�
 
   const alertA = await screen.findByRole("alert");
   expect(alertA).toHaveTextContent("Description");
-  expect(alertA).toHaveTextContent("Topic write failed");
+  expect(alertA).toHaveTextContent("服务器暂时无法响应，请稍后重试。");
+  expect(alertA).not.toHaveTextContent("Topic write failed");
   expect(screen.getByRole("region", { name: "编辑 Topic" })).toBeVisible();
   expect(screen.queryByLabelText("Topic 名字")).not.toBeInTheDocument();
   expect(screen.getByLabelText(/Description/)).toHaveValue("未成新说明");
@@ -3418,7 +3425,7 @@ test("跨设备同时编辑与移除 Bot 时，另一设备同步移除后重试
   await user.clear(nameField);
   await user.type(nameField, "二号新名");
   await user.click(screen.getByRole("button", { name: "保存" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("到达不了");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
 
   // 另一台设备在此期间移除了 @bot2:example.com，且本机同步到了该变更
   serverAgents = {
