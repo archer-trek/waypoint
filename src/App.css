@@ -156,6 +156,7 @@
     height: 100dvh;
     margin: 0;
     font-family: var(--font-sans);
+    /* Document-flow base (1rem = 15.5px); mobile list/chrome controls use explicit px sizes to avoid unintended shrinking. */
     font-size: 15.5px;
     line-height: 1.6;
     background: var(--background);

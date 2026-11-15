@@ -211,4 +211,41 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     }
     expect(strayHexLines).toEqual([]);
   });
+
+  test("UI TS/TSX files do not combine leading-none with truncate or overflow-hidden", () => {
+    const targets = [
+      resolve(ROOT_DIR, "src/App.tsx"),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/components")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/waypoint")),
+    ].sort();
+
+    const violations: string[] = [];
+    const leadingNoneRe = /\bleading-none\b/;
+    const clipRe = /\b(?:truncate|overflow-hidden)\b/;
+
+    for (const filePath of targets) {
+      const rel = relative(ROOT_DIR, filePath);
+      const source = readFileSync(filePath, "utf-8");
+      const lines = source.split("\n");
+      lines.forEach((line: string, index: number) => {
+        if (leadingNoneRe.test(line) && clipRe.test(line)) {
+          violations.push(`${rel}:${index + 1}: ${line.trim()}`);
+        }
+      });
+
+      const classBlocks = source.matchAll(/className=\{(?:[^{}]|\{[^{}]*\})*\}/gs);
+      for (const match of classBlocks) {
+        const block = match[0];
+        if (leadingNoneRe.test(block) && clipRe.test(block)) {
+          const lineNo = source.slice(0, match.index).split("\n").length;
+          const entry = `${rel}:${lineNo}: ${block.replace(/\s+/g, " ").trim()}`;
+          if (!violations.some((v) => v.startsWith(`${rel}:${lineNo}:`))) {
+            violations.push(entry);
+          }
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
 });
