@@ -1,4 +1,5 @@
 import { AlertCircle, Loader2 } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,27 +28,34 @@ import { resetAppearancePreference, syncAppearanceLifecycle } from "./appearance
 import { MatrixClient } from "./matrix-client";
 import { RetryQueue } from "./retry-queue";
 import {
+  classifyLoginFailure,
   credentialRejectedMessage,
   isAbortedFailure,
-  errcode,
-  errorText,
   formatMatrixActionFailure,
   isCredentialRejected,
   isRateLimited,
   isRecord,
   isSyncCursorRejected,
-  sentence,
   transportFailureMessage,
 } from "./matrix-errors";
 import { TopicsWorkspace } from "./TopicsWorkspace";
-import { deriveRoomAvailability, isFullUserId, parseRegisteredAgents, validateAgentUserId } from "./topics";
+import { deriveRoomAvailability, isFullUserId, isLocalpart, parseRegisteredAgents, validateAgentUserId } from "./topics";
 
 let liveAppInstanceToken: symbol | null = null;
 
+type AuthStepDir = "forward" | "back" | "fade";
+
 type Phase =
   | { name: "booting" }
-  | { name: "address"; address: string; message?: string }
-  | { name: "password"; address: string; userId: string; password: string; message?: string }
+  | { name: "address"; address: string; submitting: boolean; message?: string }
+  | {
+      name: "password";
+      address: string;
+      userId: string;
+      password: string;
+      submitting: boolean;
+      message?: string;
+    }
   | { name: "syncing"; address: string; userId: string; message?: string }
   | {
       name: "register";
@@ -69,6 +77,7 @@ export function WaypointApp({
   clock: Clock;
 }) {
   const [phase, setPhase] = useState<Phase>({ name: "booting" });
+  const [authStepDir, setAuthStepDir] = useState<AuthStepDir>("fade");
   const subscribeViewport = useCallback(
     (listener: () => void) =>
       platform.subscribeViewportMode
@@ -167,6 +176,7 @@ export function WaypointApp({
         setPhase({ name: "topics", initialSyncImmediate: true });
         return;
       }
+      setAuthStepDir("fade");
       setPhase({ name: "syncing", address: matrix.address, userId: matrix.ownerId });
       const suspended = shouldSuspendSyncInBackground(platformRef.current) && !readAppVisible();
       backgroundSuspendedRef.current = suspended;
@@ -176,15 +186,18 @@ export function WaypointApp({
       return;
     }
     if (restored === "password") {
+      setAuthStepDir("fade");
       setPhase({
         name: "password",
         address: matrix.address,
         userId: matrix.ownerId,
         password: "",
+        submitting: false,
       });
       return;
     }
-    setPhase({ name: "address", address: "" });
+    setAuthStepDir("fade");
+    setPhase({ name: "address", address: "", submitting: false });
   });
 
   useEffect(() => {
@@ -347,7 +360,8 @@ export function WaypointApp({
       if (epoch.current !== myEpoch) {
         return;
       }
-      setPhase({ name: "password", address, userId, password: "" });
+      setAuthStepDir("back");
+      setPhase({ name: "password", address, userId, password: "", submitting: false });
     } finally {
       abandoning.current = false;
     }
@@ -374,7 +388,8 @@ export function WaypointApp({
         return;
       }
       resetAppearancePreference();
-      setPhase({ name: "password", address, userId, password: "" });
+      setAuthStepDir("back");
+      setPhase({ name: "password", address, userId, password: "", submitting: false });
     } finally {
       exiting.current = false;
     }
@@ -391,6 +406,11 @@ export function WaypointApp({
     }
     const myEpoch = epoch.current;
     const generation = ++syncGeneration.current;
+    setPhase((prev) =>
+      prev.name === "syncing" && prev.message
+        ? { name: "syncing", address: prev.address, userId: prev.userId }
+        : prev,
+    );
     clearRetry();
     syncAbortControllerRef.current?.abort();
     const controller = new AbortController();
@@ -430,11 +450,13 @@ export function WaypointApp({
       if (!syncIsCurrent(myEpoch, generation)) {
         return;
       }
+      setAuthStepDir("back");
       setPhase({
         name: "password",
         address,
         userId,
         password: "",
+        submitting: false,
         message: credentialRejectedMessage("同步", sync),
       });
       return;
@@ -453,17 +475,18 @@ export function WaypointApp({
       if (wasBackedOff && retryQueue().isActive()) {
         retryQueue().wake();
       }
-      setPhase(
-        hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)
-          ? { name: "topics" }
-          : {
-              name: "register",
-              address: matrix.address,
-              userId: matrix.ownerId,
-              agentUserId: "",
-              submitting: false,
-            },
-      );
+      if (hasValidAgent(matrix.accountData("im.waypoint.agents"), matrix.ownerId)) {
+        setPhase({ name: "topics" });
+      } else {
+        setAuthStepDir("forward");
+        setPhase({
+          name: "register",
+          address: matrix.address,
+          userId: matrix.ownerId,
+          agentUserId: "",
+          submitting: false,
+        });
+      }
       return;
     }
     setPhase({
@@ -477,52 +500,68 @@ export function WaypointApp({
 
   function submitAddress(event: FormEvent) {
     event.preventDefault();
-    if (phase.name !== "address") {
+    if (phase.name !== "address" || phase.submitting) {
       return;
     }
-    const baseUrl = normalizeBaseUrl(phase.address);
-    if (!baseUrl) {
+    const parsed = classifyBaseUrl(phase.address);
+    if (!parsed.ok) {
       setPhase({
         ...phase,
-        message: "确认 Homeserver 失败，因为只接受完整的 https 地址。",
+        submitting: false,
+        message: parsed.message,
       });
       return;
     }
-    setPhase({ name: "address", address: baseUrl });
-    void confirmHomeserver(baseUrl);
+    setPhase({ name: "address", address: parsed.baseUrl, submitting: true });
+    void confirmHomeserver(parsed.baseUrl, epoch.current);
   }
 
-  async function confirmHomeserver(baseUrl: string) {
+  async function confirmHomeserver(baseUrl: string, myEpoch: number) {
     const result = await client().versions(baseUrl);
-    const message = versionsOutcome(result);
-    if (!message) {
-      setPhase({ name: "password", address: baseUrl, userId: "", password: "" });
+    if (epoch.current !== myEpoch) {
       return;
     }
-    setPhase({ name: "address", address: baseUrl, message });
+    const message = versionsOutcome(result);
+    if (!message) {
+      setAuthStepDir("forward");
+      setPhase({
+        name: "password",
+        address: baseUrl,
+        userId: "",
+        password: "",
+        submitting: false,
+      });
+      return;
+    }
+    setPhase((prev) =>
+      prev.name === "address"
+        ? { name: "address", address: baseUrl, submitting: false, message }
+        : prev,
+    );
   }
 
   function submitPassword(event: FormEvent) {
     event.preventDefault();
-    if (phase.name !== "password") {
+    if (phase.name !== "password" || phase.submitting) {
       return;
     }
     const identifier = classifyIdentifier(phase.userId);
     if (identifier.kind === "empty") {
-      setPhase({ ...phase, message: "登录失败，因为用户标识是空的。" });
+      setPhase({ ...phase, submitting: false, message: "请输入用户名。" });
       return;
     }
     if (identifier.kind === "rejected") {
       setPhase({
         ...phase,
+        submitting: false,
         userId: phase.userId.trim(),
-        message: "登录失败，因为用户标识只能是 localpart 或完整用户 ID，不接受邮箱或电话。",
+        message: "请输入有效的用户名或完整 Matrix 用户 ID，不支持邮箱和手机号。",
       });
       return;
     }
-    const next = { ...phase, userId: identifier.user, message: undefined };
+    const next = { ...phase, userId: identifier.user, submitting: true, message: undefined };
     setPhase(next);
-    void beginLogin(next.address, identifier.user, phase.password);
+    void beginLogin(next.address, identifier.user, phase.password, epoch.current);
   }
 
   function submitRegistration(event: FormEvent) {
@@ -556,11 +595,13 @@ export function WaypointApp({
     if (epoch.current !== myEpoch) {
       return;
     }
+    setAuthStepDir("back");
     setPhase({
       name: "password",
       address,
       userId,
       password: "",
+      submitting: false,
       message: credentialRejectedMessage(action, result),
     });
   }
@@ -625,15 +666,19 @@ export function WaypointApp({
     );
   }
 
-  async function beginLogin(address: string, user: string, password: string) {
+  async function beginLogin(address: string, user: string, password: string, myEpoch: number) {
     const matrix = client();
     const flows = await matrix.loginFlows();
+    if (epoch.current !== myEpoch) {
+      return;
+    }
     if (!(flows.type === "response" && flows.status === 200)) {
       const failure = loginFailure(flows);
       setPhase((prev) =>
         prev.name === "password"
           ? {
               ...prev,
+              submitting: false,
               password: failure.clearPassword ? "" : prev.password,
               message: failure.message,
             }
@@ -644,12 +689,19 @@ export function WaypointApp({
     if (!hasPasswordLogin(flows.body)) {
       setPhase((prev) =>
         prev.name === "password"
-          ? { ...prev, message: "登录失败，因为这台 Homeserver 没有密码登录，这不是密码错误。" }
+          ? {
+              ...prev,
+              submitting: false,
+              message: "该 Homeserver 未开启密码登录。",
+            }
           : prev,
       );
       return;
     }
     const login = await matrix.passwordLogin(user, password, platform.deviceDisplayName);
+    if (epoch.current !== myEpoch) {
+      return;
+    }
     const session = loginSuccess(login);
     if (!session) {
       const failure = loginFailure(login);
@@ -657,6 +709,7 @@ export function WaypointApp({
         prev.name === "password"
           ? {
               ...prev,
+              submitting: false,
               password: failure.clearPassword ? "" : prev.password,
               message: failure.message,
             }
@@ -666,26 +719,71 @@ export function WaypointApp({
     }
     retryQueue().resume();
     await matrix.rememberLogin(session.userId, session.accessToken, session.deviceId);
+    if (epoch.current !== myEpoch) {
+      return;
+    }
+    setAuthStepDir("forward");
     setPhase({ name: "syncing", address, userId: session.userId });
     await syncNow();
   }
 
-  const authMainClassName =
-    "flex min-h-full w-full max-w-full items-center justify-center bg-background px-5 py-6 pt-[max(1.5rem,env(safe-area-inset-top,0px))] pb-[calc(max(1.5rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))] text-foreground";
+  const isNarrow = viewportMode === "narrow";
+
+  const authMainClassName = cn(
+    "flex min-h-full w-full max-w-full overflow-y-auto bg-background px-6 text-foreground",
+    isNarrow
+      ? "flex-col pt-[max(3.25rem,env(safe-area-inset-top,0px))] pb-[calc(max(1.5rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))]"
+      : "items-center justify-center py-8 pt-[max(2rem,env(safe-area-inset-top,0px))] pb-[calc(max(2rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))]",
+  );
 
   const authMainStyle = {
     "--keyboard-inset": `${keyboardInsetBottom}px`,
     paddingBottom: keyboardInsetBottom > 0 ? `${keyboardInsetBottom}px` : undefined,
   } as CSSProperties;
 
+  const stepAnimationClassName =
+    authStepDir === "forward"
+      ? "waypoint-auth-step-forward"
+      : authStepDir === "back"
+        ? "waypoint-auth-step-back"
+        : "waypoint-auth-fade";
+
+  const authInputClassName = cn(
+    "mt-0 rounded-xl border-border/80 bg-secondary/45 px-3.5 text-[15.5px] shadow-none transition-colors focus-visible:bg-background select-text",
+    isNarrow ? "h-12" : "h-11",
+  );
+
+  const authPrimaryButtonClassName = cn(
+    "w-full rounded-full font-medium",
+    isNarrow ? "h-12 text-[15px]" : "h-11",
+  );
+
+  const authGhostButtonClassName = cn(
+    "w-full rounded-full text-muted-foreground hover:text-foreground",
+    isNarrow ? "h-11" : "h-10",
+  );
+
+  const inlineAlert =
+    "message" in phase && phase.message ? (
+      <Alert variant="destructive" className="rounded-xl waypoint-auth-fade">
+        <AlertCircle aria-hidden="true" />
+        <AlertDescription>{phase.message}</AlertDescription>
+      </Alert>
+    ) : null;
+
   if (duplicateInstance) {
     return (
-      <main className={authMainClassName}>
-        <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 text-center text-card-foreground shadow-xs select-none">
-          <div className="mx-auto mb-3 inline-flex size-12 items-center justify-center rounded-xl border border-border bg-secondary text-foreground">
-            <WaypointBrandIcon size={28} />
+      <main data-viewport={viewportMode} className={authMainClassName}>
+        <div
+          className={cn(
+            "mx-auto w-full max-w-[23rem] text-center select-none waypoint-auth-fade",
+            isNarrow && "my-auto",
+          )}
+        >
+          <div className="mb-4 flex justify-center text-foreground">
+            <WaypointBrandIcon size={40} />
           </div>
-          <p role="status" className="text-sm leading-relaxed text-muted-foreground">
+          <p role="status" className="m-0 text-sm leading-relaxed text-muted-foreground">
             Waypoint 已在主窗口中运行，请切回主窗口继续。
           </p>
         </div>
@@ -711,6 +809,7 @@ export function WaypointApp({
           clearRetry();
           retryQueue().pause();
           const m = client();
+          setAuthStepDir("fade");
           setPhase({
             name: "register",
             address: m.address,
@@ -726,119 +825,251 @@ export function WaypointApp({
 
   if (phase.name === "booting") {
     return (
-      <main className={authMainClassName} aria-busy="true" style={authMainStyle}>
-        <div className="mx-auto w-full max-w-[25.5rem]">
-          <div className="flex flex-col items-center justify-center gap-6 rounded-2xl border border-border bg-card px-8 py-14 text-card-foreground shadow-xs select-none">
-            <div className="inline-flex size-14 items-center justify-center rounded-2xl border border-border bg-secondary text-foreground">
-              <WaypointBrandIcon size={44} />
-            </div>
-            <div className="flex items-center justify-center" aria-hidden="true">
-              <Loader2 className="size-5 animate-spin text-muted-foreground" />
-            </div>
+      <main
+        data-viewport={viewportMode}
+        className={authMainClassName}
+        aria-busy="true"
+        style={authMainStyle}
+      >
+        <div
+          className={cn(
+            "mx-auto flex w-full max-w-[23rem] flex-col items-center justify-center gap-6 py-12 select-none waypoint-auth-fade",
+            isNarrow && "my-auto",
+          )}
+        >
+          <div className="text-foreground">
+            <WaypointBrandIcon size={44} />
+          </div>
+          <div className="flex items-center justify-center" aria-hidden="true">
+            <Loader2 className="size-5 animate-spin text-muted-foreground" />
           </div>
         </div>
       </main>
     );
   }
 
-  return (
-    <main className={authMainClassName} style={authMainStyle}>
-      <p className="sr-only">尚未进入 Topic 列表</p>
-      <div className="mx-auto w-full max-w-[25.5rem]">
-        <div className="w-full rounded-2xl border border-border bg-card p-6 text-card-foreground shadow-xs select-none sm:p-7">
-          <header className="mb-6 flex flex-col items-center text-center">
-            <div className="mb-3.5 inline-flex size-14 items-center justify-center rounded-2xl border border-border bg-secondary text-foreground">
-              <WaypointBrandIcon size={40} />
-            </div>
-            <h1 className="m-0 text-2xl font-bold tracking-tight text-foreground">
-              Waypoint
-            </h1>
-            <p className="mt-1.5 text-sm text-muted-foreground">
-              面向 Personal Agent 的专属客户端
-            </p>
-          </header>
+  const headerAlignedLeft = isNarrow && phase.name !== "syncing";
 
+  return (
+    <main data-viewport={viewportMode} className={authMainClassName} style={authMainStyle}>
+      <p className="sr-only">尚未进入 Topic 列表</p>
+      <div
+        className={cn(
+          "mx-auto w-full max-w-[23rem] select-none",
+          isNarrow && "flex flex-1 flex-col",
+          isNarrow && phase.name === "syncing" && "pt-8",
+        )}
+      >
+        <header
+          className={cn(
+            "flex flex-col transition-all duration-200",
+            headerAlignedLeft ? "items-start text-left" : "items-center text-center",
+            phase.name === "address" ? (isNarrow ? "mb-8" : "mb-9") : "mb-6",
+          )}
+        >
+          <div className="text-foreground transition-transform duration-200">
+            <WaypointBrandIcon size={phase.name === "address" ? 42 : 34} />
+          </div>
+          {phase.name === "register" ? (
+            <span className="mt-3 text-xs font-medium tracking-wide text-muted-foreground">
+              Waypoint
+            </span>
+          ) : (
+            <h1
+              className={cn(
+                "m-0 font-bold tracking-tight text-foreground",
+                phase.name === "address"
+                  ? isNarrow
+                    ? "mt-5 text-[1.75rem] leading-tight"
+                    : "mt-4 text-2xl"
+                  : "mt-3.5 text-2xl",
+              )}
+            >
+              {phase.name === "password" ? "登录 Waypoint" : "Waypoint"}
+            </h1>
+          )}
           {phase.name === "address" ? (
-            <form className="flex w-full flex-col gap-4" onSubmit={submitAddress}>
-              <div className="flex w-full flex-col gap-2">
-                <Label htmlFor="waypoint-address">Homeserver 地址</Label>
-                <Input
-                  id="waypoint-address"
-                  className="mt-0 h-11 bg-background select-text"
-                  name="address"
-                  placeholder="https://matrix.example.com"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={phase.address}
-                  onChange={(event) => setPhase({ name: "address", address: event.target.value })}
-                />
+            <p className="mt-1.5 text-sm text-muted-foreground">
+              连接到你的 Matrix Homeserver
+            </p>
+          ) : null}
+        </header>
+
+        <div
+          key={phase.name}
+          className={cn(
+            isNarrow && "flex flex-1 flex-col",
+            stepAnimationClassName,
+          )}
+        >
+          {phase.name === "address" ? (
+            <form
+              className={cn(
+                "flex w-full flex-col",
+                isNarrow ? "flex-1 justify-between gap-6" : "gap-5",
+              )}
+              aria-busy={phase.submitting}
+              onSubmit={submitAddress}
+            >
+              <div className="flex w-full flex-col gap-4">
+                <div className="flex w-full flex-col gap-2">
+                  <Label htmlFor="waypoint-address">Homeserver 地址</Label>
+                  <Input
+                    id="waypoint-address"
+                    className={authInputClassName}
+                    name="address"
+                                        autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    disabled={phase.submitting}
+                    value={phase.address}
+                    onChange={(event) =>
+                      setPhase({
+                        name: "address",
+                        address: event.target.value,
+                        submitting: false,
+                      })
+                    }
+                  />
+                </div>
+                {inlineAlert}
               </div>
-              <div className="mt-1 flex w-full flex-col gap-2.5">
-                <Button className="h-11 w-full" type="submit">
-                  继续
+              <div className={cn("flex w-full flex-col gap-2.5", isNarrow && "mt-auto pt-2")}>
+                <Button
+                  className={authPrimaryButtonClassName}
+                  type="submit"
+                  disabled={phase.submitting || !phase.address.trim()}
+                >
+                  {phase.submitting ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      <span>正在连接…</span>
+                    </>
+                  ) : (
+                    "继续"
+                  )}
                 </Button>
               </div>
             </form>
           ) : phase.name === "password" ? (
-            <form className="flex w-full flex-col gap-4" onSubmit={submitPassword}>
-              <div className="flex items-center gap-2 overflow-hidden rounded-lg border border-border bg-secondary/60 px-3 py-2 text-xs text-muted-foreground">
-                <span
-                  className="size-1.5 shrink-0 rounded-full bg-foreground/60"
-                  aria-hidden="true"
-                />
-                <p className="m-0 truncate font-mono">{phase.address}</p>
+            <form
+              className={cn(
+                "flex w-full flex-col",
+                isNarrow ? "flex-1 justify-between gap-6" : "gap-5",
+              )}
+              aria-busy={phase.submitting}
+              onSubmit={submitPassword}
+            >
+              <div className="flex w-full flex-col gap-4">
+                <div className="flex items-center gap-2 overflow-hidden rounded-xl bg-secondary/75 py-1.5 pr-1.5 pl-3.5 text-xs">
+                  <span
+                    className="size-1.5 shrink-0 rounded-full bg-foreground/60"
+                    aria-hidden="true"
+                  />
+                  <p className="m-0 min-w-0 flex-1 truncate font-mono text-foreground/85">
+                    {phase.address}
+                  </p>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 shrink-0 rounded-lg px-2.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+                    type="button"
+                    disabled={phase.submitting}
+                    onClick={() => {
+                      setAuthStepDir("back");
+                      setPhase({
+                        name: "address",
+                        address: phase.address,
+                        submitting: false,
+                      });
+                    }}
+                  >
+                    更改地址
+                  </Button>
+                </div>
+                <div className="flex w-full flex-col gap-2">
+                  <Label htmlFor="waypoint-user-id">用户名</Label>
+                  <Input
+                    id="waypoint-user-id"
+                    className={authInputClassName}
+                    name="user-id"
+                                        autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    disabled={phase.submitting}
+                    value={phase.userId}
+                    onChange={(event) => setPhase({ ...phase, userId: event.target.value })}
+                  />
+                </div>
+                <div className="flex w-full flex-col gap-2">
+                  <Label htmlFor="waypoint-password">密码</Label>
+                  <Input
+                    id="waypoint-password"
+                    className={authInputClassName}
+                    name="password"
+                    type="password"
+                    disabled={phase.submitting}
+                    value={phase.password}
+                    onChange={(event) => setPhase({ ...phase, password: event.target.value })}
+                  />
+                </div>
+                {inlineAlert}
               </div>
-              <div className="flex w-full flex-col gap-2">
-                <Label htmlFor="waypoint-user-id">用户标识</Label>
-                <Input
-                  id="waypoint-user-id"
-                  className="mt-0 h-11 bg-background select-text"
-                  name="user-id"
-                  placeholder="@owner:example.com"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={phase.userId}
-                  onChange={(event) => setPhase({ ...phase, userId: event.target.value })}
-                />
-              </div>
-              <div className="flex w-full flex-col gap-2">
-                <Label htmlFor="waypoint-password">密码</Label>
-                <Input
-                  id="waypoint-password"
-                  className="mt-0 h-11 bg-background select-text"
-                  name="password"
-                  type="password"
-                  value={phase.password}
-                  onChange={(event) => setPhase({ ...phase, password: event.target.value })}
-                />
-              </div>
-              <div className="mt-1 flex w-full flex-col gap-2.5">
-                <Button className="h-11 w-full" type="submit">
-                  用密码登录
-                </Button>
+              <div className={cn("flex w-full flex-col gap-2.5", isNarrow && "mt-auto pt-2")}>
                 <Button
-                  variant="ghost"
-                  className="h-11 w-full"
-                  type="button"
-                  onClick={() => setPhase({ name: "address", address: phase.address })}
+                  className={authPrimaryButtonClassName}
+                  type="submit"
+                  disabled={phase.submitting || !phase.userId.trim() || !phase.password}
                 >
-                  更改地址
+                  {phase.submitting ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      <span>正在登录…</span>
+                    </>
+                  ) : (
+                    "用密码登录"
+                  )}
                 </Button>
               </div>
             </form>
           ) : phase.name === "syncing" ? (
-            <div className="flex flex-col items-center gap-4 py-2 text-center">
-              <div className="flex items-center justify-center" aria-hidden="true">
-                <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <div
+              className={cn(
+                "flex w-full flex-col items-center text-center",
+                isNarrow ? "flex-1 justify-between gap-6" : "gap-5 py-2",
+              )}
+            >
+              <div
+                className={cn(
+                  "flex w-full flex-col items-center gap-4",
+                  isNarrow && "my-auto",
+                )}
+              >
+                <div className="flex items-center justify-center" aria-hidden="true">
+                  <Loader2 className="size-6 animate-spin text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                  <p className="m-0 text-sm font-medium text-foreground">
+                    正在增量同步…
+                  </p>
+                  <p className="m-0 text-xs text-muted-foreground">
+                    {phase.message ? "连接受阻，将自动退避重试" : "正在拉取你的对话与名册"}
+                  </p>
+                </div>
+                <div className="w-full text-left">{inlineAlert}</div>
               </div>
-              <p className="m-0 text-sm font-medium text-muted-foreground">
-                正在增量同步…
-              </p>
-              <div className="mt-1 flex w-full flex-row justify-center gap-2.5">
+              <div
+                className={cn(
+                  "flex w-full flex-row justify-center gap-2.5",
+                  isNarrow && "mt-auto pt-2",
+                )}
+              >
                 <Button
-                  className="h-11 flex-1"
+                  variant={phase.message ? "default" : "outline"}
+                  className={cn(
+                    "flex-1 rounded-full",
+                    isNarrow ? "h-12 text-[15px]" : "h-11",
+                  )}
                   type="button"
                   onClick={() => void syncNow()}
                 >
@@ -846,7 +1077,10 @@ export function WaypointApp({
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-11 flex-1"
+                  className={cn(
+                    "flex-1 rounded-full text-muted-foreground hover:text-foreground",
+                    isNarrow ? "h-12 text-[15px]" : "h-11",
+                  )}
                   type="button"
                   onClick={() => void abandon()}
                 >
@@ -855,41 +1089,62 @@ export function WaypointApp({
               </div>
             </div>
           ) : phase.name === "register" ? (
-            <form className="flex w-full flex-col gap-4" onSubmit={submitRegistration}>
-              <div className="space-y-1">
-                <h1 className="m-0 text-lg font-semibold tracking-tight text-foreground">
-                  登记 Bot
-                </h1>
-                <p className="m-0 text-sm leading-relaxed text-muted-foreground">
-                  名册为空，请为你的专属空间登记第一个 Bot
-                </p>
-              </div>
-              <div className="flex w-full flex-col gap-2">
-                <Label htmlFor="waypoint-agent-user-id">Matrix 用户 ID</Label>
-                <Input
-                  id="waypoint-agent-user-id"
-                  className="mt-0 h-11 bg-background select-text"
-                  name="agent-user-id"
-                  placeholder="@agent:example.com"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={phase.agentUserId}
-                  disabled={phase.submitting}
-                  onChange={(event) => setPhase({ ...phase, agentUserId: event.target.value })}
-                />
-              </div>
-              <div className="mt-1 flex w-full flex-col gap-2.5">
-                <Button
-                  className="h-11 w-full"
-                  type="submit"
-                  disabled={phase.submitting}
+            <form
+              className={cn(
+                "flex w-full flex-col",
+                isNarrow ? "flex-1 justify-between gap-6" : "gap-5",
+              )}
+              aria-busy={phase.submitting}
+              onSubmit={submitRegistration}
+            >
+              <div className="flex w-full flex-col gap-4">
+                <div
+                  className={cn(
+                    "mb-1 space-y-1.5",
+                    headerAlignedLeft ? "text-left" : "text-center",
+                  )}
                 >
-                  登记 Bot
+                  <h1 className="m-0 text-2xl font-bold tracking-tight text-foreground">
+                    登记 Bot
+                  </h1>
+                  <p className="m-0 text-sm leading-relaxed text-muted-foreground">
+                    名册为空，请为你的专属空间登记第一个 Bot
+                  </p>
+                </div>
+                <div className="flex w-full flex-col gap-2">
+                  <Label htmlFor="waypoint-agent-user-id">Bot 用户名</Label>
+                  <Input
+                    id="waypoint-agent-user-id"
+                    className={authInputClassName}
+                    name="agent-user-id"
+                                        autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    value={phase.agentUserId}
+                    disabled={phase.submitting}
+                    onChange={(event) => setPhase({ ...phase, agentUserId: event.target.value })}
+                  />
+                </div>
+                {inlineAlert}
+              </div>
+              <div className={cn("flex w-full flex-col gap-2", isNarrow && "mt-auto pt-2")}>
+                <Button
+                  className={authPrimaryButtonClassName}
+                  type="submit"
+                  disabled={phase.submitting || !phase.agentUserId.trim()}
+                >
+                  {phase.submitting ? (
+                    <>
+                      <Loader2 className="size-4 animate-spin" aria-hidden="true" />
+                      <span>正在登记…</span>
+                    </>
+                  ) : (
+                    "登记 Bot"
+                  )}
                 </Button>
                 <Button
                   variant="ghost"
-                  className="h-11 w-full"
+                  className={authGhostButtonClassName}
                   type="button"
                   onClick={() => void abandon()}
                 >
@@ -897,12 +1152,6 @@ export function WaypointApp({
                 </Button>
               </div>
             </form>
-          ) : null}
-          {"message" in phase && phase.message ? (
-            <Alert variant="destructive" className="mt-4">
-              <AlertCircle aria-hidden="true" />
-              <AlertDescription>{phase.message}</AlertDescription>
-            </Alert>
           ) : null}
         </div>
       </div>
@@ -914,26 +1163,52 @@ const BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000];
 
 function syncFailureMessage(result: TransportResult): string {
   return formatMatrixActionFailure("同步", result, {
-    serverErrorReason: "Homeserver 暂时不能完成同步",
-    fallbackMessage: "同步失败，因为到达不了。",
+    serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+    fallbackMessage: "无法连接到服务器，请检查网络后重试。",
   });
 }
 
-function normalizeBaseUrl(raw: string): string | null {
+function classifyBaseUrl(
+  raw: string,
+): { ok: true; baseUrl: string } | { ok: false; message: string } {
   const trimmed = raw.trim();
-  const stripped = trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
-  if (!stripped) {
-    return null;
+  if (!trimmed) {
+    return { ok: false, message: "请输入 Homeserver 地址。" };
+  }
+  const hasScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed);
+  const hasNonPortScheme =
+    !hasScheme && trimmed.includes(":") && /^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d)/.test(trimmed);
+  if (hasScheme || hasNonPortScheme) {
+    if (!/^https:\/\//i.test(trimmed)) {
+      return { ok: false, message: "仅支持通过 HTTPS 连接 Homeserver。" };
+    }
+  }
+  const withScheme = hasScheme || hasNonPortScheme ? trimmed : `https://${trimmed}`;
+  const stripped = withScheme.endsWith("/") ? withScheme.slice(0, -1) : withScheme;
+  if (!stripped || /\s/.test(stripped)) {
+    return {
+      ok: false,
+      message: "Homeserver 地址格式不正确，请填写域名或 https:// 地址。",
+    };
   }
   try {
     const url = new URL(stripped);
-    if (url.protocol !== "https:" || url.hostname === "") {
-      return null;
+    if (url.protocol !== "https:") {
+      return { ok: false, message: "仅支持通过 HTTPS 连接 Homeserver。" };
+    }
+    if (url.hostname === "" || url.username !== "" || url.password !== "") {
+      return {
+        ok: false,
+        message: "Homeserver 地址格式不正确，请填写域名或 https:// 地址。",
+      };
     }
   } catch {
-    return null;
+    return {
+      ok: false,
+      message: "Homeserver 地址格式不正确，请填写域名或 https:// 地址。",
+    };
   }
-  return stripped;
+  return { ok: true, baseUrl: stripped };
 }
 
 function hasUsableVersions(body: unknown): boolean {
@@ -949,12 +1224,12 @@ function versionsOutcome(result: TransportResult): string | undefined {
     return transportFailureMessage("确认 Homeserver", result.failure);
   }
   if (isRateLimited(result.status, result.body)) {
-    return sentence("确认 Homeserver 失败，因为被限流", errorText(result.body));
+    return "请求过于频繁，请稍后再试。";
   }
   if (result.status === 200 && hasUsableVersions(result.body)) {
     return undefined;
   }
-  return "确认 Homeserver 失败，因为这不是 Matrix Homeserver。";
+  return "该地址不是有效的 Matrix Homeserver。";
 }
 
 function classifyIdentifier(raw: string):
@@ -969,20 +1244,6 @@ function classifyIdentifier(raw: string):
     return { kind: "ok", user };
   }
   return { kind: "rejected" };
-}
-
-function isLocalpart(user: string): boolean {
-  if (user.includes("@") || user.includes(":") || /\s/.test(user)) {
-    return false;
-  }
-  if (user.startsWith("+")) {
-    return false;
-  }
-  const digits = user.replace(/\D/g, "");
-  if (/^[\d\s().-]+$/.test(user) && digits.length >= 7) {
-    return false;
-  }
-  return user.length > 0;
 }
 
 function hasPasswordLogin(body: unknown): boolean {
@@ -1049,46 +1310,7 @@ function nextAgentsContent(existing: TransportResult, agentUserId: string): Reco
 }
 
 function loginFailure(result: TransportResult): { message: string; clearPassword: boolean } {
-  if (result.type === "response" && isRecord(result.body) && isInteractive(result.body)) {
-    return {
-      message: "登录失败，因为还要验证码或其他交互式验证，Waypoint 做不了。",
-      clearPassword: false,
-    };
-  }
-  if (result.type === "response" && errcode(result.body) === "M_USER_DEACTIVATED") {
-    return {
-      message: sentence("登录失败，因为账号已停用", errorText(result.body)),
-      clearPassword: true,
-    };
-  }
-  if (result.type === "response" && isRateLimited(result.status, result.body)) {
-    return {
-      message: sentence("登录失败，因为被限流", errorText(result.body)),
-      clearPassword: false,
-    };
-  }
-  if (
-    result.type === "response" &&
-    (errcode(result.body) === "M_FORBIDDEN" || errcode(result.body) === "M_UNAUTHORIZED")
-  ) {
-    return {
-      message: sentence("登录失败，因为用户标识或密码被拒绝", errorText(result.body)),
-      clearPassword: true,
-    };
-  }
-  if (result.type === "failure") {
-    return { message: transportFailureMessage("登录", result.failure), clearPassword: false };
-  }
-  if (result.type === "response" && result.status === 200) {
-    return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };
-  }
-  if (result.type === "response" && result.status >= 500) {
-    return {
-      message: sentence("登录失败，因为 Homeserver 暂时不能完成登录", errorText(result.body)),
-      clearPassword: false,
-    };
-  }
-  return { message: "登录失败，因为 Homeserver 没有返回完整的登录结果。", clearPassword: false };
+  return classifyLoginFailure(result, "登录", "用户名或密码不正确");
 }
 
 function shouldSuspendSyncInBackground(platform: PlatformAdapter): boolean {

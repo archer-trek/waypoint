@@ -1,6 +1,6 @@
 # 首次连接只做密码登录，进列表才算已连接
 
-Waypoint 的首次连接只接受 Homeserver 的 `https://` base URL 和密码登录。不粘贴 Access Token，不做发现，不申请 refresh token。名册为空时必须先登记一个 Agent。进入 Topic 列表才算已连接。
+Waypoint 的首次连接只连接 Homeserver 的 `https://` base URL（允许用户在输入框省略 `https://` 前缀，由客户端默认补全为 `https://`，仍拒绝显式 `http://` 与其他协议）和密码登录；Owner 登录的「用户名」支持 localpart 或完整 Matrix 用户 ID。不粘贴 Access Token，不做发现，不申请 refresh token。名册为空时必须先登记一个 Agent。进入 Topic 列表才算已连接。
 
 ## Considered Options
 

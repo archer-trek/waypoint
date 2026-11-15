@@ -623,3 +623,57 @@ a {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Auth onboarding step transitions */
+.waypoint-auth-step-forward {
+  animation: waypoint-auth-forward 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.waypoint-auth-step-back {
+  animation: waypoint-auth-back 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.waypoint-auth-fade {
+  animation: waypoint-auth-fade-in 180ms ease-out;
+}
+
+@keyframes waypoint-auth-forward {
+  from {
+    opacity: 0;
+    transform: translate3d(14px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes waypoint-auth-back {
+  from {
+    opacity: 0;
+    transform: translate3d(-14px, 0, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes waypoint-auth-fade-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 4px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waypoint-auth-step-forward,
+  .waypoint-auth-step-back,
+  .waypoint-auth-fade {
+    animation: none;
+  }
+}

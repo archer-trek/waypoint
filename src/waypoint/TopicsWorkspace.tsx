@@ -631,7 +631,7 @@ export function TopicsWorkspace({
       return;
     }
     if (registeredAgents.length <= 1) {
-      setAgentsError("移除 Bot 失败，因为名册里至少要保留一个 Bot。");
+      setAgentsError("名册中至少需要保留一个 Bot。");
       return;
     }
     const nextContent = buildRemoveAgentContent(
@@ -2541,15 +2541,17 @@ export function TopicsWorkspace({
         ? Boolean(session?.deviceId)
         : Boolean(storedDeviceId || session?.deviceId);
       if (!session || !validDevice) {
-        const failure = classifyLoginFailure(loginResult, "重新验证", "密码被拒绝");
+        const failure = classifyLoginFailure(loginResult, "重新验证", "密码不正确");
         if (failure.clearPassword) {
           setReauthPassword("");
         }
-        setReauthError(`${failure.message}请重试。`);
+        setReauthError(
+          failure.message.includes("重试") ? failure.message : `${failure.message}请重试。`,
+        );
         return;
       }
       if (session.userId !== expectedUserId) {
-        setReauthError("重新验证失败，因为返回的用户 ID 与当前设备不一致。");
+        setReauthError("登录账号与当前设备不一致，请使用原账号验证。");
         return;
       }
 

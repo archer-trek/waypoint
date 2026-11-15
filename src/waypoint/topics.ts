@@ -53,7 +53,7 @@ export async function setTopicPinned(
   } catch {
     return {
       ok: false,
-      message: formatMatrixActionFailure(action, { type: "failure", failure: { type: "network" } }),
+      message: `${action}失败：${formatMatrixActionFailure(action, { type: "failure", failure: { type: "network" } })}`,
     };
   }
   if (result.type === "response" && result.status >= 200 && result.status < 300) {
@@ -62,10 +62,10 @@ export async function setTopicPinned(
   }
   return {
     ok: false,
-    message: formatMatrixActionFailure(action, result, {
-      serverErrorReason: "Homeserver 暂时不能完成请求",
-      rejectedReason: "Homeserver 拒绝了请求",
-    }),
+    message: `${action}失败：${formatMatrixActionFailure(action, result, {
+      serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+      rejectedReason: "服务器拒绝了该请求。",
+    })}`,
   };
 }
 
@@ -110,6 +110,20 @@ export function serverName(userId: string): string | undefined {
   return server ? server : undefined;
 }
 
+export function isLocalpart(user: string): boolean {
+  if (user.includes("@") || user.includes(":") || /\s/.test(user)) {
+    return false;
+  }
+  if (user.startsWith("+")) {
+    return false;
+  }
+  const digits = user.replace(/\D/g, "");
+  if (/^[\d\s().-]+$/.test(user) && digits.length >= 7) {
+    return false;
+  }
+  return user.length > 0;
+}
+
 export function localpartOf(userId: string): string {
   const withoutAt = userId.startsWith("@") ? userId.slice(1) : userId;
   const colon = withoutAt.indexOf(":");
@@ -128,38 +142,50 @@ export function validateAgentUserId(
 ): ValidateAgentResult {
   const trimmed = raw.trim();
   if (!trimmed) {
-    return { ok: false, trimmed, message: "登记 Bot 失败，因为用户 ID 是空的。" };
-  }
-  if (!isFullUserId(trimmed)) {
-    return {
-      ok: false,
-      trimmed,
-      message: "登记 Bot 失败，因为只接受完整的 Matrix 用户 ID，不自动补 @ 或 server name。",
-    };
+    return { ok: false, trimmed, message: "请输入 Bot 用户名。" };
   }
   const ownerServer = serverName(ownerUserId);
-  if (!ownerServer || serverName(trimmed) !== ownerServer) {
+  let resolvedUserId: string;
+  if (isLocalpart(trimmed)) {
+    if (!ownerServer) {
+      return {
+        ok: false,
+        trimmed,
+        message: "Bot 必须与当前账号位于同一台 Homeserver。",
+      };
+    }
+    resolvedUserId = `@${trimmed}:${ownerServer}`;
+  } else if (isFullUserId(trimmed)) {
+    if (!ownerServer || serverName(trimmed) !== ownerServer) {
+      return {
+        ok: false,
+        trimmed,
+        message: "Bot 必须与当前账号位于同一台 Homeserver。",
+      };
+    }
+    resolvedUserId = trimmed;
+  } else {
     return {
       ok: false,
       trimmed,
-      message: "登记 Bot 失败，因为 Bot 的 server name 必须与当前账号完全一致。",
+      message: "请输入有效的 Bot 用户名或完整 Matrix 用户 ID。",
     };
   }
-  if (trimmed === ownerUserId) {
+  if (resolvedUserId === ownerUserId) {
     return {
       ok: false,
       trimmed,
-      message: "登记 Bot 失败，因为不能把自己登记成 Bot。",
+      message: "不能将自己登记为 Bot。",
     };
   }
-  if (existingAgents?.some((agent) => agent.userId === trimmed)) {
+  if (existingAgents?.some((agent) => agent.userId === resolvedUserId)) {
     return {
       ok: false,
       trimmed,
-      message: "登记 Bot 失败，因为这个 Bot 已经在名册里了。",
+      message: "该 Bot 已在名册中。",
     };
   }
-  return { ok: true, userId: trimmed };
+  return { ok: true, userId: resolvedUserId };
 }
 
 function updateAgentsAccountData(
@@ -493,7 +519,7 @@ export async function createTopicRoom(
   },
 ): Promise<CreateTopicResult> {
   if (!client.hasToken) {
-    return { ok: false, message: "新建 Topic 失败，因为尚未连接。" };
+    return { ok: false, message: "尚未连接到服务器，请先登录。" };
   }
 
   const body: Record<string, unknown> = {
@@ -522,7 +548,7 @@ export async function createTopicRoom(
   try {
     createResult = await client.createRoom(body);
   } catch {
-    return { ok: false, message: "新建 Topic 失败，因为到达不了。" };
+    return { ok: false, message: "无法连接到服务器，请检查网络后重试。" };
   }
 
   if (createResult.type !== "response" || createResult.status !== 200 || !isRecord(createResult.body)) {
@@ -533,14 +559,14 @@ export async function createTopicRoom(
   const roomId =
     typeof rawRoomId === "string" && rawRoomId.trim() !== "" ? rawRoomId.trim() : undefined;
   if (!roomId) {
-    return { ok: false, message: "新建 Topic 失败，因为 Homeserver 没有返回房间 ID。" };
+    return { ok: false, message: "服务器未返回房间信息，创建 Topic 失败。" };
   }
 
   if (hasEncryptionInCreateResponse(createResult.body)) {
     await bestEffortLeaveAndForget(client, roomId);
     return {
       ok: false,
-      message: "新建 Topic 失败，因为 Homeserver 强制开启了加密，Waypoint 不支持加密房间。",
+      message: "Homeserver 强制开启了加密，Waypoint 暂不支持加密房间。",
     };
   }
 
@@ -549,14 +575,14 @@ export async function createTopicRoom(
     encryptionResult = await client.getRoomStateEvent(roomId, "m.room.encryption");
   } catch {
     await bestEffortLeaveAndForget(client, roomId);
-    return { ok: false, message: "新建 Topic 失败，因为无法确认房间是否未加密。" };
+    return { ok: false, message: "无法确认房间加密状态，请稍后重试。" };
   }
 
   if (encryptionResult.type === "response" && encryptionResult.status === 200) {
     await bestEffortLeaveAndForget(client, roomId);
     return {
       ok: false,
-      message: "新建 Topic 失败，因为 Homeserver 强制开启了加密，Waypoint 不支持加密房间。",
+      message: "Homeserver 强制开启了加密，Waypoint 暂不支持加密房间。",
     };
   }
 
@@ -710,8 +736,8 @@ export async function deleteTopicRoom(
     return {
       ok: false,
       message: formatMatrixActionFailure("删除 Topic", leaveResult, {
-        serverErrorReason: "Homeserver 暂时不能完成请求",
-        rejectedReason: "Homeserver 拒绝了请求",
+        serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+        rejectedReason: "服务器拒绝了该请求。",
       }),
     };
   }
@@ -804,8 +830,8 @@ function hasEncryptionInCreateResponse(body: Record<string, unknown>): boolean {
 
 function createTopicFailureMessage(result: TransportResult): string {
   return formatMatrixActionFailure("新建 Topic", result, {
-    serverErrorReason: "Homeserver 暂时不能创建房间",
-    rejectedReason: "Homeserver 拒绝了建房请求",
+    serverErrorReason: "服务器暂时无法创建 Topic，请稍后重试。",
+    rejectedReason: "服务器拒绝创建 Topic。",
   });
 }
 
@@ -1029,7 +1055,7 @@ export async function updateTopicDetails(
       ok: false,
       nameUpdated: false,
       descriptionUpdated: false,
-      message: "更新 Topic 失败，因为尚未连接。",
+      message: disconnectedMessage("更新 Topic"),
     };
   }
 
@@ -1066,8 +1092,8 @@ export async function updateTopicDetails(
     return {
       ok: false,
       message: formatMatrixActionFailure(actionLabel, result, {
-        serverErrorReason: "Homeserver 暂时不能完成请求",
-        rejectedReason: "Homeserver 拒绝了请求",
+        serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+        rejectedReason: "服务器拒绝了该请求。",
       }),
     };
   }
@@ -1084,11 +1110,16 @@ export async function updateTopicDetails(
   const nameUpdated = nameOutcome?.ok === true;
   const descriptionUpdated = descriptionOutcome?.ok === true;
   const errors: string[] = [];
-  if (nameOutcome && !nameOutcome.ok) {
-    errors.push(nameOutcome.message);
-  }
-  if (descriptionOutcome && !descriptionOutcome.ok) {
-    errors.push(descriptionOutcome.message);
+  if (nameOutcome && !nameOutcome.ok && descriptionOutcome && !descriptionOutcome.ok) {
+    if (nameOutcome.message === descriptionOutcome.message) {
+      errors.push(nameOutcome.message);
+    } else {
+      errors.push(`更新 Topic 名字失败：${nameOutcome.message}`, `更新 Description 失败：${descriptionOutcome.message}`);
+    }
+  } else if (nameOutcome && !nameOutcome.ok) {
+    errors.push(`更新 Topic 名字失败：${nameOutcome.message}`);
+  } else if (descriptionOutcome && !descriptionOutcome.ok) {
+    errors.push(`更新 Description 失败：${descriptionOutcome.message}`);
   }
 
   if (errors.length === 0) {

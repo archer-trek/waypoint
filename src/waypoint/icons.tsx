@@ -4,7 +4,7 @@ export type IconProps = SVGProps<SVGSVGElement> & {
   size?: number;
 };
 
-/** Brand beacon icon for Waypoint's connect screen. */
+/** Brand W-route + waypoint node icon for Waypoint. */
 export function WaypointBrandIcon({ size = 32, className, ...props }: IconProps) {
   return (
     <svg
@@ -18,15 +18,14 @@ export function WaypointBrandIcon({ size = 32, className, ...props }: IconProps)
       className={className}
       {...props}
     >
-      <circle cx="16" cy="16" r="14" stroke="currentColor" strokeWidth="2" strokeOpacity="0.25" />
-      <circle cx="16" cy="16" r="8" stroke="currentColor" strokeWidth="2" strokeOpacity="0.4" />
-      <circle cx="16" cy="16" r="3" fill="currentColor" />
       <path
-        d="M16 2V6M16 26V30M2 16H6M26 16H30"
+        d="M5 11.5L10 22.5L15 13L20 22.5L23.7 14.3"
         stroke="currentColor"
-        strokeWidth="2.5"
+        strokeWidth="2.8"
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
+      <circle cx="25.7" cy="9.6" r="2.7" fill="currentColor" />
     </svg>
   );
 }

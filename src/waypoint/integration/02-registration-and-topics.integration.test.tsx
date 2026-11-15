@@ -34,7 +34,7 @@ test("名册条目可以没有手写名，只要用户 ID 合法就进入列表"
   renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
@@ -70,7 +70,7 @@ test("已经同步过再打开时，继续用同步游标，不改去 well_known
   const first = renderApp(homeserver);
   await user.type(await screen.findByLabelText("Homeserver 地址"), "https://matrix.example.com");
   await user.click(screen.getByRole("button", { name: "继续" }));
-  await user.type(await screen.findByLabelText("用户标识"), "alice");
+  await user.type(await screen.findByLabelText("用户名"), "alice");
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
@@ -303,7 +303,7 @@ test("立刻再试作废还在路上的失败，迟到的失败不能离开 Topi
     firstSync.resolve({ type: "failure", failure: { type: "network" } });
   });
   expect(screen.getByText("暂无 Topic")).toBeInTheDocument();
-  expect(screen.queryByText("同步失败，因为到达不了。")).not.toBeInTheDocument();
+  expect(screen.queryByText("无法连接到服务器，请检查网络或地址。")).not.toBeInTheDocument();
   const initialSyncCount = homeserver.requests.filter((request) => request.url.endsWith("/_matrix/client/v3/sync")).length;
   await act(async () => {
     clock.advance(60_000);
@@ -352,19 +352,31 @@ test("迟到的未知 token 不能清掉更新一次同步已经留下的登录"
   expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
 });
 
-test("首次登记拒绝空值、非完整用户 ID、跨服或大小写不同的 server name，以及 Owner 自己，且不请求 profile", async () => {
+test("首次登记允许同服 localpart 自动补全，并拒绝空值、残缺 ID、邮箱/电话、跨服或大小写不同的 server name，以及 Owner 自己，且不请求 profile", async () => {
   const user = userEvent.setup();
+  {
+    const homeserver = new FakeHomeserver();
+    const view = renderApp(homeserver);
+    const input = await enterRegistration(user, homeserver, "@alice:example.com");
+    const submitBtn = screen.getByRole("button", { name: /登记/ });
+    expect(submitBtn).toBeDisabled();
+    await user.type(input, "   ");
+    expect(submitBtn).toBeDisabled();
+    view.unmount();
+  }
+
   const cases = [
-    { owner: "@alice:example.com", typed: "   ", reason: "空的" },
-    { owner: "@alice:example.com", typed: "bot", reason: "完整" },
-    { owner: "@alice:example.com", typed: "bot:example.com", reason: "完整" },
-    { owner: "@alice:example.com", typed: "@bot", reason: "完整" },
-    { owner: "@alice:example.com", typed: "@bot:", reason: "完整" },
-    { owner: "@alice:example.com", typed: "@:example.com", reason: "完整" },
-    { owner: "@alice:example.com", typed: "@bot:other.example", reason: "server name" },
-    { owner: "@alice:example.com", typed: "@bot:EXAMPLE.COM", reason: "server name" },
-    { owner: "@alice:example.com:8448", typed: "@bot:example.com", reason: "server name" },
-    { owner: "@alice:example.com", typed: "@alice:example.com", reason: "自己" },
+    { owner: "@alice:example.com", typed: "bot:example.com", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "@bot", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "@bot:", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "@:example.com", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "bot@example.com", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "+8613800138000", reason: "有效的 Bot 用户名" },
+    { owner: "@alice:example.com", typed: "@bot:other.example", reason: "同一台 Homeserver" },
+    { owner: "@alice:example.com", typed: "@bot:EXAMPLE.COM", reason: "同一台 Homeserver" },
+    { owner: "@alice:example.com:8448", typed: "@bot:example.com", reason: "同一台 Homeserver" },
+    { owner: "@alice:example.com", typed: "@alice:example.com", reason: "不能将自己登记为 Bot" },
+    { owner: "@alice:example.com", typed: "alice", reason: "不能将自己登记为 Bot" },
   ];
 
   for (const item of cases) {
@@ -385,6 +397,54 @@ test("首次登记拒绝空值、非完整用户 ID、跨服或大小写不同�
     expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
     view.unmount();
   }
+});
+
+test("首次登记输入 Bot 的 localpart 时自动按 Owner server name 补全（保留大小写与端口）并写入名册", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let writtenBody: unknown;
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com:8448", access_token: "tok-1", device_id: "DEV1" },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v3/sync")) {
+      return { type: "response", status: 200, body: { next_batch: "batch-1" } };
+    }
+    if (
+      input.method === "GET" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com%3A8448/account_data/im.waypoint.agents")
+    ) {
+      return { type: "response", status: 404, body: { errcode: "M_NOT_FOUND" } };
+    }
+    if (
+      input.method === "PUT" &&
+      input.url.endsWith("/_matrix/client/v3/user/%40alice%3Aexample.com%3A8448/account_data/im.waypoint.agents")
+    ) {
+      writtenBody = input.body;
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  };
+
+  renderApp(homeserver);
+  await login(user);
+  const input = await screen.findByLabelText("Bot 用户名");
+  expect(input).not.toHaveAttribute("placeholder");
+  await user.type(input, "  NewBot  ");
+  await user.click(screen.getByRole("button", { name: /登记/ }));
+
+  expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
+  expect(writtenBody).toEqual({ agents: [{ user_id: "@NewBot:example.com:8448" }] });
 });
 
 test("提交登记前再读名册时若已有合法 Agent，不再写入且不清理其余条目，丢掉已填 ID 直接进列表", async () => {
@@ -435,14 +495,14 @@ test("提交登记前再读名册时若已有合法 Agent，不再写入且不�
   };
   const first = renderApp(homeserver);
   await login(user);
-  const input = await screen.findByLabelText("Matrix 用户 ID");
+  const input = await screen.findByLabelText("Bot 用户名");
   await user.type(input, "@NewBot:example.com");
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
   expect(screen.getByText("已连接")).toBeInTheDocument();
   expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Bot 用户名")).not.toBeInTheDocument();
   expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(false);
   expect(homeserver.requests.some((request) => request.url.includes("createRoom"))).toBe(false);
   expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
@@ -501,14 +561,14 @@ test("名册为 404 时不当成用户不存在，去掉前后空白并保留大
   };
   const first = renderApp(homeserver);
   await login(user);
-  const input = await screen.findByLabelText("Matrix 用户 ID");
+  const input = await screen.findByLabelText("Bot 用户名");
   await user.type(input, "  @MyBot:example.com  ");
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
   expect(screen.getByText("已连接")).toBeInTheDocument();
   expect(screen.queryByText("尚未进入 Topic 列表")).not.toBeInTheDocument();
-  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Bot 用户名")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /登记/ })).not.toBeInTheDocument();
   expect(homeserver.requests.some((request) => request.url.includes("createRoom"))).toBe(false);
   expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
@@ -606,10 +666,11 @@ test("提交前重读名册失败时留在登记步，保留已填用户 ID，�
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Database busy");
+  expect(alert).toHaveTextContent("服务器暂时无法响应，请稍后重试。");
+  expect(alert).not.toHaveTextContent("Database busy");
   expect(alert).not.toHaveTextContent("M_UNKNOWN");
   expect(alert).not.toHaveTextContent("500");
-  expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@BotOne:example.com");
+  expect(screen.getByLabelText("Bot 用户名")).toHaveValue("@BotOne:example.com");
   expect(screen.getByRole("button", { name: /登记/ })).toBeEnabled();
   expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(false);
 
@@ -628,7 +689,7 @@ test("写入名册失败时留在登记步，保留已填用户 ID，不进入�
     {
       name: "网络失败",
       respond: { type: "failure" as const, failure: { type: "network" as const } },
-      expected: "到达不了",
+      expected: "无法连接到服务器，请检查网络或地址。",
     },
     {
       name: "被限流",
@@ -637,7 +698,7 @@ test("写入名册失败时留在登记步，保留已填用户 ID，不进入�
         status: 429,
         body: { errcode: "M_LIMIT_EXCEEDED", error: "Slow down" },
       },
-      expected: "Slow down",
+      expected: "请求过于频繁，请稍后再试。",
     },
     {
       name: "拒绝写入",
@@ -646,7 +707,7 @@ test("写入名册失败时留在登记步，保留已填用户 ID，不进入�
         status: 403,
         body: { errcode: "M_FORBIDDEN", error: "Read only" },
       },
-      expected: "Read only",
+      expected: "被服务器拒绝",
     },
   ];
   for (const item of cases) {
@@ -680,7 +741,7 @@ test("写入名册失败时留在登记步，保留已填用户 ID，不进入�
     expect(alert).not.toHaveTextContent("M_");
     expect(alert).not.toHaveTextContent("429");
     expect(alert).not.toHaveTextContent("403");
-    expect(screen.getByLabelText("Matrix 用户 ID")).toHaveValue("@BotOne:example.com");
+    expect(screen.getByLabelText("Bot 用户名")).toHaveValue("@BotOne:example.com");
     expect(screen.getByRole("button", { name: /登记/ })).toBeEnabled();
     expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
 
@@ -733,20 +794,21 @@ test("登记时服务器不认 token，只丢掉凭证回到密码步，不保�
   };
   renderApp(homeserver);
   await login(user);
-  await user.type(await screen.findByLabelText("Matrix 用户 ID"), "@BotOne:example.com");
+  await user.type(await screen.findByLabelText("Bot 用户名"), "@BotOne:example.com");
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Token expired");
+  expect(alert).toHaveTextContent("当前设备登录已失效，请重新登录。");
+  expect(alert).not.toHaveTextContent("Token expired");
   expect(alert).not.toHaveTextContent("M_UNKNOWN_TOKEN");
   expect(alert).not.toHaveTextContent("401");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
 
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
-  expect(await screen.findByLabelText("Matrix 用户 ID")).toHaveValue("");
+  expect(await screen.findByLabelText("Bot 用户名")).toHaveValue("");
 });
 
 test("停在同步重试时可以放弃：停掉重试并尽量注销，不删设备，丢掉本地凭证回到保留地址和用户标识的密码步", async () => {
@@ -778,12 +840,12 @@ test("停在同步重试时可以放弃：停掉重试并尽量注销，不删�
   };
   const first = renderApp(homeserver);
   await login(user);
-  expect(await screen.findByRole("alert")).toHaveTextContent("同步失败，因为到达不了。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("无法连接到服务器，请检查网络或地址。");
 
   await user.click(screen.getByRole("button", { name: "放弃" }));
 
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "立刻再试" })).not.toBeInTheDocument();
 
@@ -801,7 +863,7 @@ test("停在同步重试时可以放弃：停掉重试并尽量注销，不删�
   first.unmount();
   renderApp(homeserver);
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(syncs).toBe(1);
 });
@@ -926,12 +988,12 @@ test("停在登记时可以放弃，即使注销返回跨主机重定向、错�
     };
     const first = renderApp(homeserver);
     await login(user);
-    const input = await screen.findByLabelText("Matrix 用户 ID");
+    const input = await screen.findByLabelText("Bot 用户名");
     await user.type(input, "@bot:example.com");
     await user.click(screen.getByRole("button", { name: "放弃" }));
 
     expect(await screen.findByLabelText("密码")).toHaveValue("");
-    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
     expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
     expect(screen.getByText("尚未进入 Topic 列表")).toBeInTheDocument();
 
@@ -948,7 +1010,7 @@ test("停在登记时可以放弃，即使注销返回跨主机重定向、错�
     first.unmount();
     const second = renderApp(homeserver);
     expect(await screen.findByLabelText("密码")).toHaveValue("");
-    expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+    expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
     expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("密码"), "secret");
@@ -999,7 +1061,7 @@ test("登记写入还在路上时放弃，迟到的写入成功也不能把 Owne
   };
   const view = renderApp(homeserver);
   await login(user);
-  await user.type(await screen.findByLabelText("Matrix 用户 ID"), "@bot:example.com");
+  await user.type(await screen.findByLabelText("Bot 用户名"), "@bot:example.com");
   await user.click(screen.getByRole("button", { name: /登记/ }));
   await waitFor(() => {
     expect(homeserver.requests.some((request) => request.method === "PUT")).toBe(true);
@@ -1044,12 +1106,13 @@ test("提交前重读名册时账号已停用，丢掉凭证回到密码步且�
   await user.click(screen.getByRole("button", { name: /登记/ }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Account deactivated");
+  expect(alert).toHaveTextContent("该账号已停用。");
+  expect(alert).not.toHaveTextContent("Account deactivated");
   expect(alert).not.toHaveTextContent("M_USER_DEACTIVATED");
   expect(alert).not.toHaveTextContent("403");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByLabelText("密码")).toHaveValue("");
-  expect(screen.queryByLabelText("Matrix 用户 ID")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Bot 用户名")).not.toBeInTheDocument();
 });
 
 test("空列表上有新建 Topic 入口，单 Bot 时不显示选择，名字为空不发送请求且保留已填 Description", async () => {
@@ -1091,10 +1154,14 @@ test("空列表上有新建 Topic 入口，单 Bot 时不显示选择，名字�
   expect(screen.getByText(/不是私密备忘/)).toBeInTheDocument();
   expect(screen.queryByLabelText("绑定 Bot")).not.toBeInTheDocument();
 
-  await user.type(descriptionInput, "这是给 Bot 看的上下文");
-  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
+  const createSubmit = screen.getByRole("button", { name: "创建 Topic" });
+  expect(createSubmit).toBeDisabled();
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("请输入 Topic 名字");
+  await user.type(descriptionInput, "这是给 Bot 看的上下文");
+  expect(createSubmit).toBeDisabled();
+
+  await user.type(screen.getByLabelText("Topic 名字"), "   ");
+  expect(createSubmit).toBeDisabled();
   expect(screen.getByLabelText(/Description/)).toHaveValue("这是给 Bot 看的上下文");
   expect(homeserver.requests.some((request) => request.url.includes("/createRoom"))).toBe(false);
 });
@@ -1290,9 +1357,8 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
   await user.type(screen.getByLabelText("Topic 名字"), "重复名字");
   await user.type(screen.getByLabelText(/Description/), "第一段上下文\n第二行内容");
 
-  // 不选 Bot 提交会被本地挡住
-  await user.click(screen.getByRole("button", { name: "创建 Topic" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("请选择要绑定的 Bot");
+  // 未选 Bot 时创建按钮不可点击
+  expect(screen.getByRole("button", { name: "创建 Topic" })).toBeDisabled();
   expect(homeserver.requests.some((r) => r.url.endsWith("/createRoom"))).toBe(false);
 
   // 选择 bot2 后创建
@@ -1543,7 +1609,8 @@ test("建房失败时表单保持打开且保留输入，不留残留房间，�
   await user.click(screen.getByRole("button", { name: "创建 Topic" }));
 
   const alert = await screen.findByRole("alert");
-  expect(alert).toHaveTextContent("Room creation failed");
+  expect(alert).toHaveTextContent("服务器暂时无法创建 Topic，请稍后重试。");
+  expect(alert).not.toHaveTextContent("Room creation failed");
   expect(alert).not.toHaveTextContent("M_UNKNOWN");
   expect(alert).not.toHaveTextContent("500");
   expect(screen.getByLabelText("Topic 名字")).toHaveValue("不丢草稿的话题");
@@ -2141,7 +2208,7 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
 
   renderApp(homeserver);
   await login(user);
-  await screen.findByLabelText("Matrix 用户 ID");
+  await screen.findByLabelText("Bot 用户名");
   await user.click(screen.getByRole("button", { name: "放弃" }));
   expect(await screen.findByLabelText("密码")).toHaveValue("");
 
@@ -2149,7 +2216,7 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
   await user.type(screen.getByLabelText("密码"), "secret");
   await user.click(screen.getByRole("button", { name: "用密码登录" }));
 
-  const regInput = await screen.findByLabelText("Matrix 用户 ID");
+  const regInput = await screen.findByLabelText("Bot 用户名");
   await user.type(regInput, "@bot:example.com");
   await user.click(screen.getByRole("button", { name: /登记/ }));
 

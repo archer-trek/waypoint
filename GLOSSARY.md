@@ -71,3 +71,11 @@ _Avoid_: typing, 思考中, 生成中, streaming
 **Session**:
 Hermes 当前用于一条 Topic 的那段交流记录，中文称为会话。换一段不会换 Topic，也不会换掉该 Agent 的人设、记忆、工具或工作目录。
 _Avoid_: 转录, transcript, history, chat
+
+**Homeserver 地址**:
+Owner 为设备指定的直连 Matrix 服务器基础 URL。未填写协议头时默认按 `https://` 处理，不用于 `.well-known` 服务发现，也不等同于 Matrix `server name`。
+_Avoid_: server name, 发现地址, 域名发现
+
+**用户名**:
+Owner 在密码登录时输入的自身账号标识，或登记 Bot 时输入的 Bot 账号标识。支持只写 localpart，也支持写完整的 Matrix 用户 ID（`@localpart:server_name`）；不接受邮箱、手机号或残缺写法。
+_Avoid_: 用户标识, 邮箱登录, 手机号

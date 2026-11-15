@@ -1929,7 +1929,7 @@ test("在顶栏提示点击退出这台设备，复用相同的确认弹窗与�
   await user.click(screen.getByRole("button", { name: "确认退出" }));
 
   expect(await screen.findByLabelText("密码")).toHaveValue("");
-  expect(screen.getByLabelText("用户标识")).toHaveValue("@alice:example.com");
+  expect(screen.getByLabelText("用户名")).toHaveValue("@alice:example.com");
   expect(screen.getByText("https://matrix.example.com")).toBeInTheDocument();
   expect(screen.queryByText("已连接")).not.toBeInTheDocument();
   expect(logoutCalls).toBe(1);
@@ -2512,7 +2512,7 @@ test("重新验证密码错误只清密码并提示重试，网络/5xx异常保�
   await user.click(screen.getByRole("button", { name: "确认验证" }));
 
   const alert1 = await screen.findByRole("alert");
-  expect(alert1).toHaveTextContent("密码被拒绝");
+  expect(alert1).toHaveTextContent("密码不正确");
   expect(alert1).toHaveTextContent("重试");
   expect(screen.getByLabelText("密码")).toHaveValue("");
 
@@ -2520,15 +2520,15 @@ test("重新验证密码错误只清密码并提示重试，网络/5xx异常保�
   await user.type(screen.getByLabelText("密码"), "right-pass");
   await user.click(screen.getByRole("button", { name: "确认验证" }));
   const alert2 = await screen.findByRole("alert");
-  expect(alert2).toHaveTextContent("到达不了");
+  expect(alert2).toHaveTextContent("无法连接到服务器");
   expect(alert2).toHaveTextContent("重试");
   expect(screen.getByLabelText("密码")).toHaveValue("right-pass");
 
   // 3) 5xx 异常：保留已输入的密码，提示重试
   await user.click(screen.getByRole("button", { name: "确认验证" }));
   const alert3 = await screen.findByRole("alert");
-  expect(alert3).toHaveTextContent("Service unavailable");
-  expect(alert3).toHaveTextContent("请重试");
+  expect(alert3).toHaveTextContent("服务器暂时无法响应");
+  expect(alert3).toHaveTextContent("重试");
   expect(screen.getByLabelText("密码")).toHaveValue("right-pass");
 
   // 4) 再次提交成功：不需重输密码，直接通过；随后迟到的旧 token 401 sync 响应不能再拉起提示
