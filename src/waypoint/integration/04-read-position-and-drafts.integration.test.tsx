@@ -1516,6 +1516,7 @@ test("进程被回收后重新打开，恢复凭证、游标、本地时间线�
   offline = true;
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第一条");
   await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(offlineTxns.length).toBeGreaterThanOrEqual(1));

@@ -938,6 +938,7 @@ test("Android 回到前台时立刻清零退避、携带已有同步游标增量
 
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息一");
   await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息二");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));

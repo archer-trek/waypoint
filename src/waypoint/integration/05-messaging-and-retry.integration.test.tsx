@@ -554,6 +554,7 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   await user.click(within(sidebar).getByRole("button", { name: "列表标记话题" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条秘密正文");
   await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条秘密正文");
   await user.click(screen.getByRole("button", { name: "发送" }));
 
@@ -2126,6 +2127,7 @@ test("点击重新验证仅输入密码并携带原 device id，成功后保留�
 
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列第一条");
   await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
 
@@ -2487,6 +2489,7 @@ test("重新验证密码错误只清密码并提示重试，网络/5xx异常保�
   await user.clear(screen.getByRole("textbox", { name: "输入消息" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
+  await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "保留草稿");
   activeToken = "expired";
   await act(async () => {
