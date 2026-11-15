@@ -55,12 +55,15 @@ describe("SidebarView & EmptyDetailView", () => {
     const header = sidebar.querySelector(".waypoint-sidebar-header");
     expect(header).toHaveAttribute("data-tauri-drag-region");
     expect(header).toHaveClass("pl-[76px]");
+    expect(header?.querySelector(".waypoint-sidebar-brand")).toBeNull();
 
     const settingsBtn = within(sidebar).getByRole("button", { name: "设置" });
     const createBtn = within(sidebar).getByRole("button", { name: "新建 Topic" });
     expect(settingsBtn).toHaveAttribute("data-slot", "button");
     expect(createBtn).toHaveAttribute("data-slot", "button");
     expect(createBtn).toHaveClass("waypoint-create-topic-btn");
+    expect(settingsBtn.querySelector("svg")).toHaveClass("size-[18px]");
+    expect(createBtn.querySelector("svg")).toHaveClass("size-5");
 
     fireEvent.click(settingsBtn);
     fireEvent.click(createBtn);
@@ -68,16 +71,26 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(props.onOpenCreateForm).toHaveBeenCalledTimes(1);
   });
 
-  test("omits macOS traffic-light padding on narrow mobile viewport and disables create during reauth", () => {
+  test("renders Waypoint brand header, full-bleed divider, and optically matched action icons on narrow mobile viewport", () => {
     renderSidebar({ isNarrow: true, reauthRequired: true });
     const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
 
     expect(sidebar).toHaveClass("w-full");
-    expect(sidebar.querySelector(".waypoint-sidebar-header")).not.toHaveClass("pl-[76px]");
-    expect(within(sidebar).getByRole("button", { name: "新建 Topic" })).toBeDisabled();
+    const header = sidebar.querySelector(".waypoint-sidebar-header");
+    expect(header).not.toHaveClass("pl-[76px]");
+    expect(header).toHaveClass("border-b");
+    expect(header?.querySelector(".waypoint-sidebar-brand")).toHaveTextContent("Waypoint");
+
+    const settingsBtn = within(sidebar).getByRole("button", { name: "设置" });
+    const createBtn = within(sidebar).getByRole("button", { name: "新建 Topic" });
+    expect(settingsBtn).toHaveClass("text-muted-foreground");
+    expect(createBtn).toHaveClass("text-muted-foreground");
+    expect(settingsBtn.querySelector("svg")).toHaveClass("size-5");
+    expect(createBtn.querySelector("svg")).toHaveClass("size-[22px]");
+    expect(createBtn).toBeDisabled();
   });
 
-  test("renders Grokbot monochrome active, unread, pinned, unavailable, and status states while preserving hooks", () => {
+  test("renders avatar-free monochrome active, unread, pinned, unavailable, and status states while preserving hooks", () => {
     const onOpenTopic = vi.fn();
     renderSidebar({
       activeTopicId: "!active:example.com",
@@ -105,19 +118,24 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(activeRow).toHaveClass("waypoint-topic-row", "active", "bg-accent", "text-accent-foreground");
     expect(activeRow).toHaveAttribute("data-unread", "true");
     expect(activeRow).toHaveAttribute("data-pinned", "true");
+    expect(activeRow.querySelector(".waypoint-topic-bot-avatar")).toBeNull();
     expect(activeRow.querySelector(".waypoint-unread-dot")).toHaveClass("bg-foreground");
     expect(activeRow.querySelector(".waypoint-topic-name")).toHaveClass("unread");
     expect(activeRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "700" });
     expect(activeRow.querySelector(".waypoint-topic-row-pin")).toHaveAttribute("data-slot", "badge");
     expect(within(activeRow).getByRole("img", { name: "失败" })).toHaveClass("bg-destructive");
-    expect(activeRow.querySelector(".waypoint-topic-row-time")).toHaveClass("tabular-nums");
-    expect(activeRow.querySelector(".waypoint-topic-row-bot")).toHaveTextContent("Hermes");
+    expect(activeRow.querySelector(".waypoint-topic-row-time")).toHaveClass("font-sans", "tabular-nums");
+    expect(activeRow.querySelector(".waypoint-topic-row-time")).not.toHaveClass("font-mono");
+
+    const botLabel = activeRow.querySelector(".waypoint-topic-row-bot");
+    expect(botLabel).toHaveTextContent("Hermes");
+    expect(botLabel).not.toHaveAttribute("data-slot", "badge");
     expect(activeRow.querySelector(".waypoint-topic-row-responding")).toHaveTextContent("正在回应");
 
     const secondRow = screen.getByRole("button", { name: "发送中话题" });
     expect(secondRow).toHaveClass("unavailable");
     expect(secondRow).toHaveAttribute("data-unavailable", "true");
-    expect(secondRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
+    expect(secondRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "500" });
     expect(secondRow.querySelector(".waypoint-topic-row-unavailable")).toHaveAttribute("data-slot", "badge");
     expect(within(secondRow).getByRole("img", { name: "未确认" })).toHaveClass("animate-spin");
 

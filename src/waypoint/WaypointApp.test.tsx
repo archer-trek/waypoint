@@ -10467,7 +10467,7 @@ test("已读位置按时间线顺序只往前走，两标记不一致取靠后�
   const missingRow = screen.getByRole("button", { name: "锚点不在本地话题" });
   expect(missingRow).not.toHaveAttribute("data-unread", "true");
   expect(missingRow.querySelector(".waypoint-unread-dot")).toBeNull();
-  expect(missingRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
+  expect(missingRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "500" });
 
   // 打开锚点不在本地的 Topic：不能假装读完（不发 read_markers）
   await user.click(missingRow);
@@ -10482,7 +10482,7 @@ test("已读位置按时间线顺序只往前走，两标记不一致取靠后�
     expect(conflictRow).not.toHaveAttribute("data-unread", "true");
   });
   expect(conflictRow.querySelector(".waypoint-unread-dot")).toBeNull();
-  expect(conflictRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "400" });
+  expect(conflictRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "500" });
 
   // 第 3 轮：陈旧标记试图回退到 $e-earlier-in-tl -> 仍保持已读且不写回服务器
   await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
