@@ -15,3 +15,7 @@ Single-context layout (`GLOSSARY.md` and `docs/adr/` at the repo root). See `doc
 ### Git & branches
 
 Cut `<type>/<issue>-<slug>` branches from `origin/main` and land via squash PR (`main` updates through PRs only). Read `docs/agents/git-workflow.md` when creating branches, rebasing, committing, opening or merging PRs, or running parallel worktrees.
+
+### Coding standards
+
+Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css`, or modifying UI components and integration tests.

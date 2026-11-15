@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
+    "test:unit": "vitest run --exclude src/waypoint/WaypointApp.test.tsx",
+    "test:integration": "vitest run src/waypoint/WaypointApp.test.tsx",
     "lint": "eslint ."
   },
   "dependencies": {

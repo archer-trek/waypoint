@@ -12083,16 +12083,18 @@ test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不�
 
   // 推进同步，收到 Bot 后来发的消息
   await act(async () => { first.clock.advance(1000); });
-  await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(2));
 
   const timeline = screen.getByRole("log", { name: "对话时间线" });
   const getBodies = () => Array.from(timeline.querySelectorAll("[data-side] .waypoint-bubble")).map((el) => el.textContent);
-  expect(getBodies()).toEqual([
-    "第0条Bot消息",
-    "第1条会失败的消息",
-    "第2条正常消息",
-    "后来Bot插进来的消息",
-  ]);
+  await waitFor(() => {
+    expect(syncCalls).toBeGreaterThanOrEqual(2);
+    expect(getBodies()).toEqual([
+      "第0条Bot消息",
+      "第1条会失败的消息",
+      "第2条正常消息",
+      "后来Bot插进来的消息",
+    ]);
+  });
 
   // 正在输入新草稿 + 附件草稿，且在断网时点击红叹号重发
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "未发出的草稿");
