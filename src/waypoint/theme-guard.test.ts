@@ -248,4 +248,29 @@ describe("Theme & CSS architecture static guards (#90)", () => {
 
     expect(violations).toEqual([]);
   });
+
+  test("src/App.css collapses headerless code-block headers and strips nested Streamdown card/sidebar borders", () => {
+    const css = readFileSync(resolve(ROOT_DIR, "src/App.css"), "utf-8");
+    expect(css).toContain('[data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-header"]');
+    expect(css).toContain('[data-streamdown="code-block-actions"]');
+    expect(css).toContain('[data-streamdown="code-block-wrap-button"]');
+    expect(css).toContain('[data-streamdown="code-block-body"][data-wrapped="true"]');
+    expect(css).toContain('[data-streamdown="table-wrapper"]');
+    expect(css).toContain('.waypoint-message-row .waypoint-markdown li > .waypoint-md-p');
+    expect(css).toContain('list-style-position: outside;');
+
+    // Ensure @source-scanned Streamdown border-sidebar / p-2 / gap-2 defaults are explicitly neutralized
+    const actionsRule = css.match(/\.waypoint-markdown \[data-streamdown="code-block-actions"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(actionsRule).toContain("border: 0;");
+    expect(actionsRule).toContain("background: transparent;");
+    expect(actionsRule).toContain("padding: 0;");
+
+    const codeBlockRule = css.match(/\.waypoint-markdown \[data-streamdown="code-block"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(codeBlockRule).toContain("padding: 0;");
+    expect(codeBlockRule).toContain("gap: 0;");
+
+    const tableWrapperRule = css.match(/\.waypoint-markdown \[data-streamdown="table-wrapper"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(tableWrapperRule).toContain("padding: 0;");
+    expect(tableWrapperRule).toContain("gap: 0;");
+  });
 });

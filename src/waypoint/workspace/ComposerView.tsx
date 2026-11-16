@@ -60,11 +60,12 @@ export function ComposerView({
 }: ComposerViewProps) {
   const inputDisabled = persistingSend || activeTopicUnavailable || reauthRequired;
   const isSendActive = Boolean(draftText.trim() || hasDraftAttachment);
+  const isNarrowMode = viewportMode === "narrow";
 
   return (
     <div
       className={cn(
-        "waypoint-composer-safe-area relative shrink-0 px-3 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto",
+        "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto",
         safeInset === 0
           ? "pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]"
           : "pb-1.5",
@@ -77,10 +78,10 @@ export function ComposerView({
           variant="outline"
           size="icon"
           aria-label="回到底部"
-          className="waypoint-scroll-bottom-fab absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-9 rounded-full border-border bg-card text-foreground shadow-md hover:bg-accent hover:-translate-y-0.5 transition-transform"
+          className="waypoint-scroll-bottom-fab absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-8 rounded-full border-border/80 bg-background/90 backdrop-blur-md text-foreground shadow-sm hover:bg-accent hover:-translate-y-0.5 transition-transform"
           onClick={onScrollToBottom}
         >
-          <ChevronDown aria-hidden="true" className="size-4.5" />
+          <ChevronDown aria-hidden="true" className="size-4" />
         </Button>
       ) : null}
       {composerError ? (
@@ -92,14 +93,14 @@ export function ComposerView({
         <div
           role="region"
           aria-label="已选附件"
-          className="waypoint-draft-attachment flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-lg border border-border bg-secondary text-[0.8125rem]"
+          className="waypoint-draft-attachment flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[0.8125rem]"
         >
           <span className="waypoint-draft-attachment-name min-w-0 truncate text-foreground">
             {draftAttachmentName}
           </span>
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="sm"
             className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
             disabled={inputDisabled}
@@ -117,7 +118,7 @@ export function ComposerView({
         <div
           role="region"
           aria-label="斜杠命令提示"
-          className="waypoint-slash-hints relative px-3 py-2 mb-2 rounded-lg border border-border bg-card shadow-sm"
+          className="waypoint-slash-hints relative px-3 py-2 mb-2 rounded-xl border border-border/80 bg-card/95 backdrop-blur-sm shadow-xs"
         >
           <ul className="waypoint-slash-hint-list flex flex-wrap gap-1.5 list-none m-0 p-0">
             {SLASH_COMMAND_HINTS.map((command) => (
@@ -126,7 +127,7 @@ export function ComposerView({
                   type="button"
                   variant="secondary"
                   size="sm"
-                  className="waypoint-slash-hint-button h-7 px-2 font-mono text-[0.8125rem] border border-border hover:bg-accent hover:text-accent-foreground"
+                  className="waypoint-slash-hint-button h-7 px-2.5 font-mono text-[0.8125rem] border border-border/80 hover:bg-accent hover:text-accent-foreground"
                   onClick={() => onSelectSlashCommand(command)}
                 >
                   {command}
@@ -139,30 +140,37 @@ export function ComposerView({
       <form
         ref={composerFormRef}
         className={cn(
-          "waypoint-composer relative block border border-border bg-card shadow-lg box-border transition-shadow focus-within:shadow-xl",
-          viewportMode === "narrow"
-            ? "min-h-[52px] rounded-[26px]"
-            : "min-h-12 rounded-[24px]",
+          "waypoint-composer relative border border-border/90 bg-background dark:bg-card/75 shadow-xs dark:shadow-none box-border transition-[border-color,border-radius] focus-within:border-muted-foreground/45",
           composerMultiline
-            ? viewportMode === "narrow"
-              ? "multiline pt-3 px-4 pb-[52px]"
-              : "multiline pt-3 px-4 pb-12"
-            : viewportMode === "narrow"
-              ? "py-2.5 px-14"
-              : "py-2 px-[52px]",
+            ? cn(
+                "multiline block rounded-[18px]",
+                isNarrowMode
+                  ? "min-h-[50px] pt-3 px-4 pb-[48px]"
+                  : "min-h-[46px] pt-2.5 px-4 pb-[44px]",
+              )
+            : cn(
+                "flex items-center rounded-[23px]",
+                isNarrowMode
+                  ? "min-h-[50px] py-2 px-14"
+                  : "min-h-[46px] py-1.5 px-[52px]",
+              ),
         )}
         onSubmit={onSendMessage}
       >
         <label
           className={cn(
-            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border border-border rounded-full bg-secondary text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-card hover:text-foreground",
-            viewportMode === "narrow"
-              ? "bottom-2 left-2 size-9 min-w-9 min-h-9 after:absolute after:-inset-1 after:content-[''] active:scale-92"
-              : "bottom-2 left-2 size-8 min-w-8",
+            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-transparent text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-accent hover:text-foreground",
+            composerMultiline
+              ? isNarrowMode
+                ? "bottom-[7px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+                : "bottom-[6px] left-2 size-8 min-w-8"
+              : isNarrowMode
+                ? "top-1/2 -translate-y-1/2 left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+                : "top-1/2 -translate-y-1/2 left-2 size-8 min-w-8",
             inputDisabled && "opacity-50 cursor-not-allowed",
           )}
         >
-          <Plus aria-hidden="true" className="size-4" />
+          <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
           <span className="waypoint-attach-button-text hidden">附件</span>
           <input
             type="file"
@@ -186,7 +194,7 @@ export function ComposerView({
           rows={1}
           disabled={inputDisabled}
           value={draftText}
-          className="block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[17px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed"
+          className="block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[16px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed"
           onFocus={onFocusTextarea}
           onChange={(event) => onDraftTextChange(event.target.value)}
           onKeyDown={(event) => {
@@ -222,17 +230,21 @@ export function ComposerView({
           aria-label="发送"
           className={cn(
             "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-all",
-            viewportMode === "narrow"
-              ? "bottom-2 right-2 size-9 min-w-9 min-h-9 after:absolute after:-inset-1 after:content-[''] active:scale-92"
-              : "bottom-2 right-2 size-8 min-w-8",
+            composerMultiline
+              ? isNarrowMode
+                ? "bottom-[7px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+                : "bottom-[6px] right-2 size-8 min-w-8"
+              : isNarrowMode
+                ? "top-1/2 -translate-y-1/2 right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+                : "top-1/2 -translate-y-1/2 right-2 size-8 min-w-8",
             isSendActive
               ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
-              : "bg-secondary text-muted-foreground hover:bg-secondary/80",
+              : "bg-muted/80 text-muted-foreground/65 hover:bg-muted hover:text-muted-foreground",
           )}
           disabled={inputDisabled}
           data-active={isSendActive}
         >
-          <ArrowUp aria-hidden="true" className="size-4" />
+          <ArrowUp aria-hidden="true" strokeWidth={2} className="size-4" />
           <span className="waypoint-sr-only sr-only">发送</span>
         </Button>
       </form>

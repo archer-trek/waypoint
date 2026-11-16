@@ -1,5 +1,5 @@
-import { render, within } from "@testing-library/react";
-import { describe, expect, test } from "vitest";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { describe, expect, test, vi } from "vitest";
 import { MessageBody } from "./MessageBody";
 import { sanitizeColorLiteral, sanitizeInlineStyle } from "./markdown-color";
 
@@ -180,5 +180,164 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
     expect(container.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
     expect(container.textContent).toContain('<span style="color: red">红色</span>');
     expect(container.textContent).toContain('<font color="blue">蓝色</font>');
+  });
+});
+
+describe("MessageBody code blocks and table DOM hooks", () => {
+  test("exposes language attributes and unified Streamdown hooks for headerless and tagged code blocks", () => {
+    const body = [
+      "💻 terminal",
+      "```",
+      "git remote -v && gh auth status",
+      "```",
+      "",
+      "```bash",
+      "gh issue list --state open",
+      "```",
+      "",
+      "| 列一 | 列二 |",
+      "| --- | --- |",
+      "| 值一 | 值二 |",
+    ].join("\n");
+
+    const { container } = render(<MessageBody body={body} richColor />);
+
+    const blocks = Array.from(
+      container.querySelectorAll("[data-streamdown=\"code-block\"]"),
+    ) as HTMLElement[];
+    expect(blocks).toHaveLength(2);
+
+    const headerless = blocks[0]!;
+    expect(headerless.getAttribute("data-language")).toBe("");
+    expect(headerless.querySelector("[data-streamdown=\"code-block-header\"]")?.getAttribute("data-language")).toBe("");
+    expect(headerless.querySelector("[data-streamdown=\"code-block-actions\"]")).not.toBeNull();
+    expect(headerless.querySelector("[data-streamdown=\"code-block-copy-button\"]")).not.toBeNull();
+    expect(headerless.querySelector("[data-streamdown=\"code-block-body\"]")?.textContent).toContain(
+      "git remote -v && gh auth status",
+    );
+
+    const tagged = blocks[1]!;
+    expect(tagged.getAttribute("data-language")).toBe("bash");
+    expect(tagged.querySelector("[data-streamdown=\"code-block-header\"]")?.textContent).toBe("bash");
+    expect(tagged.querySelector("[data-streamdown=\"code-block-body\"]")?.textContent).toContain(
+      "gh issue list --state open",
+    );
+
+    expect(container.querySelector("[data-streamdown=\"table-wrapper\"]")).not.toBeNull();
+  });
+
+  test("toggles per-block word wrapping via the wrap button while keeping inline code untouched", () => {
+    const body = [
+      "内联代码 `git status`",
+      "",
+      "```",
+      "git remote -v && gh auth status",
+      "```",
+      "",
+      "```bash",
+      "gh issue list --state open",
+      "```",
+    ].join("\n");
+
+    const { container } = render(<MessageBody body={body} richColor />);
+
+    expect(container.querySelector("[data-streamdown=\"inline-code\"]")?.textContent).toBe("git status");
+
+    const bodies = Array.from(
+      container.querySelectorAll("[data-streamdown=\"code-block-body\"]"),
+    ) as HTMLElement[];
+    const wrapButtons = Array.from(
+      container.querySelectorAll("[data-streamdown=\"code-block-wrap-button\"]"),
+    ) as HTMLButtonElement[];
+
+    expect(bodies).toHaveLength(2);
+    expect(wrapButtons).toHaveLength(2);
+
+    expect(wrapButtons[0]).toHaveAttribute("aria-pressed", "false");
+    expect(wrapButtons[0]).toHaveAttribute("aria-label", "允许折行");
+    expect(bodies[0]).not.toHaveAttribute("data-wrapped");
+    expect(bodies[1]).not.toHaveAttribute("data-wrapped");
+
+    fireEvent.click(wrapButtons[0]!);
+    expect(wrapButtons[0]).toHaveAttribute("aria-pressed", "true");
+    expect(wrapButtons[0]).toHaveAttribute("aria-label", "取消折行");
+    expect(bodies[0]).toHaveAttribute("data-wrapped", "true");
+    expect(bodies[1]).not.toHaveAttribute("data-wrapped");
+
+    fireEvent.click(wrapButtons[0]!);
+    expect(wrapButtons[0]).toHaveAttribute("aria-pressed", "false");
+    expect(wrapButtons[0]).toHaveAttribute("aria-label", "允许折行");
+    expect(bodies[0]).not.toHaveAttribute("data-wrapped");
+  });
+
+  test("copies code in non-HTTPS browser contexts via execCommand fallback when navigator.clipboard is unavailable or rejects", async () => {
+    const origClipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const origExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
+    const execCommand = vi.fn().mockImplementation((cmd: string) => {
+      if (cmd === "copy") {
+        const active = document.activeElement as HTMLTextAreaElement | null;
+        expect(active?.tagName).toBe("TEXTAREA");
+        expect(active?.value).toBe("git remote -v && gh auth status\n");
+        return true;
+      }
+      return false;
+    });
+
+    try {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: undefined,
+      });
+      Object.defineProperty(document, "execCommand", {
+        configurable: true,
+        value: execCommand,
+      });
+
+      const body = ["```", "git remote -v && gh auth status", "```"].join("\n");
+      const { container, unmount } = render(<MessageBody body={body} richColor />);
+
+      const copyBtn = container.querySelector(
+        "[data-streamdown=\"code-block-copy-button\"]",
+      ) as HTMLButtonElement;
+      expect(copyBtn).not.toBeNull();
+
+      fireEvent.click(copyBtn);
+      await waitFor(() => {
+        expect(execCommand).toHaveBeenCalledWith("copy");
+        expect(within(container).getByText("已复制")).toBeInTheDocument();
+      });
+      expect(document.querySelector("textarea")).toBeNull();
+      unmount();
+
+      // Also falls back when clipboard.writeText rejects
+      execCommand.mockClear();
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: vi.fn().mockRejectedValue(new Error("NotAllowedError")),
+        },
+      });
+      const second = render(<MessageBody body={body} richColor />);
+      const secondBtn = second.container.querySelector(
+        "[data-streamdown=\"code-block-copy-button\"]",
+      ) as HTMLButtonElement;
+      fireEvent.click(secondBtn);
+      await waitFor(() => {
+        expect(execCommand).toHaveBeenCalledWith("copy");
+        expect(within(second.container).getByText("已复制")).toBeInTheDocument();
+      });
+      second.unmount();
+    } finally {
+      if (origClipboard) {
+        Object.defineProperty(navigator, "clipboard", origClipboard);
+      } else {
+        delete (navigator as unknown as { clipboard?: unknown }).clipboard;
+      }
+      if (origExecCommand) {
+        Object.defineProperty(document, "execCommand", origExecCommand);
+      } else {
+        delete (document as unknown as { execCommand?: unknown }).execCommand;
+      }
+    }
   });
 });

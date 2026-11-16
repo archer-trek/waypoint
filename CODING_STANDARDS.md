@@ -8,6 +8,7 @@ Judgment calls for code review and UI/test changes in `waypoint`. Mechanical rul
 - **Vertical alignment & chrome**: Align narrow mobile list content edges directly to the header brand axis. Keep full-bleed header dividers flush to the viewport edges, and size paired icons optically (e.g. `Plus` spans less of its viewBox than `Settings`).
 - **Error copy & form guards**: Write user-facing errors as direct Chinese action guidance (omit `<动作>失败，因为…` boilerplate and raw English server text). Disable primary submit buttons while required fields are empty or whitespace-only, while keeping defensive checks in submit handlers.
 - **Icons & native assets**: Keep `src/waypoint/icons.tsx`, `public/favicon.svg`, `src-tauri/icons/`, and `src-tauri/gen/android/app/src/main/res/mipmap-*` visually consistent; regenerate native icon sets together via `npx tauri icon <manifest>`.
+- **Streamdown overrides (`MessageBody.tsx` & `src/App.css`)**: Verify custom `components` (`p`, `code`) preserve `li` spacing collapse, `theme-guard.test.ts` CSS resets for `@source`-scanned classes (`border-sidebar`, `p-2`, `gap-2`), `Array.prototype.at` fallback compatibility, and non-secure-context clipboard fallback.
 - **Preserve behavioral DOM/ARIA hooks**: Keep `.waypoint-*` semantic classes and `sr-only` landmarks expected by `SidebarView.test.tsx` and `src/waypoint/integration/`.
 
 ## Domain & ADR Consistency

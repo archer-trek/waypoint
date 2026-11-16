@@ -42,7 +42,7 @@ function renderSidebar(overrides: Partial<SidebarViewProps> = {}) {
 }
 
 describe("SidebarView & EmptyDetailView", () => {
-  test("renders desktop header with Tauri drag region, traffic-light clearance, and shadcn Button triggers", () => {
+  test("renders desktop web header aligned to topic axis and groups actions on the right", () => {
     const { props } = renderSidebar({ isNarrow: false });
     const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
 
@@ -54,8 +54,9 @@ describe("SidebarView & EmptyDetailView", () => {
 
     const header = sidebar.querySelector(".waypoint-sidebar-header");
     expect(header).toHaveAttribute("data-tauri-drag-region");
-    expect(header).toHaveClass("pl-[76px]");
-    expect(header?.querySelector(".waypoint-sidebar-brand")).toBeNull();
+    expect(header).not.toHaveClass("pl-[76px]");
+    expect(header?.querySelector(".waypoint-sidebar-brand")).toHaveTextContent("Waypoint");
+    expect(sidebar.querySelector(".waypoint-sidebar-scroll")).toHaveClass("overflow-y-auto");
 
     const settingsBtn = within(sidebar).getByRole("button", { name: "设置" });
     const createBtn = within(sidebar).getByRole("button", { name: "新建 Topic" });
@@ -69,6 +70,15 @@ describe("SidebarView & EmptyDetailView", () => {
     fireEvent.click(createBtn);
     expect(props.onOpenSettings).toHaveBeenCalledTimes(1);
     expect(props.onOpenCreateForm).toHaveBeenCalledTimes(1);
+  });
+
+  test("reserves macOS Tauri traffic-light clearance and omits brand label when requested", () => {
+    renderSidebar({ isNarrow: false, showTrafficLightClearance: true });
+    const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
+    const header = sidebar.querySelector(".waypoint-sidebar-header");
+    expect(header).toHaveAttribute("data-tauri-drag-region");
+    expect(header).toHaveClass("pl-[76px]", "justify-end");
+    expect(header?.querySelector(".waypoint-sidebar-brand")).toBeNull();
   });
 
   test("renders Waypoint brand header, full-bleed divider, and optically matched action icons on narrow mobile viewport", () => {
