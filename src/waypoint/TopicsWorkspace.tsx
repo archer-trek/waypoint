@@ -498,7 +498,7 @@ export function TopicsWorkspace({
       probe.remove();
       // Measure against fixed single-line padding rather than computed padding,
       // because multiline mode narrows horizontal padding and would otherwise oscillate.
-      const singleLinePadX = viewportMode === "narrow" ? 112 : 104;
+      const singleLinePadX = 96;
       const available = form.clientWidth - singleLinePadX - 4;
       exceeds = textWidth > Math.max(available, 48);
     }
@@ -2848,7 +2848,7 @@ export function TopicsWorkspace({
           />
         ) : null}
         <main
-          className="waypoint-timeline-container m-0 box-border flex min-h-0 w-full max-w-none flex-1 flex-col overflow-hidden bg-background p-0"
+          className="waypoint-timeline-container m-0 box-border flex min-h-0 w-full max-w-none flex-1 flex-col overflow-hidden bg-background p-0 transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
             style={{ paddingBottom: `${safeInset}px` }}
             onDragOver={(event) => {
               if (!supportsFileDropAndPaste) {
