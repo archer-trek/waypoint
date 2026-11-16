@@ -198,6 +198,7 @@ export function TopicsWorkspace({
   const syncAbortControllerRef = useRef<AbortController | null>(null);
   const isAtBottomRef = useRef(true);
   const prevTimelineKeyRef = useRef<string>("");
+  const prevTimelineClientHeightRef = useRef<number | null>(null);
   const activeVisibleRoomRef = useRef<string | null>(null);
   const backfillInFlightRoomsRef = useRef(new Set<string>());
   const openBackfillStoppedRoomsRef = useRef(new Set<string>());
@@ -1411,6 +1412,9 @@ export function TopicsWorkspace({
   }, [client, clock, retryQueue, providedRetryQueue, platform, initialReauthRequired]);
 
   function setTimelineScrollTop(container: HTMLElement, nextTop: number) {
+    if (Math.abs(container.scrollTop - nextTop) < 0.5) {
+      return;
+    }
     programmaticScrollRef.current = { active: true, top: nextTop };
     container.scrollTop = nextTop;
   }
@@ -1621,7 +1625,6 @@ export function TopicsWorkspace({
   }
 
   function handleTimelineScroll() {
-    collapseDescription();
     const el = timelineRef.current;
     if (el && programmaticScrollRef.current.active) {
       const same = Math.abs(el.scrollTop - programmaticScrollRef.current.top) < 1;
@@ -1630,6 +1633,7 @@ export function TopicsWorkspace({
         return;
       }
     }
+    collapseDescription();
     if (visibleComposerRoomId) {
       userScrolledRoomRef.current = visibleComposerRoomId;
     }
@@ -1784,6 +1788,57 @@ export function TopicsWorkspace({
     }
   }
 
+  function syncTimelineHeightAnchor(container: HTMLElement, roomId: string) {
+    if (awaitingReadPosLandingRoomRef.current === roomId) {
+      prevTimelineClientHeightRef.current = container.clientHeight;
+      return;
+    }
+    const nextHeight = container.clientHeight;
+    const prevHeight = prevTimelineClientHeightRef.current;
+    prevTimelineClientHeightRef.current = nextHeight;
+    if (prevHeight === null || prevHeight <= 0 || nextHeight <= 0 || nextHeight === prevHeight) {
+      return;
+    }
+    const maxScroll = Math.max(0, container.scrollHeight - nextHeight);
+    const wasAtBottom =
+      isAtBottomRef.current ||
+      container.scrollHeight - container.scrollTop - prevHeight <= AT_BOTTOM_THRESHOLD_PX;
+    if (wasAtBottom) {
+      setTimelineScrollTop(container, maxScroll);
+      isAtBottomRef.current = true;
+      setShowScrollBottomFab(false);
+    } else {
+      if (container.scrollTop > maxScroll) {
+        setTimelineScrollTop(container, maxScroll);
+      }
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - nextHeight;
+      isAtBottomRef.current = distanceFromBottom <= AT_BOTTOM_THRESHOLD_PX;
+      setShowScrollBottomFab(distanceFromBottom > 60);
+    }
+    evaluateVisibleReadPosition(roomId);
+  }
+
+  const syncTimelineResize = useEffectEvent(() => {
+    const container = timelineRef.current;
+    const roomId = activeVisibleRoomRef.current;
+    if (!container || !roomId) {
+      return;
+    }
+    syncTimelineHeightAnchor(container, roomId);
+  });
+
+  useLayoutEffect(() => {
+    const container = timelineRef.current;
+    if (!visibleComposerRoomId || !container || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      syncTimelineResize();
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [visibleComposerRoomId]);
+
   useLayoutEffect(() => {
     if (!visibleComposerRoomId || !activeTopic || activeTopic.roomId !== visibleComposerRoomId) {
       lastLandedRoomRef.current = null;
@@ -1791,6 +1846,7 @@ export function TopicsWorkspace({
       pendingScrollPreserveRef.current = null;
       isAtBottomRef.current = true;
       prevTimelineKeyRef.current = "";
+      prevTimelineClientHeightRef.current = null;
       return;
     }
     const container = timelineRef.current;
@@ -1812,6 +1868,7 @@ export function TopicsWorkspace({
         landTimelineScroll(container, activeTopic.firstUnreadEventId);
       }
       prevTimelineKeyRef.current = timelineContentKey;
+      prevTimelineClientHeightRef.current = container.clientHeight;
     } else if (
       awaitingReadPosLandingRoomRef.current === visibleComposerRoomId &&
       !shouldWaitForBackfill
@@ -1822,6 +1879,7 @@ export function TopicsWorkspace({
         landTimelineScroll(container, activeTopic.firstUnreadEventId);
       }
       prevTimelineKeyRef.current = timelineContentKey;
+      prevTimelineClientHeightRef.current = container.clientHeight;
     } else if (pendingScrollPreserveRef.current?.roomId === visibleComposerRoomId) {
       const pending = pendingScrollPreserveRef.current;
       pendingScrollPreserveRef.current = null;
@@ -1831,6 +1889,7 @@ export function TopicsWorkspace({
         container.scrollHeight - container.scrollTop - container.clientHeight <=
         AT_BOTTOM_THRESHOLD_PX;
       prevTimelineKeyRef.current = timelineContentKey;
+      prevTimelineClientHeightRef.current = container.clientHeight;
     } else if (prevTimelineKeyRef.current !== timelineContentKey) {
       prevTimelineKeyRef.current = timelineContentKey;
       if (isAtBottomRef.current) {
@@ -1867,6 +1926,9 @@ export function TopicsWorkspace({
           container.scrollHeight - container.scrollTop - container.clientHeight <=
           AT_BOTTOM_THRESHOLD_PX;
       }
+      prevTimelineClientHeightRef.current = container.clientHeight;
+    } else {
+      syncTimelineHeightAnchor(container, visibleComposerRoomId);
     }
     evaluateVisibleReadPosition(visibleComposerRoomId);
   });
