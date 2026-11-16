@@ -36,7 +36,9 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
       "",
       '外层 <span style="color: blue">蓝字 <span style="color: green">绿字</span> 蓝字</span>',
       "",
-      '<font color="#0969da">兼容字体着色</font>',
+      '<font color="#e11d48"><b>[FAIL]</b></font> 这是 <font color="#e11d48"> 渲染的红色',
+      "",
+      '<i>斜体</i> <u>下划线</u> <s>删除</s> <mark>高亮</mark><br/>换行',
     ].join("\n");
 
     const { container } = render(<MessageBody body={body} richColor />);
@@ -54,7 +56,13 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
     expect(styledSpans[1]?.style.color).toBe("blue");
     expect(styledSpans[2]?.style.color).toBe("green");
     expect(styledSpans[3]?.style.color).toBeTruthy();
-    expect(styledSpans[3]?.textContent).toBe("兼容字体着色");
+    expect(styledSpans[3]?.querySelector("b")?.textContent).toBe("[FAIL]");
+    expect(container.textContent).toContain('这是 <font color="#e11d48"> 渲染的红色');
+    expect(container.querySelector("i")?.textContent).toBe("斜体");
+    expect(container.querySelector("u")?.textContent).toBe("下划线");
+    expect(container.querySelector("s")?.textContent).toBe("删除");
+    expect(container.querySelector("mark")?.textContent).toBe("高亮");
+    expect(container.querySelector("br")).not.toBeNull();
     expect(container.querySelector("font")).toBeNull();
   });
 
@@ -66,14 +74,15 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
       "",
       '<span style="color: red">未闭合 <span style="color: blue">已闭合</span>',
       "",
-      '<b>字面粗体</b> <img src=x onerror=window.__xss103=true> <script>window.__xss103=true</script>',
+      '<b onclick="window.__xss103=true">去属性粗体</b> <div onclick="window.__xss103=true">字面容器</div> <img src=x onerror=window.__xss103=true> <script>window.__xss103=true</script>',
     ].join("\n");
 
     const { container } = render(<MessageBody body={body} richColor />);
 
     expect((window as { __xss103?: boolean }).__xss103).toBeUndefined();
     expect(container.querySelector("[onclick]")).toBeNull();
-    expect(container.querySelector("b")).toBeNull();
+    expect(container.querySelector("b")?.textContent).toBe("去属性粗体");
+    expect(container.querySelector(".waypoint-md-p > div")).toBeNull();
     expect(container.querySelector("img")).toBeNull();
     expect(container.querySelector("script")).toBeNull();
 
@@ -84,7 +93,7 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
 
     expect(container.textContent).toContain("纯危险样式");
     expect(container.textContent).toContain('<span style="color: red">未闭合 ');
-    expect(container.textContent).toContain("<b>字面粗体</b>");
+    expect(container.textContent).toContain('<div onclick="window.__xss103=true">字面容器</div>');
     expect(container.textContent).toContain("<script>window.__xss103=true</script>");
   });
 

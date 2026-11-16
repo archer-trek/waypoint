@@ -295,53 +295,104 @@ function parseHtmlAttributes(attrText: string): Record<string, string> | undefin
   return attrs;
 }
 
-type ColorTagName = "span" | "font";
+const INLINE_FORMAT_TAGS = new Set([
+  "b",
+  "strong",
+  "i",
+  "em",
+  "u",
+  "s",
+  "del",
+  "code",
+  "kbd",
+  "sub",
+  "sup",
+  "mark",
+]);
 
-interface ParsedColorOpenTag {
-  tag: ColorTagName;
+type InlineHtmlTagName = "span" | "font" | "b" | "strong" | "i" | "em" | "u" | "s" | "del" | "code" | "kbd" | "sub" | "sup" | "mark";
+
+interface ParsedInlineOpenTag {
+  tag: InlineHtmlTagName;
+  hName: string;
   style: string | undefined;
 }
 
-function parseColorHtmlOpenTag(rawHtml: string): ParsedColorOpenTag | undefined {
+function isBrTag(rawHtml: string): boolean {
+  return /^<br\s*\/?>$/i.test(rawHtml.trim());
+}
+
+function parseInlineHtmlOpenTag(rawHtml: string): ParsedInlineOpenTag | undefined {
   const trimmed = rawHtml.trim();
-  const match = /^<(span|font)(?:\s+([\s\S]*))?>$/i.exec(trimmed);
+  const match = /^<([a-zA-Z]+)(?:\s+([\s\S]*))?>$/.exec(trimmed);
   if (!match) {
     return undefined;
   }
-  const tag = match[1]!.toLowerCase() as ColorTagName;
+  const tag = match[1]!.toLowerCase();
   const rawAttrs = (match[2] ?? "").trim();
-  if (!rawAttrs || rawAttrs.endsWith("/")) {
-    return undefined;
-  }
-  const attrs = parseHtmlAttributes(rawAttrs);
-  if (!attrs) {
+  if (rawAttrs.endsWith("/")) {
     return undefined;
   }
 
   if (tag === "span") {
-    if (!Object.prototype.hasOwnProperty.call(attrs, "style")) {
+    if (!rawAttrs) {
+      return undefined;
+    }
+    const attrs = parseHtmlAttributes(rawAttrs);
+    if (!attrs || !Object.prototype.hasOwnProperty.call(attrs, "style")) {
       return undefined;
     }
     return {
-      tag,
+      tag: "span",
+      hName: "span",
       style: sanitizeInlineStyle(attrs.style ?? ""),
     };
   }
 
-  if (!Object.prototype.hasOwnProperty.call(attrs, "color")) {
-    return undefined;
+  if (tag === "font") {
+    if (!rawAttrs) {
+      return undefined;
+    }
+    const attrs = parseHtmlAttributes(rawAttrs);
+    if (!attrs || !Object.prototype.hasOwnProperty.call(attrs, "color")) {
+      return undefined;
+    }
+    const decodedColor = decodeBasicHtmlEntities(attrs.color ?? "");
+    const safeColor = sanitizeColorLiteral(decodedColor);
+    return {
+      tag: "font",
+      hName: "span",
+      style: safeColor ? `color: ${safeColor}` : undefined,
+    };
   }
-  const decodedColor = decodeBasicHtmlEntities(attrs.color ?? "");
-  const safeColor = sanitizeColorLiteral(decodedColor);
-  return {
-    tag,
-    style: safeColor ? `color: ${safeColor}` : undefined,
-  };
+
+  if (INLINE_FORMAT_TAGS.has(tag)) {
+    if (rawAttrs) {
+      const attrs = parseHtmlAttributes(rawAttrs);
+      if (!attrs) {
+        return undefined;
+      }
+    }
+    return {
+      tag: tag as InlineHtmlTagName,
+      hName: tag,
+      style: undefined,
+    };
+  }
+
+  return undefined;
 }
 
-function parseColorHtmlCloseTag(rawHtml: string): ColorTagName | undefined {
-  const match = /^<\/\s*(span|font)\s*>$/i.exec(rawHtml.trim());
-  return match ? (match[1]!.toLowerCase() as ColorTagName) : undefined;
+function parseInlineHtmlCloseTag(rawHtml: string): InlineHtmlTagName | undefined {
+  const match = /^<\/\s*([a-zA-Z]+)\s*>$/.exec(rawHtml.trim());
+  if (!match) {
+    return undefined;
+  }
+  const tag = match[1]!.toLowerCase();
+  if (tag === "span" || tag === "font" || INLINE_FORMAT_TAGS.has(tag)) {
+    return tag as InlineHtmlTagName;
+  }
+  return undefined;
 }
 
 interface MdastNode {
@@ -356,7 +407,8 @@ interface MdastNode {
 }
 
 interface OpenColorFrame {
-  tag: ColorTagName;
+  tag: InlineHtmlTagName;
+  hName: string;
   style: string | undefined;
   originalOpenNode: MdastNode;
   children: MdastNode[];
@@ -372,10 +424,18 @@ function rewriteInlineColorSpans(nodes: MdastNode[]): MdastNode[] {
   for (const node of nodes) {
 
     if (node.type === "html" && typeof node.value === "string") {
-      const open = parseColorHtmlOpenTag(node.value);
+      if (isBrTag(node.value)) {
+        currentTarget().push({
+          type: "break",
+        });
+        continue;
+      }
+
+      const open = parseInlineHtmlOpenTag(node.value);
       if (open) {
         stack.push({
           tag: open.tag,
+          hName: open.hName,
           style: open.style,
           originalOpenNode: node,
           children: [],
@@ -383,7 +443,7 @@ function rewriteInlineColorSpans(nodes: MdastNode[]): MdastNode[] {
         continue;
       }
 
-      const closeTag = parseColorHtmlCloseTag(node.value);
+      const closeTag = parseInlineHtmlCloseTag(node.value);
       if (closeTag) {
         let matchIdx = -1;
         for (let i = stack.length - 1; i >= 0; i -= 1) {
@@ -401,10 +461,10 @@ function rewriteInlineColorSpans(nodes: MdastNode[]): MdastNode[] {
           }
           const matched = stack.pop()!;
           const wrappedNode: MdastNode = {
-            type: "waypointColorSpan",
+            type: "waypointInlineHtml",
             children: matched.children,
             data: {
-              hName: "span",
+              hName: matched.hName,
               hProperties: matched.style ? { style: matched.style } : {},
             },
           };
@@ -515,15 +575,20 @@ export function createAgentSanitizePlugin(): SanitizeTuple {
   const [pluginFn, baseSchema] = defaultRehypePlugins.sanitize as [
     unknown,
     {
+      tagNames?: string[];
       attributes?: Record<string, unknown[]>;
       [key: string]: unknown;
     },
   ];
+  const baseTagNames = baseSchema.tagNames ?? [];
   const baseAttributes = baseSchema.attributes ?? {};
   const extendedSchema = {
     ...baseSchema,
+    tagNames: [...new Set([...baseTagNames, "u", "mark"])],
     attributes: {
       ...baseAttributes,
+      u: [],
+      mark: [],
       span: [...(baseAttributes.span ?? []), ["style", SAFE_SANITIZE_STYLE_RE]],
       blockquote: [
         ...(baseAttributes.blockquote ?? []),

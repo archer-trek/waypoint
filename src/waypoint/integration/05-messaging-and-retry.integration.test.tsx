@@ -5347,9 +5347,9 @@ test("Agent 回复支持受控行内着色与 GFM Callout，非白名单 HTML �
   const ts = new Date(2026, 10, 12, 10, 15, 0).getTime();
 
   const agentBody = [
-    '<span style="color: red; position: fixed" onclick="window.__int103Xss=true">**危险提示**</span> 与 <font color="green">绿色说明</font>',
+    '<span style="color: red; position: fixed" onclick="window.__int103Xss=true">**危险提示**</span> 与 <font color="green"><b>[OK]</b> 绿色说明</font>',
     "",
-    '<b>字面标签</b> <script>window.__int103Xss=true</script>',
+    '<div>字面标签</div> <script>window.__int103Xss=true</script>',
     "",
     "> [!WARNING]",
     "> 注意检查配置",
@@ -5432,13 +5432,14 @@ test("Agent 回复支持受控行内着色与 GFM Callout，非白名单 HTML �
   expect(agentSpans[0]!.style.position).toBe("");
   expect(agentSpans[0]!.querySelector('[data-streamdown="strong"]')?.textContent).toBe("危险提示");
   expect(agentSpans[1]!.style.color).toBe("green");
-  expect(agentSpans[1]!.textContent).toBe("绿色说明");
+  expect(agentSpans[1]!.querySelector("b")?.textContent).toBe("[OK]");
+  expect(agentSpans[1]!.textContent).toBe("[OK] 绿色说明");
   expect(agentBubble.querySelector("font")).toBeNull();
   expect(agentBubble.querySelector("[onclick]")).toBeNull();
-  expect(agentBubble.querySelector("b")).toBeNull();
+  expect(agentBubble.querySelector(".waypoint-md-p > div")).toBeNull();
   expect(agentBubble.querySelector("script")).toBeNull();
   expect((window as { __int103Xss?: boolean }).__int103Xss).toBeUndefined();
-  expect(agentBubble.textContent).toContain("<b>字面标签</b>");
+  expect(agentBubble.textContent).toContain("<div>字面标签</div>");
   expect(agentBubble.textContent).toContain("<script>window.__int103Xss=true</script>");
 
   // Agent 侧：GFM Callout 渲染
