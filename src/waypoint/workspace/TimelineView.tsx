@@ -212,6 +212,7 @@ export function TimelineView({
                       <MessageBody
                         body={item.media.caption}
                         onOpenExternalUrl={onOpenExternalUrl}
+                        richColor={item.side === "left"}
                       />
                     ) : null}
                   </div>
@@ -219,6 +220,7 @@ export function TimelineView({
                   <MessageBody
                     body={item.body}
                     onOpenExternalUrl={onOpenExternalUrl}
+                    richColor={item.side === "left"}
                   />
                 )}
               </div>

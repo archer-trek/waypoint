@@ -58,6 +58,19 @@
   --warning-border: #fde68a;
   --radius: 0.5rem;
 
+  /* Agent MessageBody GFM Callout tokens (ADR-0027 reading-content exception) */
+  --callout-note: #f0f7ff;
+  --callout-note-foreground: #0969da;
+  --callout-note-border: #0969da;
+  --callout-tip: #f0fdf4;
+  --callout-tip-foreground: #1a7f37;
+  --callout-tip-border: #1a7f37;
+  --callout-important: #faf5ff;
+  --callout-important-foreground: #8250df;
+  --callout-important-border: #8250df;
+  --callout-warning-border: #d97706;
+  --callout-caution: #fef2f2;
+
   /* Grokbot Monochrome Dark palette (referenced via var() below) */
   --grok-dark-background: #09090b;
   --grok-dark-foreground: #fafafa;
@@ -81,6 +94,17 @@
   --grok-dark-warning: #2a2214;
   --grok-dark-warning-foreground: #fbbf24;
   --grok-dark-warning-border: #523e1c;
+  --grok-dark-callout-note: #101d2e;
+  --grok-dark-callout-note-foreground: #4493f8;
+  --grok-dark-callout-note-border: #1f6feb;
+  --grok-dark-callout-tip: #0f2419;
+  --grok-dark-callout-tip-foreground: #3fb950;
+  --grok-dark-callout-tip-border: #238636;
+  --grok-dark-callout-important: #1f1630;
+  --grok-dark-callout-important-foreground: #ab7df8;
+  --grok-dark-callout-important-border: #8957e5;
+  --grok-dark-callout-warning-border: #d29922;
+  --grok-dark-callout-caution: #2a1215;
 
   /* Typography & native shell metrics */
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "SF Pro Text", "SF Pro", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
@@ -112,6 +136,17 @@
     --warning: var(--grok-dark-warning);
     --warning-foreground: var(--grok-dark-warning-foreground);
     --warning-border: var(--grok-dark-warning-border);
+    --callout-note: var(--grok-dark-callout-note);
+    --callout-note-foreground: var(--grok-dark-callout-note-foreground);
+    --callout-note-border: var(--grok-dark-callout-note-border);
+    --callout-tip: var(--grok-dark-callout-tip);
+    --callout-tip-foreground: var(--grok-dark-callout-tip-foreground);
+    --callout-tip-border: var(--grok-dark-callout-tip-border);
+    --callout-important: var(--grok-dark-callout-important);
+    --callout-important-foreground: var(--grok-dark-callout-important-foreground);
+    --callout-important-border: var(--grok-dark-callout-important-border);
+    --callout-warning-border: var(--grok-dark-callout-warning-border);
+    --callout-caution: var(--grok-dark-callout-caution);
   }
 }
 
@@ -139,6 +174,17 @@
   --warning: var(--grok-dark-warning);
   --warning-foreground: var(--grok-dark-warning-foreground);
   --warning-border: var(--grok-dark-warning-border);
+  --callout-note: var(--grok-dark-callout-note);
+  --callout-note-foreground: var(--grok-dark-callout-note-foreground);
+  --callout-note-border: var(--grok-dark-callout-note-border);
+  --callout-tip: var(--grok-dark-callout-tip);
+  --callout-tip-foreground: var(--grok-dark-callout-tip-foreground);
+  --callout-tip-border: var(--grok-dark-callout-tip-border);
+  --callout-important: var(--grok-dark-callout-important);
+  --callout-important-foreground: var(--grok-dark-callout-important-foreground);
+  --callout-important-border: var(--grok-dark-callout-important-border);
+  --callout-warning-border: var(--grok-dark-callout-warning-border);
+  --callout-caution: var(--grok-dark-callout-caution);
 }
 
 @layer base {
@@ -608,6 +654,84 @@ a {
 
 .waypoint-markdown [data-streamdown="blockquote"] > *:last-child {
   margin-bottom: 0;
+}
+
+/* GFM Callouts (Agent reading content, ADR-0027) */
+.waypoint-markdown .waypoint-callout {
+  margin: 1.125rem 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  color: var(--foreground);
+  font-size: 0.9375rem;
+  line-height: 1.65;
+}
+
+.waypoint-markdown .waypoint-callout-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.waypoint-markdown .waypoint-callout-body {
+  margin-top: 0.4rem;
+}
+
+.waypoint-markdown .waypoint-callout-body > *:first-child {
+  margin-top: 0;
+}
+
+.waypoint-markdown .waypoint-callout-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="note"] {
+  background: var(--callout-note);
+  border-left-color: var(--callout-note-border);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="note"] .waypoint-callout-title {
+  color: var(--callout-note-foreground);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="tip"] {
+  background: var(--callout-tip);
+  border-left-color: var(--callout-tip-border);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="tip"] .waypoint-callout-title {
+  color: var(--callout-tip-foreground);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="important"] {
+  background: var(--callout-important);
+  border-left-color: var(--callout-important-border);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="important"] .waypoint-callout-title {
+  color: var(--callout-important-foreground);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="warning"] {
+  background: var(--warning);
+  border-left-color: var(--callout-warning-border);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="warning"] .waypoint-callout-title {
+  color: var(--warning-foreground);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="caution"] {
+  background: var(--callout-caution);
+  border-left-color: var(--destructive);
+}
+
+.waypoint-markdown .waypoint-callout[data-callout="caution"] .waypoint-callout-title {
+  color: var(--destructive);
 }
 
 /* KaTeX */
