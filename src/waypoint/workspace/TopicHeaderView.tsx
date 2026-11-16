@@ -60,10 +60,10 @@ export function TopicHeaderView({
   return (
     <header
       className={cn(
-        "waypoint-topic-header sticky top-0 z-10 shrink-0 bg-background/90 backdrop-blur-md border-b border-border/60 px-4 py-2.5 box-border",
+        "waypoint-topic-header sticky top-0 z-10 shrink-0 bg-background/90 backdrop-blur-md border-b border-border/60 py-2.5 box-border",
         isNarrow
           ? "pt-[max(0.65rem,env(safe-area-inset-top,0px))] pl-[max(0.75rem,env(safe-area-inset-left,0px))] pr-[max(0.75rem,env(safe-area-inset-right,0px))]"
-          : "pt-[calc(0.65rem+env(safe-area-inset-top,0px))]",
+          : "px-4 sm:px-6 pt-[calc(0.65rem+env(safe-area-inset-top,0px))]",
       )}
     >
       <div className="waypoint-topic-header-bar flex items-center justify-between gap-3">
@@ -189,14 +189,8 @@ export function TopicHeaderView({
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
-          {/* Expose pure icon buttons in wide desktop and for test accessibility */}
-          <div
-            className={
-              !isNarrow
-                ? "waypoint-desktop-actions flex items-center gap-1"
-                : "waypoint-sr-only sr-only"
-            }
-          >
+          {/* Visually converged to the ··· overflow menu per ADR-0024; keep direct buttons sr-only for test/a11y hooks */}
+          <div className="waypoint-sr-only sr-only">
             <Button
               type="button"
               variant="ghost"

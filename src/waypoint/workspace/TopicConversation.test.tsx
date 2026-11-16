@@ -141,6 +141,7 @@ describe("TopicHeaderView (#89)", () => {
     expect(screen.getByRole("button", { name: "置顶" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "编辑" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+    expect(document.querySelector(".waypoint-desktop-actions")).toBeNull();
   });
 });
 
@@ -234,7 +235,7 @@ describe("TimelineView (#89)", () => {
       "border-0",
       "shadow-none",
       "max-w-[min(42rem,100%)]",
-      "leading-[1.65]",
+      "leading-[1.58]",
     );
 
     const ownerRow = timeline.querySelector('[data-event-id="$owner-1"]') as HTMLElement;
@@ -398,6 +399,7 @@ describe("ComposerView (#89)", () => {
     expect(screen.queryByRole("button", { name: "回到底部" })).not.toBeInTheDocument();
     const form = document.querySelector("form.waypoint-composer") as HTMLFormElement;
     expect(form).toHaveClass("multiline");
+    expect(form.className).not.toMatch(/before:(?:h-px|bg-border|border)/);
 
     const hintRegion = screen.getByRole("region", { name: "斜杠命令提示" });
     fireEvent.click(within(hintRegion).getByRole("button", { name: "/model" }));

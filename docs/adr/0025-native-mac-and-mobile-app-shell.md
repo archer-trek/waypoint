@@ -22,7 +22,7 @@ Waypoint 追求在 macOS 桌面端具备原生 App 质感（对标 Slack、Claud
   - 「尚未进入 Topic 列表」保留为 `.sr-only` 视觉隐藏文本，确保现有自动化测试与屏幕阅读器无障碍树完全兼容。
 - macOS 桌面端：
   - `tauri.conf.json` 开启 `titleBarStyle: "Overlay"` 与 `hiddenTitle: true`。
-  - 侧边栏顶栏设置左侧避让交通灯间距（约 76px）及 `data-tauri-drag-region`，支持全顶栏拖拽窗口。
+  - macOS Tauri 桌面端（`isTauri()`）侧边栏顶栏设置左侧避让交通灯间距（约 76px）及 `data-tauri-drag-region`，支持全顶栏拖拽窗口；桌面浏览器不预留交通灯空白，左对齐展示 `Waypoint` 标识并把操作按钮收拢到右侧。
   - UI 框架全站禁用文本选区，仅消息段落与代码块允许选中文本。
 - 手机移动端：
   - `index.html` 补齐 `viewport-fit=cover`，样式严格消费 `env(safe-area-inset-top)` 与 `env(safe-area-inset-bottom)`。

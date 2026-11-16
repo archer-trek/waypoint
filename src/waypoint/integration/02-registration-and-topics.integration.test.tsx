@@ -82,9 +82,11 @@ test("已经同步过再打开时，继续用同步游标，不改去 well_known
   renderApp(homeserver);
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
-  const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
-  expect(continued.at(-1)?.url).toBe("https://matrix.example.com/_matrix/client/v3/sync?since=batch-kept");
-  expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+  await waitFor(() => {
+    const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
+    expect(continued.at(-1)?.url).toBe("https://matrix.example.com/_matrix/client/v3/sync?since=batch-kept");
+    expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+  });
   expect(homeserver.requests.some((request) => request.url.includes("/account_data"))).toBe(false);
   expect(homeserver.requests.some((request) => request.url.includes("/profile"))).toBe(false);
 });

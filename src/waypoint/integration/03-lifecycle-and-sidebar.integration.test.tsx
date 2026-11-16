@@ -191,6 +191,7 @@ test("窄视口支持系统返回（adapter onSystemBack 与浏览器 popstate�
   expect(await screen.findByText("系统返回话题")).toBeInTheDocument();
   expect(pushed).toBe(0);
   // 列表页时系统返回不消费事件
+  await waitFor(() => expect(backHandler).toBeTypeOf("function"));
   expect(backHandler?.()).toBe(false);
 
   // 打开 Topic 推入历史项；系统返回消费事件并回到列表，不再额外 pop

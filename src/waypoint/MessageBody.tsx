@@ -2,16 +2,22 @@ import {
   Component,
   Fragment,
   isValidElement,
+  useEffect,
   useMemo,
+  useRef,
+  useState,
   type ComponentProps,
   type ComponentType,
   type ErrorInfo,
   type ReactNode,
 } from "react";
 import {
+  CodeBlock,
   Streamdown,
+  defaultComponents,
   defaultRehypePlugins,
   defaultRemarkPlugins,
+  useIsCodeFenceIncomplete,
   type Components,
   type ExtraProps,
   type MathPlugin,
@@ -21,11 +27,14 @@ import { createCjkPlugin } from "@streamdown/cjk";
 import { createCodePlugin } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 import {
+  Check,
+  Copy,
   Info,
   Lightbulb,
   MessageSquareWarning,
   OctagonAlert,
   TriangleAlert,
+  WrapText,
 } from "lucide-react";
 import "katex/dist/katex.min.css";
 import {
@@ -189,6 +198,183 @@ function hasRenderableChildren(children: ReactNode): boolean {
   return true;
 }
 
+const CODE_LANG_RE = /language-([^\s]+)/;
+const CODE_START_LINE_RE = /startLine=(\d+)/;
+
+function extractCodeText(children: ReactNode): string {
+  if (typeof children === "string") {
+    return children;
+  }
+  if (Array.isArray(children)) {
+    return children.map(extractCodeText).join("");
+  }
+  if (isValidElement<{ children?: ReactNode }>(children)) {
+    return extractCodeText(children.props.children);
+  }
+  return "";
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall back to execCommand when Clipboard API rejects or is blocked.
+    }
+  }
+
+  if (typeof document === "undefined" || typeof document.execCommand !== "function") {
+    return false;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.width = "1px";
+  textarea.style.height = "1px";
+  textarea.style.padding = "0";
+  textarea.style.border = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  textarea.style.fontSize = "16px";
+  textarea.style.userSelect = "text";
+
+  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.body.appendChild(textarea);
+  try {
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(textarea);
+    if (activeElement && activeElement.isConnected) {
+      activeElement.focus({ preventScroll: true });
+    }
+  }
+}
+
+function WaypointCodeCopyButton({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    };
+  }, []);
+
+  const handleCopy = async () => {
+    if (copied) {
+      return;
+    }
+    const ok = await copyTextToClipboard(code);
+    if (!ok) {
+      return;
+    }
+    setCopied(true);
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+    }
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      setCopied(false);
+    }, 2000);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        data-streamdown="code-block-copy-button"
+        aria-label={STREAMDOWN_TRANSLATIONS.copyCode}
+        title={STREAMDOWN_TRANSLATIONS.copyCode}
+        onClick={handleCopy}
+      >
+        {copied ? (
+          <Check aria-hidden="true" className="size-3.5" />
+        ) : (
+          <Copy aria-hidden="true" className="size-3.5" />
+        )}
+      </button>
+      {copied ? (
+        <output aria-live="polite" className="sr-only">
+          {STREAMDOWN_TRANSLATIONS.copied}
+        </output>
+      ) : null}
+    </>
+  );
+}
+
+type CodeElementProps = ComponentProps<"code"> &
+  ExtraProps & {
+    "data-block"?: string;
+  };
+
+function WaypointCodeBlock({
+  children,
+  className,
+  node,
+  "data-block": _dataBlock,
+  ...rest
+}: CodeElementProps) {
+  const [wrapped, setWrapped] = useState(false);
+  const isIncomplete = useIsCodeFenceIncomplete();
+  const language = className?.match(CODE_LANG_RE)?.at(1) ?? "";
+  const metastring =
+    typeof node?.properties?.metastring === "string" ? node.properties.metastring : undefined;
+  const startLineMatch = metastring?.match(CODE_START_LINE_RE);
+  const parsedStartLine = startLineMatch ? Number.parseInt(startLineMatch[1]!, 10) : undefined;
+  const startLine = parsedStartLine !== undefined && parsedStartLine >= 1 ? parsedStartLine : undefined;
+  const code = extractCodeText(children);
+  const wrapLabel = wrapped ? "取消折行" : "允许折行";
+
+  return (
+    <CodeBlock
+      className={className}
+      code={code}
+      isIncomplete={isIncomplete}
+      language={language}
+      lineNumbers={false}
+      startLine={startLine}
+      data-wrapped={wrapped ? "true" : undefined}
+      {...rest}
+    >
+      <button
+        type="button"
+        data-streamdown="code-block-wrap-button"
+        aria-label={wrapLabel}
+        aria-pressed={wrapped}
+        title={wrapLabel}
+        onClick={() => setWrapped((prev) => !prev)}
+      >
+        <WrapText aria-hidden="true" className="size-3.5" />
+      </button>
+      <WaypointCodeCopyButton code={code} />
+    </CodeBlock>
+  );
+}
+
+const DefaultCodeComponent = defaultComponents.code;
+
+function WaypointCode(props: CodeElementProps) {
+  if (!("data-block" in props)) {
+    return <DefaultCodeComponent {...props} />;
+  }
+  return <WaypointCodeBlock {...props} />;
+}
+
 const STREAMDOWN_COMPONENTS: Components = {
   p: ({ children, node: _node, className, ...props }: ComponentProps<"div"> & ExtraProps) => {
     const items = (Array.isArray(children) ? children : [children]).filter(
@@ -214,6 +400,7 @@ const STREAMDOWN_COMPONENTS: Components = {
     const label = alt?.trim() ? alt : (src ?? "");
     return <span className="waypoint-md-image-placeholder text-muted-foreground">{label}</span>;
   },
+  code: WaypointCode as Components["code"],
 };
 
 const STREAMDOWN_CONTROLS = {
