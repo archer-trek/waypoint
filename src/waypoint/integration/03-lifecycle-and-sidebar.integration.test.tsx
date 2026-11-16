@@ -3622,7 +3622,7 @@ test("Agent 消息靠左且气泡无名字头像时刻，只渲染 body（纯文
                       origin_server_ts: day1Ts,
                       content: {
                         msgtype: "m.text",
-                        body: "纯文本正文 <b>字面标签</b> <script>window.__waypointXss=true</script>",
+                        body: "纯文本正文 <div onclick=\"window.__waypointXss=true\">字面标签</div> <script>window.__waypointXss=true</script>",
                         format: "org.matrix.custom.html",
                         formatted_body: "<p>绝不应渲染的HTML</p><img src=\"x\" onerror=\"window.__waypointXss=true\"><script>window.__waypointXss=true</script>",
                       },
@@ -3684,9 +3684,10 @@ test("Agent 消息靠左且气泡无名字头像时刻，只渲染 body（纯文
   const bubble = agentRow.querySelector(".waypoint-bubble");
   expect(bubble).not.toBeNull();
   expect(bubble?.textContent).toBe(
-    "纯文本正文 <b>字面标签</b> <script>window.__waypointXss=true</script>",
+    "纯文本正文 <div onclick=\"window.__waypointXss=true\">字面标签</div> <script>window.__waypointXss=true</script>",
   );
-  expect(bubble?.querySelector("b")).toBeNull();
+  expect(bubble?.querySelector("[onclick]")).toBeNull();
+  expect(bubble?.querySelector(".waypoint-md-p > div")).toBeNull();
   expect(bubble?.querySelector("script")).toBeNull();
   expect(bubble?.querySelector("img")).toBeNull();
   expect(bubble?.querySelector("p")).toBeNull();

@@ -4,12 +4,14 @@ import {
   isValidElement,
   useMemo,
   type ComponentProps,
+  type ComponentType,
   type ErrorInfo,
   type ReactNode,
 } from "react";
 import {
   Streamdown,
   defaultRehypePlugins,
+  defaultRemarkPlugins,
   type Components,
   type ExtraProps,
   type MathPlugin,
@@ -18,7 +20,20 @@ import {
 import { createCjkPlugin } from "@streamdown/cjk";
 import { createCodePlugin } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
+import {
+  Info,
+  Lightbulb,
+  MessageSquareWarning,
+  OctagonAlert,
+  TriangleAlert,
+} from "lucide-react";
 import "katex/dist/katex.min.css";
+import {
+  CALLOUT_TYPES,
+  createAgentSanitizePlugin,
+  remarkAgentColorAndCallout,
+  type CalloutType,
+} from "./markdown-color";
 
 interface PandocMathTokenizerContext {
   events: Array<[string, { type: string; start: { offset: number }; end: { offset: number } }, unknown]>;
@@ -132,6 +147,47 @@ const SAFE_REHYPE_PLUGINS = [
   defaultRehypePlugins.sanitize,
   defaultRehypePlugins.harden,
 ];
+
+const AGENT_REMARK_PLUGINS = [
+  ...Object.values(defaultRemarkPlugins),
+  remarkAgentColorAndCallout,
+];
+
+const AGENT_REHYPE_PLUGINS = [
+  createAgentSanitizePlugin(),
+  defaultRehypePlugins.harden,
+];
+
+const CALLOUT_META: Record<
+  CalloutType,
+  {
+    label: string;
+    icon: ComponentType<{ className?: string; "aria-hidden"?: boolean }>;
+  }
+> = {
+  note: { label: "Note", icon: Info },
+  tip: { label: "Tip", icon: Lightbulb },
+  important: { label: "Important", icon: MessageSquareWarning },
+  warning: { label: "Warning", icon: TriangleAlert },
+  caution: { label: "Caution", icon: OctagonAlert },
+};
+
+function isCalloutType(value: unknown): value is CalloutType {
+  return typeof value === "string" && (CALLOUT_TYPES as readonly string[]).includes(value);
+}
+
+function hasRenderableChildren(children: ReactNode): boolean {
+  if (children == null || typeof children === "boolean") {
+    return false;
+  }
+  if (typeof children === "string") {
+    return children.trim().length > 0;
+  }
+  if (Array.isArray(children)) {
+    return children.some(hasRenderableChildren);
+  }
+  return true;
+}
 
 const STREAMDOWN_COMPONENTS: Components = {
   p: ({ children, node: _node, className, ...props }: ComponentProps<"div"> & ExtraProps) => {
@@ -249,13 +305,52 @@ function normalizeExternalHref(href: string | undefined): string | undefined {
 export function MessageBody({
   body,
   onOpenExternalUrl,
+  richColor = false,
 }: {
   body: string;
   onOpenExternalUrl?: (url: string) => void;
+  richColor?: boolean;
 }) {
   const components = useMemo<Components>(
     () => ({
       ...STREAMDOWN_COMPONENTS,
+      blockquote: ({
+        children,
+        node: _node,
+        className,
+        ...props
+      }: ComponentProps<"blockquote"> & ExtraProps & { "data-callout"?: string }) => {
+        const calloutType = props["data-callout"];
+        if (richColor && isCalloutType(calloutType)) {
+          const meta = CALLOUT_META[calloutType];
+          const Icon = meta.icon;
+          const { "data-callout": _dc, ...rest } = props;
+          const showBody = hasRenderableChildren(children);
+          return (
+            <div
+              role="note"
+              data-callout={calloutType}
+              className={className ? `waypoint-callout ${className}` : "waypoint-callout"}
+              {...(rest as ComponentProps<"div">)}
+            >
+              <div className="waypoint-callout-title">
+                <Icon aria-hidden={true} className="waypoint-callout-icon size-4 shrink-0" />
+                <span>{meta.label}</span>
+              </div>
+              {showBody ? <div className="waypoint-callout-body">{children}</div> : null}
+            </div>
+          );
+        }
+        return (
+          <blockquote
+            data-streamdown="blockquote"
+            className={className}
+            {...props}
+          >
+            {children}
+          </blockquote>
+        );
+      },
       a: ({
         children,
         href,
@@ -289,7 +384,7 @@ export function MessageBody({
         );
       },
     }),
-    [onOpenExternalUrl],
+    [onOpenExternalUrl, richColor],
   );
 
   const plugins = getStreamdownPlugins();
@@ -303,7 +398,8 @@ export function MessageBody({
         className="waypoint-markdown"
         mode="static"
         plugins={plugins}
-        rehypePlugins={SAFE_REHYPE_PLUGINS}
+        remarkPlugins={richColor ? AGENT_REMARK_PLUGINS : undefined}
+        rehypePlugins={richColor ? AGENT_REHYPE_PLUGINS : SAFE_REHYPE_PLUGINS}
         components={components}
         controls={STREAMDOWN_CONTROLS}
         remend={STREAMDOWN_REMEND}

@@ -5340,3 +5340,117 @@ test("成对单/双美元按公式排版，不成对美元保持原文，渲染�
   expect(errorEl).not.toBeNull();
   expect(errorEl?.textContent).toContain("\\frac{1}{");
 });
+
+test("Agent 回复支持受控行内着色与 GFM Callout，非白名单 HTML 保持纯文本，Owner 气泡不启用彩色渲染 (#103)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const ts = new Date(2026, 10, 12, 10, 15, 0).getTime();
+
+  const agentBody = [
+    '<span style="color: red; position: fixed" onclick="window.__int103Xss=true">**危险提示**</span> 与 <font color="green"><b>[OK]</b> 绿色说明</font>',
+    "",
+    '<div>字面标签</div> <script>window.__int103Xss=true</script>',
+    "",
+    "> [!WARNING]",
+    "> 注意检查配置",
+  ].join("\n");
+
+  const ownerBody = [
+    '<span style="color: red">Owner纯文本</span>',
+    "",
+    "> [!NOTE]",
+    "> Owner普通引用",
+  ].join("\n");
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: ts, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "着色渲染话题" } },
+                  ],
+                },
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$agent-color-1",
+                      sender: "@bot:example.com",
+                      origin_server_ts: ts,
+                      content: { msgtype: "m.text", body: agentBody },
+                    },
+                    {
+                      type: "m.room.message",
+                      event_id: "$owner-plain-1",
+                      sender: "@alice:example.com",
+                      origin_server_ts: ts + 1000,
+                      content: { msgtype: "m.text", body: ownerBody },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(input.url);
+  });
+
+  const clock = new ManualClock();
+  clock.now = ts;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "着色渲染话题" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const agentBubble = timeline.querySelector('[data-side="left"] .waypoint-bubble') as HTMLElement;
+  const ownerBubble = timeline.querySelector('[data-side="right"] .waypoint-bubble') as HTMLElement;
+  expect(agentBubble).not.toBeNull();
+  expect(ownerBubble).not.toBeNull();
+
+  // Agent 侧：安全着色 span 生效、危险 CSS/事件被清洗、非白名单 HTML 保留字面纯文本
+  const agentSpans = Array.from(agentBubble.querySelectorAll("span[style]")) as HTMLElement[];
+  expect(agentSpans).toHaveLength(2);
+  expect(agentSpans[0]!.style.color).toBe("red");
+  expect(agentSpans[0]!.style.position).toBe("");
+  expect(agentSpans[0]!.querySelector('[data-streamdown="strong"]')?.textContent).toBe("危险提示");
+  expect(agentSpans[1]!.style.color).toBe("green");
+  expect(agentSpans[1]!.querySelector("b")?.textContent).toBe("[OK]");
+  expect(agentSpans[1]!.textContent).toBe("[OK] 绿色说明");
+  expect(agentBubble.querySelector("font")).toBeNull();
+  expect(agentBubble.querySelector("[onclick]")).toBeNull();
+  expect(agentBubble.querySelector(".waypoint-md-p > div")).toBeNull();
+  expect(agentBubble.querySelector("script")).toBeNull();
+  expect((window as { __int103Xss?: boolean }).__int103Xss).toBeUndefined();
+  expect(agentBubble.textContent).toContain("<div>字面标签</div>");
+  expect(agentBubble.textContent).toContain("<script>window.__int103Xss=true</script>");
+
+  // Agent 侧：GFM Callout 渲染
+  const warningCallout = agentBubble.querySelector('.waypoint-callout[data-callout="warning"]') as HTMLElement;
+  expect(warningCallout).not.toBeNull();
+  expect(warningCallout.querySelector(".waypoint-callout-title")?.textContent).toBe("Warning");
+  expect(warningCallout.textContent).toContain("注意检查配置");
+
+  // Owner 侧：不启用彩色标签与 Callout 卡片
+  expect(ownerBubble.querySelector("span[style]")).toBeNull();
+  expect(ownerBubble.querySelector(".waypoint-callout")).toBeNull();
+  expect(ownerBubble.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
+  expect(ownerBubble.textContent).toContain('<span style="color: red">Owner纯文本</span>');
+});
