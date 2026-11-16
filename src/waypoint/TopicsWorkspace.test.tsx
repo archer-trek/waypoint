@@ -1292,4 +1292,305 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     expect(await within(sidebar).findByRole("status", { name: "重新验证提示" })).toBeInTheDocument();
     expect(within(sidebar).getByRole("button", { name: "新建 Topic" })).toBeDisabled();
   });
+
+  test("timeline stays anchored to bottom on keyboard inset and ResizeObserver shrink, while preserving history scroll position and expanded description", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: { next_batch: "batch-stay" },
+        };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const messages = Array.from({ length: 10 }, (_, idx) =>
+      makeTextEvent(`$m${idx + 1}`, "@bot:example.com", `消息 ${idx + 1}`, 1000 + idx * 100),
+    );
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!t1:example.com": makeStoredRoom({
+          name: "锚定测试",
+          description: "Topic 详细描述内容",
+          messages,
+        }),
+      },
+    });
+
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const offsetHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+    const offsetTopDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop");
+
+    let timelineViewportHeight = 600;
+    const observers = new Set<{ target: Element; callback: ResizeObserverCallback }>();
+    class FakeResizeObserver {
+      private callback: ResizeObserverCallback;
+      private observed = new Set<Element>();
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+      }
+      observe(target: Element) {
+        this.observed.add(target);
+        observers.add({ target, callback: this.callback });
+      }
+      unobserve(target: Element) {
+        this.observed.delete(target);
+      }
+      disconnect() {
+        for (const entry of [...observers]) {
+          if (this.observed.has(entry.target) && entry.callback === this.callback) {
+            observers.delete(entry);
+          }
+        }
+        this.observed.clear();
+      }
+    }
+    const triggerTimelineResize = (nextHeight: number) => {
+      timelineViewportHeight = nextHeight;
+      for (const entry of observers) {
+        if ((entry.target as HTMLElement).classList?.contains("waypoint-timeline")) {
+          entry.callback([], {} as ResizeObserver);
+        }
+      }
+    };
+
+    globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          return timelineViewportHeight;
+        }
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          return this.querySelectorAll("[data-event-id]").length * 100;
+        }
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get() {
+        if (this.dataset?.eventId) {
+          return 100;
+        }
+        return offsetHeightDesc?.get ? offsetHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get() {
+        if (this.dataset?.eventId && this.parentElement) {
+          const rows = Array.from(this.parentElement.querySelectorAll("[data-event-id]"));
+          const idx = rows.indexOf(this);
+          if (idx >= 0) {
+            return idx * 100;
+          }
+        }
+        return offsetTopDesc?.get ? offsetTopDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const clock = new ManualClock();
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={0}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /锚定测试/ }));
+      const timeline = screen.getByRole("log", { name: "对话时间线" });
+      // Initial landing at bottom: 10*100 - 600 = 400
+      expect(timeline.scrollTop).toBe(400);
+
+      // Expand description; programmatic scroll later must not collapse it
+      const descBtn = screen.getByRole("button", { name: "Topic 详细描述内容" });
+      await user.click(descBtn);
+      expect(descBtn).toHaveAttribute("aria-expanded", "true");
+
+      // 1. Soft keyboard opens (600 -> 288) while at bottom -> scrollTop moves up to 712
+      timelineViewportHeight = 288;
+      view.rerender(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={312}
+        />,
+      );
+      expect(timeline.scrollTop).toBe(712);
+      // Simulating native scroll event fired for programmatic scrollTop assignment
+      fireEvent.scroll(timeline);
+      expect(descBtn).toHaveAttribute("aria-expanded", "true");
+
+      // 2. Composer grows multiline via ResizeObserver (288 -> 240) while at bottom -> scrollTop moves up to 760
+      act(() => {
+        triggerTimelineResize(240);
+      });
+      expect(timeline.scrollTop).toBe(760);
+
+      // 3. Keyboard closes (240 -> 600) while at bottom -> scrollTop clamps back to 400
+      timelineViewportHeight = 600;
+      view.rerender(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={0}
+        />,
+      );
+      expect(timeline.scrollTop).toBe(400);
+
+      // 4. User scrolls up to read history (scrollTop = 100) -> collapses description and unlocks from bottom
+      timeline.scrollTop = 100;
+      fireEvent.scroll(timeline);
+      expect(descBtn).toHaveAttribute("aria-expanded", "false");
+      expect(screen.getByRole("button", { name: "回到底部" })).toBeInTheDocument();
+
+      // Keyboard opens while reading history -> scrollTop stays at 100 (does not jump to bottom)
+      timelineViewportHeight = 288;
+      view.rerender(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={312}
+        />,
+      );
+      expect(timeline.scrollTop).toBe(100);
+
+      // Composer multiline while reading history -> scrollTop still stays at 100
+      act(() => {
+        triggerTimelineResize(240);
+      });
+      expect(timeline.scrollTop).toBe(100);
+
+      view.unmount();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+      if (offsetHeightDesc) Object.defineProperty(HTMLElement.prototype, "offsetHeight", offsetHeightDesc);
+      if (offsetTopDesc) Object.defineProperty(HTMLElement.prototype, "offsetTop", offsetTopDesc);
+    }
+  });
+
+  test("short timeline initially fitting viewport scrolls up when keyboard shrinks viewport below scrollHeight", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return {
+          type: "response",
+          status: 200,
+          body: { next_batch: "batch-short" },
+        };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const messages = Array.from({ length: 4 }, (_, idx) =>
+      makeTextEvent(`$s${idx + 1}`, "@bot:example.com", `短对话 ${idx + 1}`, 2000 + idx * 100),
+    );
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!short:example.com": makeStoredRoom({
+          name: "短对话锚定",
+          messages,
+        }),
+      },
+    });
+
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    let timelineViewportHeight = 600;
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          return timelineViewportHeight;
+        }
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          return this.querySelectorAll("[data-event-id]").length * 100;
+        }
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const clock = new ManualClock();
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={0}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /短对话锚定/ }));
+      const timeline = screen.getByRole("log", { name: "对话时间线" });
+      expect(timeline.scrollTop).toBe(0);
+
+      // Keyboard opens (600 -> 288 < scrollHeight 400) -> scrollTop shifts to 112
+      timelineViewportHeight = 288;
+      view.rerender(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={312}
+        />,
+      );
+      expect(timeline.scrollTop).toBe(112);
+
+      // Keyboard closes (288 -> 600) -> scrollTop returns to 0
+      timelineViewportHeight = 600;
+      view.rerender(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={0}
+        />,
+      );
+      expect(timeline.scrollTop).toBe(0);
+
+      view.unmount();
+    } finally {
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    }
+  });
 });
