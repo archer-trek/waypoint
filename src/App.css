@@ -202,8 +202,8 @@
     height: 100dvh;
     margin: 0;
     font-family: var(--font-sans);
-    /* Document-flow base (1rem = 15.5px); mobile list/chrome controls use explicit px sizes to avoid unintended shrinking. */
-    font-size: 15.5px;
+    /* Document-flow base (1rem = 16px); mobile list/chrome controls use explicit px sizes to avoid unintended shrinking. */
+    font-size: 16px;
     line-height: 1.6;
     background: var(--background);
     color: var(--foreground);
@@ -333,26 +333,26 @@ a {
 .waypoint-markdown h4 {
   color: var(--foreground);
   font-weight: 700;
-  line-height: 1.38;
+  line-height: 1.35;
   margin-top: 1.15rem;
   margin-bottom: 0.45rem;
   letter-spacing: -0.01em;
 }
 
 .waypoint-markdown h1 {
-  font-size: 1.4rem;
+  font-size: 1.45em;
 }
 
 .waypoint-markdown h2 {
-  font-size: 1.25rem;
+  font-size: 1.28em;
 }
 
 .waypoint-markdown h3 {
-  font-size: 1.1rem;
+  font-size: 1.15em;
 }
 
 .waypoint-markdown h4 {
-  font-size: 1.02rem;
+  font-size: 1.05em;
 }
 
 .waypoint-markdown [data-streamdown="ordered-list"],
@@ -360,7 +360,7 @@ a {
   margin: 0.5rem 0;
   padding-left: 1.35rem;
   list-style-position: outside;
-  line-height: 1.58;
+  line-height: 1.5;
   color: var(--foreground);
 }
 
@@ -400,9 +400,9 @@ a {
 .waypoint-message-row.left .waypoint-md-p,
 .waypoint-message-row.left p {
   max-width: min(42rem, 100%);
-  margin: 0.65rem 0;
-  line-height: 1.58;
-  font-size: 15.5px;
+  margin: 0.5rem 0;
+  line-height: 1.5;
+  font-size: 16px;
   color: var(--foreground);
 }
 
@@ -757,15 +757,15 @@ a {
 
 /* Blockquote */
 .waypoint-markdown [data-streamdown="blockquote"] {
-  margin: 1rem 0;
+  margin: 0.875rem 0;
   padding: 0.75rem 1.125rem;
   border-left: 3px solid var(--muted-foreground);
   border-radius: 0 var(--radius-md) var(--radius-md) 0;
   background: var(--muted);
   color: var(--muted-foreground);
-  font-size: 0.9375rem;
+  font-size: 0.9375em;
   font-style: normal;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
 .waypoint-markdown [data-streamdown="blockquote"] > *:first-child {
@@ -778,14 +778,14 @@ a {
 
 /* GFM Callouts (Agent reading content, ADR-0027) */
 .waypoint-markdown .waypoint-callout {
-  margin: 1.125rem 0;
+  margin: 1rem 0;
   padding: 0.75rem 1rem;
   border: 1px solid var(--border);
   border-left-width: 3px;
   border-radius: var(--radius-md);
   color: var(--foreground);
-  font-size: 0.9375rem;
-  line-height: 1.65;
+  font-size: 0.9375em;
+  line-height: 1.55;
 }
 
 .waypoint-markdown .waypoint-callout-title {

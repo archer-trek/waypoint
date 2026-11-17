@@ -22,7 +22,7 @@ export function EmptyInvitation({
       className="waypoint-empty-detail flex flex-1 flex-col items-center justify-center px-6 py-10 text-center text-muted-foreground"
     >
       <div className="waypoint-empty-card flex w-full max-w-sm flex-col items-center gap-5 rounded-2xl border border-dashed border-border bg-muted/40 px-6 py-8">
-        <p className="m-0 text-[0.9375rem] leading-relaxed text-muted-foreground">
+        <p className="m-0 text-[15px] leading-relaxed text-muted-foreground">
           {topicsCount === 0
             ? "还没有 Topic，新建一条 Topic 开始交流。"
             : "选择一条 Topic，或新建一条 Topic 开始交流。"}
@@ -40,7 +40,7 @@ export function EmptyInvitation({
         {shortcut === false ? null : (
           <div className="waypoint-empty-shortcut-hint flex items-center gap-1.5 text-xs text-muted-foreground">
             快捷键{" "}
-            <kbd className="waypoint-kbd-hint rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[0.6875rem] text-muted-foreground">
+            <kbd className="waypoint-kbd-hint rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">
               Alt + N
             </kbd>
           </div>

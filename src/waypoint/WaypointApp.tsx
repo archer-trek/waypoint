@@ -749,7 +749,7 @@ export function WaypointApp({
         : "waypoint-auth-fade";
 
   const authInputClassName = cn(
-    "mt-0 rounded-xl border-border/80 bg-secondary/45 px-3.5 text-[15.5px] shadow-none transition-colors focus-visible:bg-background select-text",
+    "mt-0 rounded-xl border-border/80 bg-secondary/45 px-3.5 text-[16px] shadow-none transition-colors focus-visible:bg-background select-text",
     isNarrow ? "h-12" : "h-11",
   );
 

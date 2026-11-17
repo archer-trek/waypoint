@@ -81,14 +81,14 @@ export function TopicHeaderView({
           </Button>
         ) : null}
         <div className="waypoint-topic-header-main flex flex-col justify-center min-w-0 flex-1">
-          <h2 className="m-0 text-[1.2rem] font-bold leading-snug tracking-tight text-foreground truncate">
+          <h2 className="m-0 text-[19px] sm:text-[20px] font-bold leading-snug tracking-tight text-foreground truncate">
             {topic.name}
           </h2>
           {topic.description ? (
             <button
               type="button"
               className={cn(
-                "waypoint-topic-description block w-full text-left bg-transparent border-0 p-0 m-0 mt-0.5 text-sm leading-[1.35] text-muted-foreground hover:text-foreground cursor-pointer",
+                "waypoint-topic-description block w-full text-left bg-transparent border-0 p-0 m-0 mt-0.5 text-[14px] leading-[1.35] text-muted-foreground hover:text-foreground cursor-pointer",
                 descriptionExpanded
                   ? "expanded whitespace-pre-wrap overflow-visible"
                   : "truncate",

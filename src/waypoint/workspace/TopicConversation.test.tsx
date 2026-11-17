@@ -235,7 +235,8 @@ describe("TimelineView (#89)", () => {
       "border-0",
       "shadow-none",
       "max-w-[min(42rem,100%)]",
-      "leading-[1.58]",
+      "leading-[1.5]",
+      "text-[16px]",
     );
 
     const ownerRow = timeline.querySelector('[data-event-id="$owner-1"]') as HTMLElement;
@@ -249,6 +250,7 @@ describe("TimelineView (#89)", () => {
       "rounded-2xl",
       "px-4",
       "py-2.5",
+      "text-[16px]",
     );
 
     expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();

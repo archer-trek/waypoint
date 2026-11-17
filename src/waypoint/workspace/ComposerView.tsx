@@ -93,7 +93,7 @@ export function ComposerView({
         <div
           role="region"
           aria-label="已选附件"
-          className="waypoint-draft-attachment flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[0.8125rem]"
+          className="waypoint-draft-attachment flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[13px]"
         >
           <span className="waypoint-draft-attachment-name min-w-0 truncate text-foreground">
             {draftAttachmentName}
@@ -127,7 +127,7 @@ export function ComposerView({
                   type="button"
                   variant="secondary"
                   size="sm"
-                  className="waypoint-slash-hint-button h-7 px-2.5 font-mono text-[0.8125rem] border border-border/80 hover:bg-accent hover:text-accent-foreground"
+                  className="waypoint-slash-hint-button h-7 px-2.5 font-mono text-[13px] border border-border/80 hover:bg-accent hover:text-accent-foreground"
                   onClick={() => onSelectSlashCommand(command)}
                 >
                   {command}
