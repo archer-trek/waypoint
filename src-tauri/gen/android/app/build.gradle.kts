@@ -32,10 +32,7 @@ android {
             isJniDebuggable = true
             isMinifyEnabled = false
             packaging {
-                jniLibs.keepDebugSymbols.add("*/arm64-v8a/*.so")
-                jniLibs.keepDebugSymbols.add("*/armeabi-v7a/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86/*.so")
-                jniLibs.keepDebugSymbols.add("*/x86_64/*.so")
+                // Stripped debug symbols to keep APK slim for testing
             }
         }
         getByName("release") {
