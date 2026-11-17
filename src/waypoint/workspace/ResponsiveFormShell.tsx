@@ -1,18 +1,31 @@
 import type { ReactNode } from "react";
 import { ArrowLeft, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useState } from "react";
 
 export type ResponsiveFormShellProps = {
   title: string;
   isModal: boolean;
   isNarrow: boolean;
   safeInset: number;
+  isDirty?: boolean;
   closeDisabled?: boolean;
   backDisabled?: boolean;
   nestedModalOpen?: boolean;
@@ -33,6 +46,7 @@ export function ResponsiveFormShell({
   isModal,
   isNarrow,
   safeInset,
+  isDirty = false,
   closeDisabled = false,
   backDisabled = false,
   nestedModalOpen = false,
@@ -43,29 +57,87 @@ export function ResponsiveFormShell({
   onEscapeKeyDown,
   children,
 }: ResponsiveFormShellProps) {
+  const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
+  const [pendingExit, setPendingExit] = useState<(() => void) | null>(null);
+
+  function requestExit(action: () => void) {
+    if (isDirty) {
+      setPendingExit(() => action);
+      setConfirmDiscardOpen(true);
+    } else {
+      action();
+    }
+  }
+
+  function handleConfirmDiscard() {
+    setConfirmDiscardOpen(false);
+    const action = pendingExit;
+    setPendingExit(null);
+    action?.();
+  }
+
+  function handleCancelDiscard() {
+    setConfirmDiscardOpen(false);
+    setPendingExit(null);
+  }
+
+  const discardDialog = confirmDiscardOpen ? (
+    <AlertDialog
+      open={confirmDiscardOpen}
+      onOpenChange={(open) => {
+        if (!open) handleCancelDiscard();
+      }}
+    >
+      <AlertDialogContent
+        role="alertdialog"
+        aria-label="放弃未保存的更改吗？"
+      >
+        <AlertDialogHeader>
+          <AlertDialogTitle>放弃未保存的更改吗？</AlertDialogTitle>
+          <AlertDialogDescription>
+            当前输入的内容将不会被保存。
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={handleCancelDiscard}>
+            继续编辑
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className={cn(buttonVariants({ variant: "destructive" }), "min-h-11 sm:min-h-9")}
+            onClick={handleConfirmDiscard}
+          >
+            放弃更改
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  ) : null;
+
   if (isModal && !isNarrow) {
     const blockDismiss = closeDisabled || nestedModalOpen;
     return (
-      <Dialog
-        open
-        onOpenChange={(open) => {
-          if (!open && !blockDismiss) {
-            onClose();
-          }
-        }}
-      >
-        <DialogContent
-          role="region"
-          aria-label={title}
-          aria-modal="true"
-          aria-describedby={undefined}
-          showCloseButton={false}
-          overlayClassName="waypoint-modal-backdrop"
-          onOverlayClick={() => {
-            if (!blockDismiss) {
-              onClose();
+      <>
+        {discardDialog}
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !blockDismiss) {
+              requestExit(onClose);
             }
           }}
+        >
+          <DialogContent
+            role="region"
+            aria-label={title}
+            aria-modal="true"
+            aria-describedby={undefined}
+            showCloseButton={false}
+            overlayClassName="waypoint-modal-backdrop"
+            onOverlayClick={() => {
+              if (!blockDismiss) {
+                requestExit(onClose);
+              }
+            }}
           onEscapeKeyDown={(event) => {
             if (blockDismiss) {
               event.preventDefault();
@@ -109,7 +181,7 @@ export function ResponsiveFormShell({
                   size="icon"
                   aria-label="关闭"
                   disabled={closeDisabled}
-                  onClick={onClose}
+                  onClick={() => requestExit(onClose)}
                   className="size-8 shrink-0 text-muted-foreground hover:text-foreground"
                 >
                   <X className="size-4" aria-hidden="true" />
@@ -120,28 +192,31 @@ export function ResponsiveFormShell({
           </div>
         </DialogContent>
       </Dialog>
+      </>
     );
   }
 
   return (
-    <section
-      aria-label={title}
-      role="region"
-      className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background"
-    >
-      <div
-        className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur-xs"
-        style={{ paddingTop: "max(0.5rem, env(safe-area-inset-top, 0px))" }}
+    <>
+      {discardDialog}
+      <section
+        aria-label={title}
+        role="region"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background"
       >
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label="返回"
-          disabled={backDisabled}
-          onClick={onGoBack}
-          className="size-11 shrink-0 rounded-full text-foreground"
+        <div
+          className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur-xs"
+          style={{ paddingTop: "max(0.5rem, env(safe-area-inset-top, 0px))" }}
         >
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="返回"
+            disabled={backDisabled}
+            onClick={() => requestExit(onGoBack)}
+            className="size-11 shrink-0 rounded-full text-foreground"
+          >
           <ArrowLeft className="size-5" aria-hidden="true" />
           <span className="sr-only">返回</span>
         </Button>
@@ -161,6 +236,7 @@ export function ResponsiveFormShell({
       >
         {children}
       </div>
-    </section>
+      </section>
+    </>
   );
 }

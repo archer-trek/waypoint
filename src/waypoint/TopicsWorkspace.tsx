@@ -154,6 +154,87 @@ export function TopicsWorkspace({
   const persistingSendRef = useRef(false);
   const [openFailedMenu, setOpenFailedMenu] = useState<{ roomId: string; id: string } | null>(null);
   const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
+  const [headerElevated, setHeaderElevated] = useState(false);
+  const [swipeBackOffset, setSwipeBackOffset] = useState(0);
+  const [isSwipingBack, setIsSwipingBack] = useState(false);
+  const edgeSwipeTrackingRef = useRef<{
+    startX: number;
+    startY: number;
+    tracking: boolean;
+  } | null>(null);
+
+  function isInsideScrolledHorizontalContainer(target: EventTarget | null): boolean {
+    let el = target as HTMLElement | null;
+    while (el && el !== document.body) {
+      if (
+        (el.tagName.toLowerCase() === "pre" ||
+          el.tagName.toLowerCase() === "code" ||
+          el.getAttribute("data-streamdown") === "table-wrapper" ||
+          el.getAttribute("data-streamdown") === "code-block-body") &&
+        el.scrollWidth > el.clientWidth &&
+        el.scrollLeft > 0
+      ) {
+        return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
+  }
+
+  function handleEdgeSwipeTouchStart(event: React.TouchEvent<HTMLDivElement>) {
+    if (event.touches.length !== 1) {
+      edgeSwipeTrackingRef.current = null;
+      return;
+    }
+    const touch = event.touches[0]!;
+    if (touch.clientX > 24) {
+      edgeSwipeTrackingRef.current = null;
+      return;
+    }
+    if (isInsideScrolledHorizontalContainer(event.target)) {
+      edgeSwipeTrackingRef.current = null;
+      return;
+    }
+    edgeSwipeTrackingRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      tracking: true,
+    };
+  }
+
+  function handleEdgeSwipeTouchMove(event: React.TouchEvent<HTMLDivElement>) {
+    const track = edgeSwipeTrackingRef.current;
+    if (!track?.tracking || event.touches.length !== 1) {
+      return;
+    }
+    const touch = event.touches[0]!;
+    const deltaX = touch.clientX - track.startX;
+    const deltaY = touch.clientY - track.startY;
+
+    if (!isSwipingBack && Math.abs(deltaY) > Math.abs(deltaX)) {
+      edgeSwipeTrackingRef.current = null;
+      return;
+    }
+
+    if (deltaX > 0) {
+      setIsSwipingBack(true);
+      setSwipeBackOffset(deltaX);
+    } else {
+      setSwipeBackOffset(0);
+    }
+  }
+
+  function handleEdgeSwipeTouchEnd() {
+    const track = edgeSwipeTrackingRef.current;
+    if (track?.tracking && isSwipingBack) {
+      if (swipeBackOffset > 80) {
+        goBack();
+      }
+    }
+    setIsSwipingBack(false);
+    setSwipeBackOffset(0);
+    edgeSwipeTrackingRef.current = null;
+  }
   const [showScrollBottomFab, setShowScrollBottomFab] = useState(false);
   const [composerMultiline, setComposerMultiline] = useState(false);
   const overflowMenuRef = useRef<HTMLDivElement | null>(null);
@@ -812,6 +893,7 @@ export function TopicsWorkspace({
     resetEditForm();
     setDeleteConfirmOpen(false);
     setDeleteError(undefined);
+    setHeaderElevated(false);
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
   }
@@ -1641,6 +1723,8 @@ export function TopicsWorkspace({
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_THRESHOLD_PX;
       isAtBottomRef.current = atBottom;
       setShowScrollBottomFab(el.scrollHeight - el.scrollTop - el.clientHeight > 60);
+      const isScrolled = el.scrollTop > 4;
+      setHeaderElevated((prev) => (prev !== isScrolled ? isScrolled : prev));
       if (visibleComposerRoomId && el.scrollTop <= TOP_SCROLL_THRESHOLD_PX) {
         void triggerScrollBackfill(visibleComposerRoomId);
       }
@@ -2775,10 +2859,15 @@ export function TopicsWorkspace({
   }
 
   function renderEditDialog(isModal: boolean) {
+    const editIsDirty = activeTopic
+      ? editNameInput !== activeTopic.name ||
+        editDescriptionInput !== (activeTopic.description ?? "")
+      : false;
     return (
       <EditTopicView
         isModal={isModal}
         isNarrow={isNarrow}
+        isDirty={editIsDirty}
         safeInset={safeInset}
         nestedModalOpen={exitConfirmOpen}
         reauthBanner={reauthRequired ? renderReauthBanner() : null}
@@ -2804,6 +2893,7 @@ export function TopicsWorkspace({
       <div className="waypoint-topic-view flex min-h-0 flex-1 flex-col bg-background">
         <TopicHeaderView
           isNarrow={isNarrow}
+          elevated={headerElevated}
           topic={activeTopic}
           descriptionExpanded={descriptionExpanded}
           overflowMenuOpen={overflowMenuOpen && safeInset === 0}
@@ -2879,6 +2969,7 @@ export function TopicsWorkspace({
             <TimelineView
               timelineRef={timelineRef}
               items={activeTimelineItems}
+              isNarrow={isNarrow}
               activeTopicUnavailable={activeTopic.unavailable}
               reauthRequired={reauthRequired}
               openFailedMenuId={openFailedMenuId}
@@ -2979,6 +3070,22 @@ export function TopicsWorkspace({
             isNarrow && "w-full",
             pageEnterClass,
           )}
+          style={{
+            transform:
+              isNarrow && swipeBackOffset > 0
+                ? "translate3d(" + swipeBackOffset + "px, 0, 0)"
+                : undefined,
+            transition:
+              isNarrow && !isSwipingBack
+                ? "transform 200ms cubic-bezier(0.32, 0.72, 0, 1)"
+                : undefined,
+          }}
+          data-swiping-back={isSwipingBack ? "true" : undefined}
+          data-swipe-offset={swipeBackOffset > 0 ? swipeBackOffset : undefined}
+          onTouchStart={isNarrow && isNarrowPushed ? handleEdgeSwipeTouchStart : undefined}
+          onTouchMove={isNarrow && isNarrowPushed ? handleEdgeSwipeTouchMove : undefined}
+          onTouchEnd={isNarrow && isNarrowPushed ? handleEdgeSwipeTouchEnd : undefined}
+          onTouchCancel={isNarrow && isNarrowPushed ? handleEdgeSwipeTouchEnd : undefined}
         >
           <ErrorBoundary
             resetKeys={[activeTopic?.roomId, settingsOpen, creating, editing]}

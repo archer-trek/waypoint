@@ -1,6 +1,6 @@
 import { createRef, useState } from "react";
 import { describe, expect, test, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MessageBody } from "../MessageBody";
 import type { TopicSummary, TimelineItem } from "../topics";
@@ -22,12 +22,13 @@ const sampleTopic: TopicSummary = {
 };
 
 describe("TopicHeaderView (#89)", () => {
-  test("renders sticky translucent header, narrow back button, expandable description, and no bot pills", () => {
+  test("renders scroll-aware elevation: transparent border when at top, translucent border-border/60 when elevated (ADR-0028)", () => {
     const onGoBack = vi.fn();
     const onToggleDescription = vi.fn();
-    render(
+    const { rerender } = render(
       <TopicHeaderView
         isNarrow
+        elevated={false}
         topic={sampleTopic}
         descriptionExpanded={false}
         overflowMenuOpen={false}
@@ -53,11 +54,9 @@ describe("TopicHeaderView (#89)", () => {
       "waypoint-topic-header",
       "sticky",
       "top-0",
-      "bg-background/90",
-      "backdrop-blur-md",
-      "border-b",
-      "border-border/60",
+      "border-transparent",
     );
+    expect(header).not.toHaveAttribute("data-elevated");
     expect(header).toHaveTextContent("Grokbot 架构讨论");
     expect(header).not.toHaveTextContent("Architect Bot");
 
@@ -67,6 +66,39 @@ describe("TopicHeaderView (#89)", () => {
     const descBtn = screen.getByRole("button", { name: /第一行说明/ });
     expect(descBtn).toHaveClass("waypoint-topic-description");
     expect(descBtn).toHaveAttribute("aria-expanded", "false");
+
+    // Elevated state on scroll
+    rerender(
+      <TopicHeaderView
+        isNarrow
+        elevated={true}
+        topic={sampleTopic}
+        descriptionExpanded={false}
+        overflowMenuOpen={false}
+        overflowMenuRef={createRef()}
+        editing={false}
+        editSubmitting={false}
+        deleteConfirmOpen={false}
+        deleting={false}
+        reauthRequired={false}
+        pinPending={false}
+        onGoBack={onGoBack}
+        onToggleDescription={onToggleDescription}
+        onToggleOverflowMenu={vi.fn()}
+        onCloseOverflowMenu={vi.fn()}
+        onTogglePin={vi.fn()}
+        onOpenEditForm={vi.fn()}
+        onOpenDeleteConfirm={vi.fn()}
+      />,
+    );
+
+    expect(header).toHaveAttribute("data-elevated", "true");
+    expect(header).toHaveClass(
+      "bg-background/90",
+      "backdrop-blur-md",
+      "border-b",
+      "border-border/60",
+    );
   });
 
   test("uses shadcn DropdownMenu for topic actions, closes on outside click/selection, and preserves desktop/sr-only action buttons", async () => {
@@ -142,6 +174,69 @@ describe("TopicHeaderView (#89)", () => {
     expect(screen.getByRole("button", { name: "编辑" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
     expect(document.querySelector(".waypoint-desktop-actions")).toBeNull();
+  });
+
+  test("narrow TopicHeaderView renders ActionSheet bottom drawer with grabber, destructive styling, and cancel button (ADR-0028)", async () => {
+    const user = userEvent.setup();
+    const onTogglePin = vi.fn();
+    const onOpenEditForm = vi.fn();
+    const onOpenDeleteConfirm = vi.fn();
+
+    function NarrowHeaderHarness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <TopicHeaderView
+          isNarrow={true}
+          elevated={false}
+          topic={sampleTopic}
+          descriptionExpanded={false}
+          overflowMenuOpen={open}
+          overflowMenuRef={createRef()}
+          editing={false}
+          editSubmitting={false}
+          deleteConfirmOpen={false}
+          deleting={false}
+          reauthRequired={false}
+          pinPending={false}
+          onGoBack={vi.fn()}
+          onToggleDescription={vi.fn()}
+          onToggleOverflowMenu={() => setOpen((prev) => !prev)}
+          onCloseOverflowMenu={() => setOpen(false)}
+          onTogglePin={onTogglePin}
+          onOpenEditForm={onOpenEditForm}
+          onOpenDeleteConfirm={onOpenDeleteConfirm}
+        />
+      );
+    }
+
+    render(<NarrowHeaderHarness />);
+
+    const trigger = screen.getByRole("button", { name: "话题操作" });
+    expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
+    await user.click(trigger);
+
+    // Bottom ActionSheet should be mounted
+    const actionSheet = screen.getByRole("dialog", { name: "话题操作" });
+    expect(actionSheet).toHaveAttribute("data-slot", "action-sheet-content");
+    expect(actionSheet.querySelector('[data-slot="action-sheet-grabber"]')).not.toBeNull();
+
+    // Verify grouped items
+    const pinItem = within(actionSheet).getByRole("menuitem", { name: "置顶" });
+    const editItem = within(actionSheet).getByRole("menuitem", { name: "编辑" });
+    const deleteItem = within(actionSheet).getByRole("menuitem", { name: "删除" });
+    expect(pinItem).toBeInTheDocument();
+    expect(deleteItem).toHaveAttribute("data-variant", "destructive");
+
+    // Click edit invokes callback and closes action sheet
+    await user.click(editItem);
+    expect(onOpenEditForm).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("dialog", { name: "话题操作" })).not.toBeInTheDocument();
+
+    // Reopen and test cancel button
+    await user.click(trigger);
+    const cancelBtn = within(screen.getByRole("dialog", { name: "话题操作" })).getByRole("button", { name: "取消" });
+    await user.click(cancelBtn);
+    expect(screen.queryByRole("dialog", { name: "话题操作" })).not.toBeInTheDocument();
   });
 });
 
@@ -293,6 +388,52 @@ describe("TimelineView (#89)", () => {
     const discardItem = within(failedMenu).getByRole("menuitem", { name: "丢掉" });
     await user.click(discardItem);
     expect(onDiscardFailed).toHaveBeenCalledWith("local-failed");
+  });
+
+  test("narrow TimelineView opens long-press message context menu with copy actions (ADR-0028)", async () => {
+    render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={items}
+        isNarrow={true}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        getLocalImageUrl={() => ""}
+        getDownloadedImageUrl={() => undefined}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+      />,
+    );
+
+    // Long-press (500ms touch-hold) on confirmed agent message in narrow viewport (ADR-0028)
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const agentMsg = screen.getByText("这是无框文档流回复。");
+      fireEvent.touchStart(agentMsg, { touches: [{ clientX: 100, clientY: 100 }] });
+      act(() => {
+        vi.advanceTimersByTime(550);
+      });
+
+      const contextDialog = screen.getByRole("dialog", { name: "消息操作" });
+      expect(contextDialog).toBeInTheDocument();
+
+      const copyTextItem = within(contextDialog).getByRole("menuitem", { name: "复制纯文本" });
+      const copyMdItem = within(contextDialog).getByRole("menuitem", { name: "复制 Markdown" });
+      expect(copyTextItem).toBeInTheDocument();
+      expect(copyMdItem).toBeInTheDocument();
+
+      fireEvent.click(copyTextItem);
+      expect(screen.queryByRole("dialog", { name: "消息操作" })).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

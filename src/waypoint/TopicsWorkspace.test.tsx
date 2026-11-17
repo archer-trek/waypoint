@@ -406,6 +406,70 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     view.unmount();
   });
 
+  test("narrow viewport supports left edge swipe-back gesture within 24px and yields on inner horizontal scroll (ADR-0028)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const harness = makePlatformHarness("narrow");
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      accountData: { "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com", name: "Hermes" }] } },
+      rooms: {
+        "!t1:example.com": makeStoredRoom({
+          name: "边缘手势测试",
+          messages: [makeTextEvent("$e1", "@bot:example.com", "手势消息内容", clock.now - 5_000)],
+        }),
+      },
+    });
+
+    render(
+      <WaypointApp homeserver={homeserver} platform={harness.platform} clock={clock} />,
+    );
+
+    const row = await screen.findByRole("button", { name: /边缘手势测试/ });
+    await user.click(row);
+
+    const detailContainer = document.querySelector(".waypoint-detail") as HTMLElement;
+    expect(detailContainer).toBeInTheDocument();
+
+    // 1. Touch start beyond 24px (e.g. clientX = 40px) does not start swipe-back
+    fireEvent.touchStart(detailContainer, {
+      touches: [{ clientX: 40, clientY: 200 }],
+    });
+    fireEvent.touchMove(detailContainer, {
+      touches: [{ clientX: 160, clientY: 200 }],
+    });
+    expect(detailContainer).not.toHaveAttribute("data-swiping-back");
+    fireEvent.touchEnd(detailContainer);
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeInTheDocument();
+
+    // 2. Touch start within 24px (e.g. clientX = 12px) and move right > 80px triggers edge swipe-back
+    fireEvent.touchStart(detailContainer, {
+      touches: [{ clientX: 12, clientY: 200 }],
+    });
+    fireEvent.touchMove(detailContainer, {
+      touches: [{ clientX: 110, clientY: 200 }],
+    });
+    expect(detailContainer).toHaveAttribute("data-swiping-back", "true");
+    expect(detailContainer).toHaveAttribute("data-swipe-offset", "98");
+
+    fireEvent.touchEnd(detailContainer);
+    // Pops back to Topic list
+    expect(await screen.findByRole("complementary", { name: "Topic 列表" })).toBeInTheDocument();
+    expect(screen.queryByRole("log", { name: "对话时间线" })).not.toBeInTheDocument();
+  });
+
   test("empty list -> create first topic transitions into populated workspace on both wide and narrow viewports", async () => {
     const user = userEvent.setup();
     const homeserver = new FakeHomeserver();

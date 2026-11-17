@@ -5,7 +5,7 @@
 ## Language
 
 **Owner**:
-使用 Waypoint 的唯一人类本人，跨个人设备（macOS、Android）以同一身份与各 Agent 协作。
+使用 Waypoint 的唯一人类本人，跨个人设备（macOS、Windows、iOS、Android）以同一身份与各 Agent 协作。
 _Avoid_: Member, participant, admin, customer
 
 **Agent**:

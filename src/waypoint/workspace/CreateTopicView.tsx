@@ -83,10 +83,17 @@ export function CreateTopicView({
   onQuickRegister,
 }: CreateTopicViewProps) {
   const busy = submitting || quickSubmitting;
+  const isDirty = Boolean(
+    nameInput.trim() ||
+    descriptionInput.trim() ||
+    quickUserId.trim() ||
+    quickHandwrittenName.trim(),
+  );
 
   return (
     <ResponsiveFormShell
       title="新建 Topic"
+      isDirty={isDirty}
       isModal={isModal}
       isNarrow={isNarrow}
       safeInset={safeInset}

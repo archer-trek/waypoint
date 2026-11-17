@@ -213,7 +213,16 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Native thin scrollbars */
+  /* Native overlay scrollbars: invisible by default, appear on hover/active scroll */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover {
+    scrollbar-color: var(--border) transparent;
+  }
+
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -224,8 +233,13 @@
   }
 
   ::-webkit-scrollbar-thumb {
-    background: var(--border);
+    background: transparent;
     border-radius: 9999px;
+    transition: background-color 0.2s ease;
+  }
+
+  *:hover::-webkit-scrollbar-thumb {
+    background: var(--border);
   }
 
   ::-webkit-scrollbar-thumb:hover {
@@ -586,6 +600,10 @@ a {
   line-height: 1.55;
   white-space: pre;
   scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]:hover {
   scrollbar-color: var(--border) transparent;
 }
 
@@ -634,8 +652,13 @@ a {
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: transparent;
   border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"]:hover::-webkit-scrollbar-thumb {
+  background: var(--border);
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"] pre {
@@ -703,6 +726,10 @@ a {
   max-width: 100%;
   background: transparent;
   scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child:hover {
   scrollbar-color: var(--border) transparent;
 }
 

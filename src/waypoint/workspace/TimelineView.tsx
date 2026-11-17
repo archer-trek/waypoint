@@ -1,7 +1,15 @@
-import type { RefObject } from "react";
+import { useState, useRef, type RefObject } from "react";
+import { copyToClipboard } from "@/lib/utils";
 import { FileText, MoreHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  ActionSheet,
+  ActionSheetCard,
+  ActionSheetContent,
+  ActionSheetItem,
+  ActionSheetCancel,
+} from "@/components/ui/action-sheet";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,6 +27,7 @@ export type TimelineViewProps = {
   activeTopicUnavailable: boolean;
   reauthRequired: boolean;
   openFailedMenuId: string | null;
+  isNarrow?: boolean;
   getLocalImageUrl: (key: string, attachment: DraftAttachment) => string;
   getDownloadedImageUrl: (mxcUrl: string) => string | undefined;
   onScroll: () => void;
@@ -38,6 +47,7 @@ export function TimelineView({
   activeTopicUnavailable,
   reauthRequired,
   openFailedMenuId,
+  isNarrow,
   getLocalImageUrl,
   getDownloadedImageUrl,
   onScroll,
@@ -49,6 +59,58 @@ export function TimelineView({
   onOpenExternalUrl,
   onSelectPromptOption,
 }: TimelineViewProps) {
+  const longPressTimerRef = useRef<number | null>(null);
+  const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
+  const [contextMenuItem, setContextMenuItem] = useState<{
+    item: TimelineItem;
+    codeSnippet?: string;
+  } | null>(null);
+
+  function extractCodeSnippet(target: HTMLElement | null): string | undefined {
+    let el = target;
+    while (el && el !== document.body) {
+      if (
+        el.tagName.toLowerCase() === "code" ||
+        el.tagName.toLowerCase() === "pre" ||
+        el.hasAttribute("data-streamdown")
+      ) {
+        return el.textContent ?? undefined;
+      }
+      el = el.parentElement;
+    }
+    return undefined;
+  }
+
+  function handleTouchStart(e: React.TouchEvent, item: TimelineItem) {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0]!;
+    touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+    const codeSnippet = extractCodeSnippet(e.target as HTMLElement);
+    longPressTimerRef.current = window.setTimeout(() => {
+      setContextMenuItem({ item, codeSnippet });
+    }, 500);
+  }
+
+  function handleTouchMove(e: React.TouchEvent) {
+    if (!touchStartPosRef.current || !longPressTimerRef.current) return;
+    const touch = e.touches[0]!;
+    const dx = Math.abs(touch.clientX - touchStartPosRef.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPosRef.current.y);
+    if (dx > 10 || dy > 10) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+      touchStartPosRef.current = null;
+    }
+  }
+
+  function handleTouchEnd() {
+    if (longPressTimerRef.current) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+    touchStartPosRef.current = null;
+  }
+
   return (
     <div
       ref={timelineRef}
@@ -86,48 +148,95 @@ export function TimelineView({
               />
             ) : item.status === "failed" && item.localId ? (
               <div className="waypoint-failed-controls relative inline-flex items-center gap-1 shrink-0 mt-1">
-                <DropdownMenu
-                  modal={false}
-                  open={openFailedMenuId === item.localId}
-                  onOpenChange={(nextOpen) => {
-                    const isOpen = openFailedMenuId === item.localId;
-                    if (nextOpen !== isOpen) {
-                      onToggleFailedMenu(item.localId!);
-                    }
-                  }}
-                >
-                  <DropdownMenuTrigger asChild>
+                {isNarrow ? (
+                  <>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
                       aria-label="更多操作"
                       className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
+                      onClick={() => onToggleFailedMenu(item.localId!)}
                     >
                       <MoreHorizontal aria-hidden="true" className="size-3.5" />
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    aria-labelledby={undefined}
-                    aria-label="消息操作"
-                    side="top"
-                    align="end"
-                    sideOffset={4}
-                    className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                      event.nativeEvent.stopPropagation();
+                    <ActionSheet
+                      open={openFailedMenuId === item.localId}
+                      onOpenChange={(open) => {
+                        if (!open && openFailedMenuId === item.localId) {
+                          onToggleFailedMenu(item.localId!);
+                        }
+                      }}
+                    >
+                      <ActionSheetContent
+                        aria-label="消息操作"
+                        onDismiss={() => onToggleFailedMenu(item.localId!)}
+                      >
+                        <ActionSheetCard>
+                          <div role="menu" aria-label="消息操作" className="flex flex-col">
+                            <ActionSheetItem
+                              variant="destructive"
+                              onClick={() => {
+                                onToggleFailedMenu(item.localId!);
+                                onDiscardFailed(item.localId!);
+                              }}
+                            >
+                              丢掉
+                            </ActionSheetItem>
+                          </div>
+                        </ActionSheetCard>
+                        <ActionSheetCard>
+                          <ActionSheetCancel onClick={() => onToggleFailedMenu(item.localId!)}>
+                            取消
+                          </ActionSheetCancel>
+                        </ActionSheetCard>
+                      </ActionSheetContent>
+                    </ActionSheet>
+                  </>
+                ) : (
+                  <DropdownMenu
+                    modal={false}
+                    open={openFailedMenuId === item.localId}
+                    onOpenChange={(nextOpen) => {
+                      const isOpen = openFailedMenuId === item.localId;
+                      if (nextOpen !== isOpen) {
+                        onToggleFailedMenu(item.localId!);
+                      }
                     }}
                   >
-                    <DropdownMenuItem
-                      variant="destructive"
-                      className="min-h-8 px-2 py-1.5 text-sm"
-                      onSelect={() => onDiscardFailed(item.localId!)}
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="更多操作"
+                        className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
+                      >
+                        <MoreHorizontal aria-hidden="true" className="size-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      aria-labelledby={undefined}
+                      aria-label="消息操作"
+                      side="top"
+                      align="end"
+                      sideOffset={4}
+                      className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        event.nativeEvent.stopPropagation();
+                      }}
                     >
-                      丢掉
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                      <DropdownMenuItem
+                        variant="destructive"
+                        className="min-h-8 px-2 py-1.5 text-sm"
+                        onSelect={() => onDiscardFailed(item.localId!)}
+                      >
+                        丢掉
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
                 <Button
                   type="button"
                   variant="destructive"
@@ -156,6 +265,10 @@ export function TimelineView({
                     ? "bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal break-words shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
                     : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] text-[16px] leading-[1.5] text-foreground",
                 )}
+                onTouchStart={(e) => handleTouchStart(e, item)}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                onTouchCancel={handleTouchEnd}
                 onContextMenu={
                   item.status === "failed" && item.localId
                     ? (event) => {
@@ -299,6 +412,65 @@ export function TimelineView({
           </div>
         ),
       )}
+      <ActionSheet
+        open={contextMenuItem !== null}
+        onOpenChange={(open) => {
+          if (!open) setContextMenuItem(null);
+        }}
+      >
+        <ActionSheetContent
+          aria-label="消息操作"
+          onDismiss={() => setContextMenuItem(null)}
+        >
+          <ActionSheetCard>
+            <div role="menu" aria-label="消息操作" className="flex flex-col">
+              <ActionSheetItem
+                onClick={() => {
+                  if (contextMenuItem?.item.kind === "message") {
+                    const textToCopy =
+                      contextMenuItem.item.media?.caption ??
+                      contextMenuItem.item.body ??
+                      "";
+                    void copyToClipboard(textToCopy);
+                  }
+                  setContextMenuItem(null);
+                }}
+              >
+                复制纯文本
+              </ActionSheetItem>
+              <ActionSheetItem
+                onClick={() => {
+                  if (contextMenuItem?.item.kind === "message") {
+                    const textToCopy =
+                      contextMenuItem.item.body ??
+                      contextMenuItem.item.media?.caption ??
+                      "";
+                    void copyToClipboard(textToCopy);
+                  }
+                  setContextMenuItem(null);
+                }}
+              >
+                复制 Markdown
+              </ActionSheetItem>
+              {contextMenuItem?.codeSnippet ? (
+                <ActionSheetItem
+                  onClick={() => {
+                    void copyToClipboard(contextMenuItem.codeSnippet!);
+                    setContextMenuItem(null);
+                  }}
+                >
+                  复制代码
+                </ActionSheetItem>
+              ) : null}
+            </div>
+          </ActionSheetCard>
+          <ActionSheetCard>
+            <ActionSheetCancel onClick={() => setContextMenuItem(null)}>
+              取消
+            </ActionSheetCancel>
+          </ActionSheetCard>
+        </ActionSheetContent>
+      </ActionSheet>
     </div>
   );
 }
