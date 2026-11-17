@@ -4198,7 +4198,7 @@ test("输入框处于单行与多行临界宽度时不会因 padding 变化触�
       return new Proxy(style, {
         get(target, prop) {
           if (prop === "paddingLeft" || prop === "paddingRight") {
-            return isMultiline ? "16px" : "56px";
+            return isMultiline ? "16px" : "48px";
           }
           const value = Reflect.get(target, prop, target);
           return typeof value === "function" ? value.bind(target) : value;

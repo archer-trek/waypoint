@@ -65,7 +65,7 @@ export function ComposerView({
   return (
     <div
       className={cn(
-        "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto",
+        "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
         safeInset === 0
           ? "pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]"
           : "pb-1.5",
@@ -149,24 +149,20 @@ export function ComposerView({
                   : "min-h-[46px] pt-2.5 px-4 pb-[44px]",
               )
             : cn(
-                "flex items-center rounded-[23px]",
+                "flex items-center rounded-[23px] px-[48px]",
                 isNarrowMode
-                  ? "min-h-[50px] py-2 px-14"
-                  : "min-h-[46px] py-1.5 px-[52px]",
+                  ? "min-h-[50px] py-2"
+                  : "min-h-[46px] py-1.5",
               ),
         )}
         onSubmit={onSendMessage}
       >
         <label
           className={cn(
-            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-transparent text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-accent hover:text-foreground",
-            composerMultiline
-              ? isNarrowMode
-                ? "bottom-[7px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-                : "bottom-[6px] left-2 size-8 min-w-8"
-              : isNarrowMode
-                ? "top-1/2 -translate-y-1/2 left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-                : "top-1/2 -translate-y-1/2 left-2 size-8 min-w-8",
+            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
+            isNarrowMode
+              ? "bottom-[9px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+              : "bottom-[7px] left-2 size-8 min-w-8",
             inputDisabled && "opacity-50 cursor-not-allowed",
           )}
         >
@@ -229,14 +225,10 @@ export function ComposerView({
           size="icon"
           aria-label="发送"
           className={cn(
-            "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-all",
-            composerMultiline
-              ? isNarrowMode
-                ? "bottom-[7px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-                : "bottom-[6px] right-2 size-8 min-w-8"
-              : isNarrowMode
-                ? "top-1/2 -translate-y-1/2 right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-                : "top-1/2 -translate-y-1/2 right-2 size-8 min-w-8",
+            "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-colors",
+            isNarrowMode
+              ? "bottom-[9px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+              : "bottom-[7px] right-2 size-8 min-w-8",
             isSendActive
               ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
               : "bg-muted/80 text-muted-foreground/65 hover:bg-muted hover:text-muted-foreground",

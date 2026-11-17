@@ -92,7 +92,7 @@ export function ResponsiveFormShell({
         >
           {reauthBanner}
           <div
-            className="space-y-5 p-6"
+            className="space-y-5 p-6 transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
             style={{
               paddingBottom:
                 safeInset > 0 ? `calc(1.5rem + ${safeInset}px)` : undefined,

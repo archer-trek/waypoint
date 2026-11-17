@@ -184,6 +184,13 @@ export function detectPlatform(): PlatformAdapter {
     };
     const vv = window.visualViewport;
     const vk = getVirtualKeyboard();
+    if (vk && "overlaysContent" in vk) {
+      try {
+        (vk as { overlaysContent?: boolean }).overlaysContent = true;
+      } catch {
+        /* ignore */
+      }
+    }
     vv?.addEventListener("resize", notify);
     vv?.addEventListener("scroll", notify);
     vk?.addEventListener?.("geometrychange", notify);

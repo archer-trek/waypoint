@@ -159,4 +159,43 @@ describe("Repository, asset, and error-copy guards", () => {
     }
     expect(violations).toEqual([]);
   });
+
+  test("Mobile viewport strategy, composer padding contract, and button transition hygiene are preserved", () => {
+    const indexHtml = readFileSync(resolve(ROOT_DIR, "index.html"), "utf-8");
+    expect(
+      indexHtml,
+      "index.html must maintain interactive-widget=resizes-visual for smooth soft-keyboard animation",
+    ).toContain("interactive-widget=resizes-visual");
+    expect(indexHtml).not.toContain("interactive-widget=resizes-content");
+
+    const composerTsx = readFileSync(
+      resolve(ROOT_DIR, "src/waypoint/workspace/ComposerView.tsx"),
+      "utf-8",
+    );
+    expect(
+      composerTsx,
+      "ComposerView single-line mode must use explicit 48px horizontal padding for optical symmetry",
+    ).toContain("px-[48px]");
+
+    // Verify button positioning hygiene: avoid transition-all and keep constant bottom anchoring
+    expect(
+      composerTsx,
+      "waypoint-attach-button must not use transition-all to prevent mode-switch jumps",
+    ).not.toMatch(/waypoint-attach-button[^"]*\btransition-all\b/);
+    expect(
+      composerTsx,
+      "waypoint-send-button must not use transition-all to prevent mode-switch jumps",
+    ).not.toMatch(/waypoint-send-button[^"]*\btransition-all\b/);
+    expect(composerTsx).toContain("bottom-[9px]");
+    expect(composerTsx).toContain("bottom-[7px]");
+
+    const workspaceTsx = readFileSync(
+      resolve(ROOT_DIR, "src/waypoint/TopicsWorkspace.tsx"),
+      "utf-8",
+    );
+    expect(
+      workspaceTsx,
+      "TopicsWorkspace singleLinePadX must match 2 * 48px composer horizontal padding",
+    ).toContain("const singleLinePadX = 96;");
+  });
 });
