@@ -153,8 +153,8 @@ export function TimelineView({
                 className={cn(
                   "waypoint-bubble",
                   item.side === "right"
-                    ? "bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal break-words shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal"
-                    : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] leading-[1.58] text-foreground",
+                    ? "bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal break-words shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
+                    : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] text-[16px] leading-[1.5] text-foreground",
                 )}
                 onContextMenu={
                   item.status === "failed" && item.localId
@@ -261,7 +261,7 @@ export function TimelineView({
                         variant={isSelected ? "default" : "outline"}
                         size="sm"
                         className={cn(
-                          "waypoint-prompt-button h-auto rounded-full px-3.5 py-1.5 text-[0.8125rem] font-medium gap-1.5 transition-transform",
+                          "waypoint-prompt-button h-auto rounded-full px-3.5 py-1.5 text-[13px] font-medium gap-1.5 transition-transform",
                           isSelected && "selected font-semibold scale-[1.03] shadow-xs",
                         )}
                         aria-pressed={isSelected}

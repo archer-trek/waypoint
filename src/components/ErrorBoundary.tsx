@@ -131,7 +131,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             <summary className="cursor-pointer rounded-sm font-medium text-foreground outline-none select-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
               诊断详情
             </summary>
-            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[0.75rem] leading-relaxed text-muted-foreground select-text">
+            <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-muted-foreground select-text">
               {diagnosticText}
             </pre>
           </details>

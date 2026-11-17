@@ -82,7 +82,7 @@ function TopicRow({
             <span
               className={cn(
                 "waypoint-topic-name min-w-0 truncate leading-[1.35] text-foreground [-webkit-font-smoothing:auto]",
-                isNarrow ? "text-[17px]" : "text-[0.9375rem]",
+                isNarrow ? "text-[17px]" : "text-[15px]",
                 topic.unread && "unread",
               )}
               style={{ fontWeight: topic.unread ? 700 : 500 }}
@@ -92,7 +92,7 @@ function TopicRow({
             {topic.unavailable ? (
               <Badge
                 variant="outline"
-                className="waypoint-topic-row-unavailable shrink-0 rounded border-warning-border bg-warning px-1.5 py-0 text-[0.6875rem] font-medium text-warning-foreground"
+                className="waypoint-topic-row-unavailable shrink-0 rounded border-warning-border bg-warning px-1.5 py-0 text-[11px] font-medium text-warning-foreground"
               >
                 不可用
               </Badge>
@@ -103,7 +103,7 @@ function TopicRow({
               <Badge
                 variant="secondary"
                 aria-label="已置顶"
-                className="waypoint-topic-row-pin shrink-0 gap-0.5 rounded border border-border bg-secondary px-1.5 py-0 text-[0.6875rem] font-medium text-muted-foreground"
+                className="waypoint-topic-row-pin shrink-0 gap-0.5 rounded border border-border bg-secondary px-1.5 py-0 text-[11px] font-medium text-muted-foreground"
               >
                 <Pin aria-hidden="true" className="size-2.5" />
                 置顶
@@ -128,7 +128,7 @@ function TopicRow({
               <span
                 className={cn(
                   "waypoint-topic-row-time whitespace-nowrap font-sans tabular-nums text-muted-foreground",
-                  isNarrow ? "text-[12.5px]" : "text-xs",
+                  isNarrow ? "text-[12.5px]" : "text-[12px]",
                 )}
               >
                 {formatTopicListTime(topic.lastActivityTs, nowMs)}
@@ -143,7 +143,7 @@ function TopicRow({
               <span
                 className={cn(
                   "waypoint-topic-row-bot inline-flex min-w-0 max-w-full items-center gap-1 font-normal leading-snug text-muted-foreground",
-                  isNarrow ? "text-[13.5px]" : "text-[0.8125rem]",
+                  isNarrow ? "text-[13.5px]" : "text-[13px]",
                 )}
               >
                 <Bot aria-hidden="true" strokeWidth={1.75} className="size-3 shrink-0 opacity-75" />
@@ -154,7 +154,7 @@ function TopicRow({
               <span
                 className={cn(
                   "waypoint-topic-row-responding ml-auto inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap font-medium text-foreground",
-                  isNarrow ? "text-[12.5px]" : "text-xs",
+                  isNarrow ? "text-[12.5px]" : "text-[12px]",
                 )}
               >
                 <span
