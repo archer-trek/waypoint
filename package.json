@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tailscale": "TAURI_DEV_HOST=$(tailscale ip -4 2>/dev/null || echo 127.0.0.1) vite",
     "typecheck": "tsc --noEmit",
     "build": "tsc && vite build",
     "preview": "vite preview",

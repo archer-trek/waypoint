@@ -1,6 +1,6 @@
 # Coding Standards
 
-Judgment calls for code review and UI/test changes in `waypoint`. Mechanical rules (unused vars, hooks deps, banned hex colors/raw Tailwind palettes, `leading-none` + `truncate` clipping, icon/asset presence, raw English `body.error` leakage, banned `GLOSSARY.md` terms) are enforced by `eslint.config.js`, `src/waypoint/theme-guard.test.ts`, and `src/waypoint/repo-guards.test.ts`.
+Judgment calls for code review and UI/test changes in `waypoint`. Mechanical rules (unused vars, hooks deps, banned hex colors/raw Tailwind palettes, `leading-none` + `truncate` clipping, `leading-*` before `text-*` precedence, invalid `pt`/fractional `rem` units, icon/asset presence, raw English `body.error` leakage, banned `GLOSSARY.md` terms) are enforced by `eslint.config.js`, `src/waypoint/theme-guard.test.ts`, and `src/waypoint/repo-guards.test.ts`.
 
 ## UI, Typography, and Layout
 

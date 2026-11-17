@@ -273,4 +273,85 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     expect(tableWrapperRule).toContain("padding: 0;");
     expect(tableWrapperRule).toContain("gap: 0;");
   });
+  test("Tailwind class strings do not place leading-* before font-size text-* to prevent tailwind-merge override", () => {
+    const targets = [
+      resolve(ROOT_DIR, "src/App.tsx"),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/components")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/waypoint")),
+    ].sort();
+
+    const violations: string[] = [];
+    const leadingRe =
+      /^(?:([a-z0-9]+):)?(?:leading-(?:none|tight|snug|normal|relaxed|loose)|leading-\[[^\]]+\])$/;
+    const fontSizeRe =
+      /^(?:([a-z0-9]+):)?(?:text-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl)|text-\[\d[^\]]*\])$/;
+
+    function findLeadingBeforeFontSize(classStr: string): { leading: string; fontSize: string } | null {
+      const tokens = classStr.trim().split(/\s+/).filter(Boolean);
+      for (let i = 0; i < tokens.length; i++) {
+        const leadMatch = tokens[i]!.match(leadingRe);
+        if (!leadMatch) continue;
+        const leadPrefix = leadMatch[1] ?? "";
+        for (let j = i + 1; j < tokens.length; j++) {
+          const sizeMatch = tokens[j]!.match(fontSizeRe);
+          if (!sizeMatch) continue;
+          const sizePrefix = sizeMatch[1] ?? "";
+          if (leadPrefix === sizePrefix) {
+            return { leading: tokens[i]!, fontSize: tokens[j]! };
+          }
+        }
+      }
+      return null;
+    }
+
+    const stringLiteralRe = /(["'`])(.*?)\1/gs;
+
+    for (const filePath of targets) {
+      const rel = relative(ROOT_DIR, filePath);
+      const source = readFileSync(filePath, "utf-8");
+      for (const match of source.matchAll(stringLiteralRe)) {
+        const str = match[2] ?? "";
+        const conflict = findLeadingBeforeFontSize(str);
+        if (conflict) {
+          violations.push(
+            `${rel}: "${conflict.leading}" precedes "${conflict.fontSize}" in string literal "${str.trim()}"`,
+          );
+        }
+      }
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  test("UI source files avoid invalid pt physical units and fractional rem text classes", () => {
+    const targets = [
+      resolve(ROOT_DIR, "src/App.css"),
+      resolve(ROOT_DIR, "src/App.tsx"),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/components")),
+      ...collectSourceFiles(resolve(ROOT_DIR, "src/waypoint")),
+    ].sort();
+
+    const ptViolations: string[] = [];
+    const fractionalRemViolations: string[] = [];
+
+    const ptPattern = /\b\d+(?:\.\d+)?pt\b/;
+    const fractionalRemPattern = /\btext-\[[0-9]*\.[0-9]+rem\]\b/;
+
+    for (const filePath of targets) {
+      const rel = relative(ROOT_DIR, filePath);
+      const source = readFileSync(filePath, "utf-8");
+      const lines = source.split("\n");
+      lines.forEach((line: string, index: number) => {
+        if (ptPattern.test(line)) {
+          ptViolations.push(`${rel}:${index + 1}: ${line.trim()}`);
+        }
+        if (fractionalRemPattern.test(line)) {
+          fractionalRemViolations.push(`${rel}:${index + 1}: ${line.trim()}`);
+        }
+      });
+    }
+
+    expect(ptViolations).toEqual([]);
+    expect(fractionalRemViolations).toEqual([]);
+  });
 });
