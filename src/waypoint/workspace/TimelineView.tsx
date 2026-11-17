@@ -82,7 +82,7 @@ export function TimelineView({
   }
 
   function handleTouchStart(e: React.TouchEvent, item: TimelineItem) {
-    if (e.touches.length !== 1) return;
+    if (isNarrow === false || e.touches.length !== 1) return;
     const touch = e.touches[0]!;
     touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
     const codeSnippet = extractCodeSnippet(e.target as HTMLElement);
@@ -148,95 +148,48 @@ export function TimelineView({
               />
             ) : item.status === "failed" && item.localId ? (
               <div className="waypoint-failed-controls relative inline-flex items-center gap-1 shrink-0 mt-1">
-                {isNarrow ? (
-                  <>
+                <DropdownMenu
+                  modal={false}
+                  open={openFailedMenuId === item.localId}
+                  onOpenChange={(nextOpen) => {
+                    const isOpen = openFailedMenuId === item.localId;
+                    if (nextOpen !== isOpen) {
+                      onToggleFailedMenu(item.localId!);
+                    }
+                  }}
+                >
+                  <DropdownMenuTrigger asChild>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
                       aria-label="更多操作"
                       className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
-                      onClick={() => onToggleFailedMenu(item.localId!)}
                     >
                       <MoreHorizontal aria-hidden="true" className="size-3.5" />
                     </Button>
-                    <ActionSheet
-                      open={openFailedMenuId === item.localId}
-                      onOpenChange={(open) => {
-                        if (!open && openFailedMenuId === item.localId) {
-                          onToggleFailedMenu(item.localId!);
-                        }
-                      }}
-                    >
-                      <ActionSheetContent
-                        aria-label="消息操作"
-                        onDismiss={() => onToggleFailedMenu(item.localId!)}
-                      >
-                        <ActionSheetCard>
-                          <div role="menu" aria-label="消息操作" className="flex flex-col">
-                            <ActionSheetItem
-                              variant="destructive"
-                              onClick={() => {
-                                onToggleFailedMenu(item.localId!);
-                                onDiscardFailed(item.localId!);
-                              }}
-                            >
-                              丢掉
-                            </ActionSheetItem>
-                          </div>
-                        </ActionSheetCard>
-                        <ActionSheetCard>
-                          <ActionSheetCancel onClick={() => onToggleFailedMenu(item.localId!)}>
-                            取消
-                          </ActionSheetCancel>
-                        </ActionSheetCard>
-                      </ActionSheetContent>
-                    </ActionSheet>
-                  </>
-                ) : (
-                  <DropdownMenu
-                    modal={false}
-                    open={openFailedMenuId === item.localId}
-                    onOpenChange={(nextOpen) => {
-                      const isOpen = openFailedMenuId === item.localId;
-                      if (nextOpen !== isOpen) {
-                        onToggleFailedMenu(item.localId!);
-                      }
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    aria-labelledby={undefined}
+                    aria-label="消息操作"
+                    side="top"
+                    align="end"
+                    sideOffset={4}
+                    className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1 rounded-lg border-border/80 bg-popover/95 backdrop-blur-md shadow-md"
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      event.nativeEvent.stopPropagation();
                     }}
                   >
-                    <DropdownMenuTrigger asChild>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon"
-                        aria-label="更多操作"
-                        className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
-                      >
-                        <MoreHorizontal aria-hidden="true" className="size-3.5" />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      aria-labelledby={undefined}
-                      aria-label="消息操作"
-                      side="top"
-                      align="end"
-                      sideOffset={4}
-                      className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                        event.nativeEvent.stopPropagation();
-                      }}
+                    <DropdownMenuItem
+                      variant="destructive"
+                      className="min-h-8 px-2 py-1.5 text-sm"
+                      onSelect={() => onDiscardFailed(item.localId!)}
                     >
-                      <DropdownMenuItem
-                        variant="destructive"
-                        className="min-h-8 px-2 py-1.5 text-sm"
-                        onSelect={() => onDiscardFailed(item.localId!)}
-                      >
-                        丢掉
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                )}
+                      丢掉
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <Button
                   type="button"
                   variant="destructive"

@@ -2,13 +2,6 @@ import type { RefObject } from "react";
 import { ArrowLeft, MoreHorizontal, PenLine, Pin, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
-  ActionSheet,
-  ActionSheetCard,
-  ActionSheetContent,
-  ActionSheetItem,
-  ActionSheetCancel,
-} from "@/components/ui/action-sheet";
-import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -121,160 +114,87 @@ export function TopicHeaderView({
             className="waypoint-overflow-wrapper relative inline-flex"
             ref={overflowMenuRef}
           >
-            {isNarrow ? (
-              <>
+            <DropdownMenu
+              modal={false}
+              open={overflowMenuOpen}
+              onOpenChange={(nextOpen) => {
+                if (nextOpen === overflowMenuOpen) {
+                  return;
+                }
+                if (nextOpen) {
+                  onToggleOverflowMenu();
+                } else {
+                  onCloseOverflowMenu();
+                }
+              }}
+            >
+              <DropdownMenuTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
                   aria-label="话题操作"
-                  aria-haspopup="dialog"
-                  aria-expanded={overflowMenuOpen}
-                  className="waypoint-overflow-trigger size-11 min-w-11 min-h-11 rounded-full text-foreground hover:bg-accent active:scale-92"
-                  onClick={onToggleOverflowMenu}
+                  className={cn(
+                    "waypoint-overflow-trigger rounded-full text-foreground hover:bg-accent",
+                    isNarrow
+                      ? "size-11 min-w-11 min-h-11 active:scale-92"
+                      : "size-9",
+                  )}
                 >
                   <MoreHorizontal aria-hidden="true" className="size-5" />
                 </Button>
-                <ActionSheet
-                  open={overflowMenuOpen}
-                  onOpenChange={(nextOpen) => {
-                    if (!nextOpen) {
-                      onCloseOverflowMenu();
-                    }
-                  }}
-                >
-                  <ActionSheetContent
-                    aria-label="话题操作"
-                    onDismiss={onCloseOverflowMenu}
-                  >
-                    <ActionSheetCard>
-                      <div role="menu" aria-label="话题操作" className="flex flex-col">
-                        <ActionSheetItem
-                          className="waypoint-topic-pin-button"
-                          disabled={pinDisabled}
-                          aria-pressed={topic.pinned}
-                          aria-label={pinLabel}
-                          icon={<Pin aria-hidden="true" className="size-4" />}
-                          onClick={() => {
-                            onCloseOverflowMenu();
-                            onTogglePin();
-                          }}
-                        >
-                          {pinLabel}
-                        </ActionSheetItem>
-                        <ActionSheetItem
-                          className="waypoint-topic-edit-button"
-                          disabled={editOrDeleteDisabled}
-                          aria-label="编辑"
-                          icon={<PenLine aria-hidden="true" className="size-4" />}
-                          onClick={() => {
-                            onCloseOverflowMenu();
-                            onOpenEditForm();
-                          }}
-                        >
-                          编辑
-                        </ActionSheetItem>
-                        <ActionSheetItem
-                          variant="destructive"
-                          className="waypoint-topic-delete-button"
-                          disabled={editOrDeleteDisabled}
-                          aria-label="删除"
-                          icon={<Trash2 aria-hidden="true" className="size-4" />}
-                          onClick={() => {
-                            onCloseOverflowMenu();
-                            onOpenDeleteConfirm();
-                          }}
-                        >
-                          删除
-                        </ActionSheetItem>
-                      </div>
-                    </ActionSheetCard>
-                    <ActionSheetCard>
-                      <ActionSheetCancel onClick={onCloseOverflowMenu}>
-                        取消
-                      </ActionSheetCancel>
-                    </ActionSheetCard>
-                  </ActionSheetContent>
-                </ActionSheet>
-              </>
-            ) : (
-              <DropdownMenu
-                modal={false}
-                open={overflowMenuOpen}
-                onOpenChange={(nextOpen) => {
-                  if (nextOpen === overflowMenuOpen) {
-                    return;
-                  }
-                  if (nextOpen) {
-                    onToggleOverflowMenu();
-                  } else {
-                    onCloseOverflowMenu();
-                  }
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                aria-labelledby={undefined}
+                aria-label="话题操作"
+                align="end"
+                sideOffset={8}
+                className="waypoint-overflow-menu min-w-40 p-1.5 rounded-xl shadow-lg border-border/80 bg-popover/95 backdrop-blur-md"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  event.nativeEvent.stopPropagation();
                 }}
               >
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label="话题操作"
-                    className="waypoint-overflow-trigger size-9 rounded-full text-foreground hover:bg-accent"
-                  >
-                    <MoreHorizontal aria-hidden="true" className="size-5" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  aria-labelledby={undefined}
-                  aria-label="话题操作"
-                  align="end"
-                  sideOffset={8}
-                  className="waypoint-overflow-menu min-w-36 p-1.5"
-                  onPointerDown={(event) => {
-                    event.stopPropagation();
-                    event.nativeEvent.stopPropagation();
+                <DropdownMenuItem
+                  className="waypoint-topic-pin-button min-h-11 px-3 text-[15px] gap-2.5"
+                  disabled={pinDisabled}
+                  aria-pressed={topic.pinned}
+                  aria-label={pinLabel}
+                  onSelect={() => {
+                    onCloseOverflowMenu();
+                    onTogglePin();
                   }}
                 >
-                  <DropdownMenuItem
-                    className="waypoint-topic-pin-button min-h-11 px-3 text-[15px] gap-2.5"
-                    disabled={pinDisabled}
-                    aria-pressed={topic.pinned}
-                    aria-label={pinLabel}
-                    onSelect={() => {
-                      onCloseOverflowMenu();
-                      onTogglePin();
-                    }}
-                  >
-                    <Pin aria-hidden="true" className="size-4" />
-                    <span>{pinLabel}</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    className="waypoint-topic-edit-button min-h-11 px-3 text-[15px] gap-2.5"
-                    disabled={editOrDeleteDisabled}
-                    aria-label="编辑"
-                    onSelect={() => {
-                      onCloseOverflowMenu();
-                      onOpenEditForm();
-                    }}
-                  >
-                    <PenLine aria-hidden="true" className="size-4" />
-                    <span>编辑</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    className="waypoint-topic-delete-button min-h-11 px-3 text-[15px] gap-2.5"
-                    disabled={editOrDeleteDisabled}
-                    aria-label="删除"
-                    onSelect={() => {
-                      onCloseOverflowMenu();
-                      onOpenDeleteConfirm();
-                    }}
-                  >
-                    <Trash2 aria-hidden="true" className="size-4" />
-                    <span>删除</span>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
+                  <Pin aria-hidden="true" className="size-4" />
+                  <span>{pinLabel}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  className="waypoint-topic-edit-button min-h-11 px-3 text-[15px] gap-2.5"
+                  disabled={editOrDeleteDisabled}
+                  aria-label="编辑"
+                  onSelect={() => {
+                    onCloseOverflowMenu();
+                    onOpenEditForm();
+                  }}
+                >
+                  <PenLine aria-hidden="true" className="size-4" />
+                  <span>编辑</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  variant="destructive"
+                  className="waypoint-topic-delete-button min-h-11 px-3 text-[15px] gap-2.5"
+                  disabled={editOrDeleteDisabled}
+                  aria-label="删除"
+                  onSelect={() => {
+                    onCloseOverflowMenu();
+                    onOpenDeleteConfirm();
+                  }}
+                >
+                  <Trash2 aria-hidden="true" className="size-4" />
+                  <span>删除</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
           {/* Visually converged to the ··· overflow menu per ADR-0024; keep direct buttons sr-only for test/a11y hooks */}
           <div className="waypoint-sr-only sr-only">

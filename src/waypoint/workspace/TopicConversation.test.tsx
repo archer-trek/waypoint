@@ -176,7 +176,7 @@ describe("TopicHeaderView (#89)", () => {
     expect(document.querySelector(".waypoint-desktop-actions")).toBeNull();
   });
 
-  test("narrow TopicHeaderView renders ActionSheet bottom drawer with grabber, destructive styling, and cancel button (ADR-0028)", async () => {
+  test("narrow TopicHeaderView renders anchored pull-down DropdownMenu under trigger (iOS 14+ UIMenu / M3 Overflow pattern)", async () => {
     const user = userEvent.setup();
     const onTogglePin = vi.fn();
     const onOpenEditForm = vi.fn();
@@ -212,31 +212,24 @@ describe("TopicHeaderView (#89)", () => {
     render(<NarrowHeaderHarness />);
 
     const trigger = screen.getByRole("button", { name: "话题操作" });
-    expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
     await user.click(trigger);
 
-    // Bottom ActionSheet should be mounted
-    const actionSheet = screen.getByRole("dialog", { name: "话题操作" });
-    expect(actionSheet).toHaveAttribute("data-slot", "action-sheet-content");
-    expect(actionSheet.querySelector('[data-slot="action-sheet-grabber"]')).not.toBeNull();
+    // Anchored Pull-down DropdownMenu should be mounted right under the trigger
+    const menu = screen.getByRole("menu", { name: "话题操作" });
+    expect(menu).toHaveAttribute("data-slot", "dropdown-menu-content");
 
-    // Verify grouped items
-    const pinItem = within(actionSheet).getByRole("menuitem", { name: "置顶" });
-    const editItem = within(actionSheet).getByRole("menuitem", { name: "编辑" });
-    const deleteItem = within(actionSheet).getByRole("menuitem", { name: "删除" });
+    // Verify items
+    const pinItem = within(menu).getByRole("menuitem", { name: "置顶" });
+    const editItem = within(menu).getByRole("menuitem", { name: "编辑" });
+    const deleteItem = within(menu).getByRole("menuitem", { name: "删除" });
     expect(pinItem).toBeInTheDocument();
+    expect(editItem).toBeInTheDocument();
     expect(deleteItem).toHaveAttribute("data-variant", "destructive");
 
-    // Click edit invokes callback and closes action sheet
+    // Click edit invokes callback and closes menu
     await user.click(editItem);
     expect(onOpenEditForm).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog", { name: "话题操作" })).not.toBeInTheDocument();
-
-    // Reopen and test cancel button
-    await user.click(trigger);
-    const cancelBtn = within(screen.getByRole("dialog", { name: "话题操作" })).getByRole("button", { name: "取消" });
-    await user.click(cancelBtn);
-    expect(screen.queryByRole("dialog", { name: "话题操作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "话题操作" })).not.toBeInTheDocument();
   });
 });
 
