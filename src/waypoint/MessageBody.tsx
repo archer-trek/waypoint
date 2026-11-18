@@ -545,6 +545,7 @@ export function MessageBody({
         controls={STREAMDOWN_CONTROLS}
         remend={STREAMDOWN_REMEND}
         linkSafety={STREAMDOWN_LINK_SAFETY}
+        tableMaxHeight="none"
         lineNumbers={false}
         translations={STREAMDOWN_TRANSLATIONS}
       >

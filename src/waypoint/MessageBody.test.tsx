@@ -184,6 +184,20 @@ describe("MessageBody inline colors and GFM callouts (#103)", () => {
 });
 
 describe("MessageBody code blocks and table DOM hooks", () => {
+  test.each([false, true])("renders tall tables without a height cap (richColor=%s)", (richColor) => {
+    const rows = Array.from({ length: 15 }, (_, index) => `| Row ${index + 1} | Value ${index + 1} |`);
+    const body = ["| Name | Value |", "| --- | --- |", ...rows].join("\n");
+    const { container } = render(<MessageBody body={body} richColor={richColor} />);
+    const scroller = container.querySelector<HTMLElement>(
+      '[data-streamdown="table-wrapper"] > div:last-child',
+    );
+
+    expect(scroller).not.toBeNull();
+    expect(["", "none"]).toContain(scroller!.style.maxHeight);
+    expect(scroller!.querySelectorAll("tbody tr")).toHaveLength(15);
+    expect(within(scroller!).getByText("Row 15")).toBeInTheDocument();
+  });
+
   test("exposes language attributes and unified Streamdown hooks for headerless and tagged code blocks", () => {
     const body = [
       "💻 terminal",
