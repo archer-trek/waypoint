@@ -31,6 +31,21 @@ export default tseslint.config(
           caughtErrorsIgnorePattern: "^_",
         },
       ],
+      "no-restricted-properties": [
+        "error",
+        {
+          object: "navigator",
+          property: "clipboard",
+          message:
+            "Use copyToClipboard() from @/lib/utils so non-secure HTTP (Tailscale) fallback, readonly, and focus restoration are preserved.",
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/lib/utils.ts", "**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-properties": "off",
     },
   },
 );

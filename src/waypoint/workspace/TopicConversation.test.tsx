@@ -428,6 +428,152 @@ describe("TimelineView (#89)", () => {
       vi.useRealTimers();
     }
   });
+
+  test("long-press copies rendered plain text vs Markdown, scopes code copy to fenced code blocks, skips empty media bubbles, and emits feedback", async () => {
+    const originalClipboard = navigator.clipboard;
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: writeTextMock },
+    });
+
+    const onCopyFeedback = vi.fn();
+    const richItems: TimelineItem[] = [
+      {
+        kind: "message",
+        key: "rich-1",
+        eventId: "$rich-1",
+        side: "left",
+        status: "confirmed",
+        body: "## 小节标题\n\n**加粗** 与 [链接](https://example.com) 及 `inline_var`\n\n> 引用文本\n\n| 列A | 列B |\n| --- | --- |\n| 1 | 2 |\n\n```ts\nconst x = 1;\n```",
+      },
+      {
+        kind: "message",
+        key: "media-empty",
+        eventId: "$media-empty",
+        side: "right",
+        status: "confirmed",
+        body: "",
+        media: {
+          kind: "image",
+          msgtype: "m.image",
+          filename: "photo.png",
+          mxcUrl: "mxc://example.com/photo",
+        },
+      },
+    ];
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      render(
+        <TimelineView
+          timelineRef={createRef()}
+          items={richItems}
+          isNarrow={true}
+          activeTopicUnavailable={false}
+          reauthRequired={false}
+          openFailedMenuId={null}
+          getLocalImageUrl={() => ""}
+          getDownloadedImageUrl={() => "blob:photo"}
+          onScroll={vi.fn()}
+          onToggleFailedMenu={vi.fn()}
+          onOpenFailedMenu={vi.fn()}
+          onResendFailed={vi.fn()}
+          onDiscardFailed={vi.fn()}
+          onOpenMedia={vi.fn()}
+          onOpenExternalUrl={vi.fn()}
+          onSelectPromptOption={vi.fn()}
+          onCopyFeedback={onCopyFeedback}
+        />,
+      );
+
+      // 1. Empty media-only bubble should not open ActionSheet on long-press
+      const imgBtn = screen.getByRole("button", { name: "查看图片 photo.png" });
+      fireEvent.touchStart(imgBtn, { touches: [{ clientX: 50, clientY: 50 }] });
+      act(() => {
+        vi.advanceTimersByTime(550);
+      });
+      expect(screen.queryByRole("dialog", { name: "消息操作" })).not.toBeInTheDocument();
+
+      // 2. Non-code Streamdown elements (inline code, heading, blockquote, table, code-block header) must NOT show 复制代码
+      const nonCodeTargets = [
+        screen.getByText("inline_var"),
+        screen.getByText("小节标题"),
+        screen.getByText("引用文本"),
+        screen.getByText("列A"),
+        document.querySelector('[data-streamdown="code-block-header"]') as HTMLElement,
+      ];
+
+      for (const target of nonCodeTargets) {
+        expect(target).toBeTruthy();
+        fireEvent.touchStart(target, { touches: [{ clientX: 50, clientY: 50 }] });
+        act(() => {
+          vi.advanceTimersByTime(550);
+        });
+        const dialog = screen.getByRole("dialog", { name: "消息操作" });
+        expect(within(dialog).queryByRole("menuitem", { name: "复制代码" })).not.toBeInTheDocument();
+        fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+      }
+
+      // 3. Plain text copy vs Markdown copy
+      const removeAllRangesSpy = vi.fn();
+      vi.spyOn(window, "getSelection").mockReturnValue({
+        removeAllRanges: removeAllRangesSpy,
+      } as unknown as Selection);
+
+      const boldEl = screen.getByText("加粗");
+      fireEvent.touchStart(boldEl, { touches: [{ clientX: 50, clientY: 50 }] });
+      act(() => {
+        vi.advanceTimersByTime(550);
+      });
+      expect(removeAllRangesSpy).toHaveBeenCalled();
+
+      let dialog = screen.getByRole("dialog", { name: "消息操作" });
+      fireEvent.click(within(dialog).getByRole("menuitem", { name: "复制纯文本" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const copiedPlain = writeTextMock.mock.calls.at(-1)?.[0] as string;
+      expect(copiedPlain).toContain("加粗 与 链接 及 inline_var");
+      expect(copiedPlain).not.toContain("**");
+      expect(copiedPlain).not.toContain("https://example.com");
+      expect(copiedPlain).not.toContain("```ts");
+      expect(onCopyFeedback).toHaveBeenCalledWith("已复制");
+
+      fireEvent.touchStart(boldEl, { touches: [{ clientX: 50, clientY: 50 }] });
+      act(() => {
+        vi.advanceTimersByTime(550);
+      });
+      dialog = screen.getByRole("dialog", { name: "消息操作" });
+      fireEvent.click(within(dialog).getByRole("menuitem", { name: "复制 Markdown" }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(writeTextMock.mock.calls.at(-1)?.[0]).toBe((richItems[0] as Extract<TimelineItem, { kind: "message" }>).body);
+
+      // 4. Long-press inside fenced code-block-body shows 复制代码 and copies pure code only
+      const codeBody = document.querySelector('[data-streamdown="code-block-body"] code') as HTMLElement;
+      expect(codeBody).toBeTruthy();
+      fireEvent.touchStart(codeBody, { touches: [{ clientX: 50, clientY: 50 }] });
+      act(() => {
+        vi.advanceTimersByTime(550);
+      });
+      dialog = screen.getByRole("dialog", { name: "消息操作" });
+      const copyCodeItem = within(dialog).getByRole("menuitem", { name: "复制代码" });
+      fireEvent.click(copyCodeItem);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect((writeTextMock.mock.calls.at(-1)?.[0] as string).trim()).toBe("const x = 1;");
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: originalClipboard,
+      });
+    }
+  });
 });
 
 describe("ComposerView (#89)", () => {

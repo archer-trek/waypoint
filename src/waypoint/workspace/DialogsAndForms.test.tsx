@@ -478,6 +478,105 @@ describe("Responsive Dialogs, Forms, and AlertDialogs (#87)", () => {
     expect(screen.queryByRole("alertdialog", { name: "放弃未保存的更改吗？" })).not.toBeInTheDocument();
   });
 
+  test("dirty-form AlertDialog intercepts footer cancel, Settings close, Escape outside dialog, edge swipe, and system back with depth restoration, while avoiding false positive on unmodified edit Bot", async () => {
+    const user = userEvent.setup();
+    const homeserver = createConnectedHomeserver();
+    const clock = new ManualClock();
+    const { platform: widePlatform } = makeWorkspacePlatform("wide");
+    const wideView = render(
+      <WaypointApp homeserver={homeserver} platform={widePlatform} clock={clock} />,
+    );
+
+    await loginToWorkspace(user);
+
+    // 1. Wide CreateTopic: footer 取消 + global Escape outside DialogContent
+    await user.click(screen.getByRole("button", { name: "新建 Topic" }));
+    const createDialog = screen.getByRole("region", { name: "新建 Topic" });
+    await user.type(within(createDialog).getByLabelText("Topic 名字"), "未保存标题");
+
+    await user.click(within(createDialog).getByRole("button", { name: "取消" }));
+    let discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(discardAlert).getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeInTheDocument();
+
+    // Global Escape outside DialogContent (dispatch on document.body)
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(discardAlert).getByRole("button", { name: "放弃更改" }));
+    expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+
+    // 2. Wide EditTopic: footer 取消
+    await user.click(screen.getByRole("button", { name: /已有话题/ }));
+    await user.click(screen.getByRole("button", { name: "话题操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "编辑" }));
+    const editDialog = screen.getByRole("region", { name: "编辑 Topic" });
+    await user.type(within(editDialog).getByLabelText("Topic 名字"), "修改");
+    await user.click(within(editDialog).getByRole("button", { name: "取消" }));
+    discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(discardAlert).getByRole("button", { name: "放弃更改" }));
+    expect(screen.queryByRole("region", { name: "编辑 Topic" })).not.toBeInTheDocument();
+
+    // 3. Wide Settings: unmodified 编辑 Bot must NOT false-positive; modified 编辑 Bot + 关闭 must guard
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const settingsDialog = screen.getByRole("region", { name: "设置" });
+    await user.click(within(settingsDialog).getAllByRole("button", { name: "编辑" })[0]!);
+    await user.click(within(settingsDialog).getByRole("button", { name: "关闭" }));
+    expect(screen.queryByRole("alertdialog", { name: "放弃未保存的更改吗？" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "设置" })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const settingsDialog2 = screen.getByRole("region", { name: "设置" });
+    await user.click(within(settingsDialog2).getAllByRole("button", { name: "编辑" })[0]!);
+    await user.type(within(settingsDialog2).getByLabelText("手写名字（可选）"), "2");
+    await user.click(within(settingsDialog2).getByRole("button", { name: "关闭" }));
+    discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(discardAlert).getByRole("button", { name: "放弃更改" }));
+    expect(screen.queryByRole("region", { name: "设置" })).not.toBeInTheDocument();
+    wideView.unmount();
+
+    // 4. Narrow viewport: edge swipe back + system back (popstate) with history depth restoration
+    let backHandler: (() => boolean) | undefined;
+    let pushCount = 0;
+    let popCount = 0;
+    const narrowPlatform: PlatformAdapter = {
+      deviceDisplayName: "Android",
+      viewportMode: () => "narrow",
+      pushNavigationEntry: () => { pushCount += 1; },
+      popNavigationEntry: () => { popCount += 1; },
+      onSystemBack: (handler) => {
+        backHandler = handler;
+        return () => { backHandler = undefined; };
+      },
+    };
+    const narrowView = render(
+      <WaypointApp homeserver={homeserver} platform={narrowPlatform} clock={clock} />,
+    );
+    await user.click(await screen.findByRole("button", { name: "新建 Topic" }));
+    const narrowCreate = screen.getByRole("region", { name: "新建 Topic" });
+    await user.type(within(narrowCreate).getByLabelText("Topic 名字"), "窄屏未保存");
+    const pushesBeforeBack = pushCount;
+
+    // System back triggers AlertDialog and restores navigation depth if cancelled
+    act(() => {
+      expect(backHandler?.()).toBe(true);
+    });
+    discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    expect(pushCount).toBe(pushesBeforeBack + 1);
+    await user.click(within(discardAlert).getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeInTheDocument();
+
+    // Edge swipe back triggers AlertDialog too
+    const detailContainer = document.querySelector(".waypoint-detail") as HTMLElement;
+    fireEvent.touchStart(detailContainer, { touches: [{ clientX: 10, clientY: 200 }] });
+    fireEvent.touchMove(detailContainer, { touches: [{ clientX: 110, clientY: 200 }] });
+    fireEvent.touchEnd(detailContainer);
+    discardAlert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(discardAlert).getByRole("button", { name: "放弃更改" }));
+    expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
+    expect(popCount).toBeGreaterThanOrEqual(1);
+    narrowView.unmount();
+  });
+
   test("owned workspace dialog and form files contain zero raw hex color literals", async () => {
     // @ts-expect-error Node.js built-in fs in Vitest test runner
     const { readFileSync } = await import("node:fs");

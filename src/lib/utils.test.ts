@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
-import { cn } from "./utils";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { cn, copyToClipboard } from "./utils";
 
 async function readAppCss(): Promise<string> {
   // @ts-expect-error Node.js built-in fs in Vitest test runner
@@ -84,5 +84,73 @@ describe("Tailwind v4 & Grokbot theme tokens in App.css", () => {
     }
     expect(css).toContain(".dark");
     expect(css).toContain('[data-theme="dark"]');
+  });
+});
+
+describe("copyToClipboard", () => {
+  const originalClipboard = navigator.clipboard;
+  const originalExecCommand = document.execCommand;
+
+  afterEach(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: originalClipboard,
+    });
+    document.execCommand = originalExecCommand;
+    document.body.innerHTML = "";
+    vi.restoreAllMocks();
+  });
+
+  test("uses readonly textarea, preventScroll, setSelectionRange, and restores activeElement focus when navigator.clipboard is unavailable", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+
+    const triggerButton = document.createElement("button");
+    triggerButton.textContent = "Copy";
+    document.body.appendChild(triggerButton);
+    triggerButton.focus();
+    const restoreFocusSpy = vi.spyOn(triggerButton, "focus");
+
+    let capturedReadonly = false;
+    let capturedSelectionStart: number | null = null;
+    let capturedSelectionEnd: number | null = null;
+    let capturedFocusOpts: FocusOptions | undefined;
+
+    const origCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
+      const el = origCreateElement(tagName);
+      if (tagName.toLowerCase() === "textarea") {
+        const ta = el as HTMLTextAreaElement;
+        const origFocus = ta.focus.bind(ta);
+        vi.spyOn(ta, "focus").mockImplementation((opts?: FocusOptions) => {
+          capturedFocusOpts = opts;
+          origFocus(opts);
+        });
+        const origSetRange = ta.setSelectionRange.bind(ta);
+        vi.spyOn(ta, "setSelectionRange").mockImplementation((start: number | null, end: number | null) => {
+          capturedSelectionStart = start;
+          capturedSelectionEnd = end;
+          origSetRange(start ?? 0, end ?? 0);
+        });
+      }
+      return el;
+    });
+
+    document.execCommand = vi.fn().mockImplementation(() => {
+      const ta = document.querySelector("textarea");
+      capturedReadonly = Boolean(ta?.hasAttribute("readonly"));
+      return true;
+    });
+
+    const ok = await copyToClipboard("hello waypoint");
+    expect(ok).toBe(true);
+    expect(document.execCommand).toHaveBeenCalledWith("copy");
+    expect(capturedReadonly).toBe(true);
+    expect(capturedFocusOpts).toEqual({ preventScroll: true });
+    expect(capturedSelectionStart).toBe(0);
+    expect(capturedSelectionEnd).toBe("hello waypoint".length);
+    expect(restoreFocusSpy).toHaveBeenCalledWith({ preventScroll: true });
   });
 });

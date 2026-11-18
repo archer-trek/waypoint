@@ -22,10 +22,35 @@ import { ExitConfirmDialog } from "./ReauthBanner";
 import { ResponsiveFormShell } from "./ResponsiveFormShell";
 import type { AgentsFormState } from "./types";
 
+/** Determine whether the Bot management sub-form holds unsaved edits. */
+export function isSettingsAgentsFormDirty(
+  agentsForm: AgentsFormState | null,
+  registeredAgents: RegisteredAgent[],
+): boolean {
+  if (!agentsForm) {
+    return false;
+  }
+  if (agentsForm.mode === "add") {
+    return Boolean(
+      agentsForm.userId.trim() || agentsForm.handwrittenName.trim(),
+    );
+  }
+  if (agentsForm.mode === "edit") {
+    const baseline =
+      agentsForm.initialHandwrittenName ??
+      registeredAgents.find((bot) => bot.userId === agentsForm.userId)
+        ?.handwrittenName ??
+      "";
+    return agentsForm.handwrittenName !== baseline;
+  }
+  return false;
+}
+
 export type SettingsViewProps = {
   isModal: boolean;
   isNarrow: boolean;
   safeInset: number;
+  nestedModalOpen?: boolean;
   reauthBanner: ReactNode;
   registeredAgents: RegisteredAgent[];
   roomList: StoredRoomEvents[];
@@ -36,6 +61,7 @@ export type SettingsViewProps = {
   exiting: boolean;
   onGoBack: () => void;
   onCloseSettings: () => void;
+  onRequestExit?: (action: () => void) => void;
   onOpenAddAgentForm: () => void;
   onOpenEditAgentForm: (userId: string, currentName?: string) => void;
   onOpenRemoveAgentConfirm: (userId: string) => void;
@@ -54,6 +80,7 @@ export function SettingsView({
   isModal,
   isNarrow,
   safeInset,
+  nestedModalOpen = false,
   reauthBanner,
   registeredAgents,
   roomList,
@@ -64,6 +91,7 @@ export function SettingsView({
   exiting,
   onGoBack,
   onCloseSettings,
+  onRequestExit,
   onOpenAddAgentForm,
   onOpenEditAgentForm,
   onOpenRemoveAgentConfirm,
@@ -78,13 +106,9 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [appearanceMode, setAppearanceMode] = useAppearancePreference();
   const busy = agentsSubmitting || exiting;
-  const isDirty = Boolean(
-    agentsForm &&
-      (agentsForm.userId.trim() ||
-        (agentsForm.mode !== "remove" && agentsForm.handwrittenName.trim())),
-  );
+  const isDirty = isSettingsAgentsFormDirty(agentsForm, registeredAgents);
   const hasNestedAlertDialog =
-    agentsForm?.mode === "remove" || exitConfirmOpen;
+    nestedModalOpen || agentsForm?.mode === "remove" || exitConfirmOpen;
 
   return (
     <ResponsiveFormShell
@@ -97,21 +121,22 @@ export function SettingsView({
       backDisabled={busy}
       nestedModalOpen={hasNestedAlertDialog}
       reauthBanner={reauthBanner}
-      headerAction={
+      headerAction={({ requestExit }) => (
         <Button
           type="button"
           variant="ghost"
           size="sm"
           disabled={busy}
-          onClick={onCloseSettings}
+          onClick={() => requestExit(onCloseSettings)}
           className="h-8 gap-1 px-2 text-muted-foreground hover:text-foreground"
         >
           <X className="size-4" aria-hidden="true" />
           关闭
         </Button>
-      }
+      )}
       onClose={onCloseSettings}
       onGoBack={onGoBack}
+      onRequestExit={onRequestExit}
       onEscapeKeyDown={(event) => {
         if (agentsForm && agentsForm.mode !== "remove") {
           event.preventDefault();
@@ -191,7 +216,7 @@ export function SettingsView({
               <Input
                 id="agents-bot-user-id"
                 name="agents-bot-user-id"
-                                autoCapitalize="none"
+                autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
                 value={agentsForm.userId}

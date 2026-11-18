@@ -18,4 +18,4 @@ Cut `<type>/<issue>-<slug>` (or `<type>/<slug>` for standalone changes) branches
 
 ### Coding standards
 
-Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css`, updating icons/assets, or modifying UI components and integration tests.
+Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `src/lib/overlay-scrollbars.ts`, updating icons/assets, or modifying UI components and integration tests.

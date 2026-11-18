@@ -1,6 +1,6 @@
 import { useState, useRef, type RefObject } from "react";
 import { copyToClipboard } from "@/lib/utils";
-import { FileText, MoreHorizontal } from "lucide-react";
+import { Code2, Copy, FileText, MoreHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,7 +38,102 @@ export type TimelineViewProps = {
   onOpenMedia: (media: TimelineMedia) => void;
   onOpenExternalUrl: (url: string) => void;
   onSelectPromptOption: (eventId: string, optionKey: string) => void;
+  onCopyFeedback?: (message: string) => void;
 };
+
+const BLOCK_TAG_NAMES = new Set([
+  "p",
+  "div",
+  "li",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "blockquote",
+  "pre",
+  "tr",
+]);
+
+function extractPlainTextFromBubble(bubbleEl: HTMLElement | null): string {
+  if (!bubbleEl) return "";
+
+  const parts: string[] = [];
+
+  function walk(node: Node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      parts.push(node.textContent ?? "");
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return;
+    }
+    const el = node as HTMLElement;
+    const tag = el.tagName.toLowerCase();
+    if (
+      tag === "button" ||
+      tag === "script" ||
+      tag === "style" ||
+      el.getAttribute("aria-hidden") === "true" ||
+      el.getAttribute("data-streamdown") === "code-block-header" ||
+      el.getAttribute("data-streamdown") === "code-block-actions"
+    ) {
+      return;
+    }
+    if (tag === "br") {
+      parts.push("\n");
+      return;
+    }
+    const isBlock = BLOCK_TAG_NAMES.has(tag);
+    if (isBlock && parts.length > 0 && !parts[parts.length - 1]!.endsWith("\n")) {
+      parts.push("\n");
+    }
+    const isCell = tag === "td" || tag === "th";
+    const beforeLen = parts.length;
+    for (const child of Array.from(el.childNodes)) {
+      walk(child);
+    }
+    if (isCell && parts.length > beforeLen) {
+      const nextSibling = el.nextElementSibling;
+      if (nextSibling && (nextSibling.tagName.toLowerCase() === "td" || nextSibling.tagName.toLowerCase() === "th")) {
+        parts.push("\t");
+      }
+    }
+    if (isBlock && parts.length > beforeLen && !parts[parts.length - 1]!.endsWith("\n")) {
+      parts.push("\n");
+    }
+  }
+
+  walk(bubbleEl);
+  return parts
+    .join("")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractCodeSnippet(target: HTMLElement | null): string | undefined {
+  if (!target) return undefined;
+  if (
+    target.closest('[data-streamdown="code-block-header"]') ||
+    target.closest('[data-streamdown="code-block-actions"]')
+  ) {
+    return undefined;
+  }
+  const codeBody = target.closest(
+    '[data-streamdown="code-block"] [data-streamdown="code-block-body"]',
+  );
+  if (codeBody) {
+    const codeEl = codeBody.querySelector("pre > code") ?? codeBody.querySelector("code");
+    return codeEl?.textContent ?? undefined;
+  }
+  const preEl = target.closest("pre");
+  if (preEl && !preEl.closest('[data-streamdown="code-block-header"]')) {
+    const codeEl = preEl.querySelector(":scope > code") ?? preEl;
+    return codeEl.textContent ?? undefined;
+  }
+  return undefined;
+}
 
 /** Scrollable timeline log rendering day separators, message bubbles, media, reactions, and prompts. */
 export function TimelineView({
@@ -58,36 +153,37 @@ export function TimelineView({
   onOpenMedia,
   onOpenExternalUrl,
   onSelectPromptOption,
+  onCopyFeedback,
 }: TimelineViewProps) {
   const longPressTimerRef = useRef<number | null>(null);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const [contextMenuItem, setContextMenuItem] = useState<{
     item: TimelineItem;
+    plainText: string;
+    markdownText: string;
     codeSnippet?: string;
   } | null>(null);
 
-  function extractCodeSnippet(target: HTMLElement | null): string | undefined {
-    let el = target;
-    while (el && el !== document.body) {
-      if (
-        el.tagName.toLowerCase() === "code" ||
-        el.tagName.toLowerCase() === "pre" ||
-        el.hasAttribute("data-streamdown")
-      ) {
-        return el.textContent ?? undefined;
-      }
-      el = el.parentElement;
-    }
-    return undefined;
-  }
+  function handleTouchStart(e: React.TouchEvent<HTMLDivElement>, item: TimelineItem) {
+    if (isNarrow === false || e.touches.length !== 1 || item.kind !== "message") return;
+    const markdownText = item.body?.trim()
+      ? item.body
+      : item.media?.caption?.trim()
+        ? item.media.caption
+        : "";
+    if (!markdownText) return;
 
-  function handleTouchStart(e: React.TouchEvent, item: TimelineItem) {
-    if (isNarrow === false || e.touches.length !== 1) return;
     const touch = e.touches[0]!;
+    const bubbleEl = e.currentTarget;
+    const targetEl = e.target as HTMLElement | null;
     touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
-    const codeSnippet = extractCodeSnippet(e.target as HTMLElement);
+    const codeSnippet = extractCodeSnippet(targetEl);
     longPressTimerRef.current = window.setTimeout(() => {
-      setContextMenuItem({ item, codeSnippet });
+      longPressTimerRef.current = null;
+      touchStartPosRef.current = null;
+      window.getSelection()?.removeAllRanges();
+      const plainText = extractPlainTextFromBubble(bubbleEl) || markdownText;
+      setContextMenuItem({ item, plainText, markdownText, codeSnippet });
     }, 500);
   }
 
@@ -109,6 +205,15 @@ export function TimelineView({
       longPressTimerRef.current = null;
     }
     touchStartPosRef.current = null;
+  }
+
+  function performCopy(text: string) {
+    setContextMenuItem(null);
+    void copyToClipboard(text).then((ok) => {
+      if (ok) {
+        onCopyFeedback?.("已复制");
+      }
+    });
   }
 
   return (
@@ -373,43 +478,38 @@ export function TimelineView({
       >
         <ActionSheetContent
           aria-label="消息操作"
+          title="消息操作"
           onDismiss={() => setContextMenuItem(null)}
         >
           <ActionSheetCard>
             <div role="menu" aria-label="消息操作" className="flex flex-col">
               <ActionSheetItem
+                icon={<Copy className="size-4" aria-hidden="true" />}
                 onClick={() => {
-                  if (contextMenuItem?.item.kind === "message") {
-                    const textToCopy =
-                      contextMenuItem.item.media?.caption ??
-                      contextMenuItem.item.body ??
-                      "";
-                    void copyToClipboard(textToCopy);
+                  if (contextMenuItem) {
+                    performCopy(contextMenuItem.plainText);
                   }
-                  setContextMenuItem(null);
                 }}
               >
                 复制纯文本
               </ActionSheetItem>
               <ActionSheetItem
+                icon={<FileText className="size-4" aria-hidden="true" />}
                 onClick={() => {
-                  if (contextMenuItem?.item.kind === "message") {
-                    const textToCopy =
-                      contextMenuItem.item.body ??
-                      contextMenuItem.item.media?.caption ??
-                      "";
-                    void copyToClipboard(textToCopy);
+                  if (contextMenuItem) {
+                    performCopy(contextMenuItem.markdownText);
                   }
-                  setContextMenuItem(null);
                 }}
               >
                 复制 Markdown
               </ActionSheetItem>
               {contextMenuItem?.codeSnippet ? (
                 <ActionSheetItem
+                  icon={<Code2 className="size-4" aria-hidden="true" />}
                   onClick={() => {
-                    void copyToClipboard(contextMenuItem.codeSnippet!);
-                    setContextMenuItem(null);
+                    if (contextMenuItem?.codeSnippet) {
+                      performCopy(contextMenuItem.codeSnippet);
+                    }
                   }}
                 >
                   复制代码

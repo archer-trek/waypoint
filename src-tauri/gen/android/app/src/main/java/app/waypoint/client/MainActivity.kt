@@ -5,6 +5,7 @@ import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import kotlin.math.roundToInt
 
 class MainActivity : TauriActivity() {
   private var currentWebView: WebView? = null
@@ -16,8 +17,10 @@ class MainActivity : TauriActivity() {
 
     ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
       val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+      val navBarInsets = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+      val imeBottomPx = (imeInsets.bottom - navBarInsets.bottom).coerceAtLeast(0)
       val density = resources.displayMetrics.density
-      val imeHeightDp = if (imeInsets.bottom > 0) (imeInsets.bottom / density).toInt() else 0
+      val imeHeightDp = if (imeBottomPx > 0) (imeBottomPx / density).roundToInt() else 0
 
       if (imeHeightDp != lastImeHeightDp) {
         lastImeHeightDp = imeHeightDp

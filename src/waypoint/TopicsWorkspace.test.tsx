@@ -1657,4 +1657,115 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
       if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
     }
   });
+
+  test("edge swipe enforces 10px touch slop and handles same-frame fast flicks via ref state", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-2" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const harness = makePlatformHarness("narrow");
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      accountData: { "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com", name: "Hermes" }] } },
+      rooms: {
+        "!t1:example.com": makeStoredRoom({
+          name: "快速轻扫测试",
+          messages: [makeTextEvent("$e1", "@bot:example.com", "消息内容", clock.now - 5_000)],
+        }),
+      },
+    });
+
+    const view = render(
+      <WaypointApp homeserver={homeserver} platform={harness.platform} clock={clock} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: /快速轻扫测试/ }));
+    const detailContainer = document.querySelector(".waypoint-detail") as HTMLElement;
+
+    // Small movement within 10px slop must NOT engage swipe translation
+    fireEvent.touchStart(detailContainer, { touches: [{ clientX: 10, clientY: 200 }] });
+    fireEvent.touchMove(detailContainer, { touches: [{ clientX: 18, clientY: 200 }] });
+    expect(detailContainer).not.toHaveAttribute("data-swiping-back");
+    expect(detailContainer).not.toHaveAttribute("data-swipe-offset");
+    fireEvent.touchEnd(detailContainer);
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeInTheDocument();
+
+    // Fast flick > 80px within same synchronous frame (without waiting for re-render between touchMove and touchEnd)
+    fireEvent.touchStart(detailContainer, { touches: [{ clientX: 10, clientY: 200 }] });
+    fireEvent.touchMove(detailContainer, { touches: [{ clientX: 105, clientY: 200 }] });
+    fireEvent.touchEnd(detailContainer);
+    expect(await screen.findByRole("complementary", { name: "Topic 列表" })).toBeInTheDocument();
+    view.unmount();
+  });
+
+  test("opening a long Topic that programmatically scrolls past 4px immediately sets TopicHeaderView data-elevated=true", async () => {
+    const user = userEvent.setup();
+    const messages = Array.from({ length: 12 }, (_, idx) =>
+      makeTextEvent(`$m${idx}`, idx % 2 === 0 ? "@alice:example.com" : "@bot:example.com", `消息 ${idx}`, 1_700_000_000_000 + idx * 1000),
+    );
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-long" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!long:example.com": makeStoredRoom({
+          name: "长对话顶栏",
+          messages,
+        }),
+      },
+    });
+
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 400;
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 1200;
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const clock = new ManualClock();
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /长对话顶栏/ }));
+      const header = document.querySelector(".waypoint-topic-header") as HTMLElement;
+      expect(header).toHaveAttribute("data-elevated", "true");
+      view.unmount();
+    } finally {
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    }
+  });
 });

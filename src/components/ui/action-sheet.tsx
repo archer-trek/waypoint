@@ -48,6 +48,7 @@ export function ActionSheetOverlay({
 export type ActionSheetContentProps = ComponentProps<
   typeof DialogPrimitive.Content
 > & {
+  title?: string;
   onDismiss?: () => void;
   overlayClassName?: string;
 };
@@ -56,25 +57,32 @@ export type ActionSheetContentProps = ComponentProps<
 export function ActionSheetContent({
   className,
   children,
+  title,
   onDismiss,
   overlayClassName,
   ...props
 }: ActionSheetContentProps) {
   const touchStartRef = useRef<number | null>(null);
+  const dragDeltaRef = useRef(0);
   const [dragDelta, setDragDelta] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const accessibleTitle = title ?? props["aria-label"] ?? "操作菜单";
 
   return (
     <ActionSheetPortal>
       <ActionSheetOverlay className={overlayClassName} />
       <DialogPrimitive.Content
         data-slot="action-sheet-content"
+        aria-describedby={props["aria-describedby"] ?? undefined}
         onPointerDown={(event) => {
           event.stopPropagation();
           event.nativeEvent?.stopPropagation?.();
         }}
         className={cn(
-          "fixed inset-x-0 bottom-0 z-50 flex max-h-[85vh] flex-col gap-2 p-3 outline-none transition-transform duration-150 ease-out sm:max-w-md sm:mx-auto",
+          "fixed inset-x-0 bottom-0 z-50 flex max-h-[85vh] flex-col gap-2 px-3 pt-0 outline-none sm:mx-auto sm:max-w-md",
           "pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]",
+          !isDragging && "transition-transform duration-150 ease-out",
           className,
         )}
         style={{
@@ -82,32 +90,43 @@ export function ActionSheetContent({
         }}
         {...props}
       >
+        <DialogPrimitive.Title className="sr-only">
+          {accessibleTitle}
+        </DialogPrimitive.Title>
         <div
           data-slot="action-sheet-grabber-zone"
-          className="flex h-5 w-full cursor-grab touch-none items-center justify-center py-1 select-none active:cursor-grabbing"
+          className="flex h-11 w-full cursor-grab touch-none items-center justify-center select-none active:cursor-grabbing"
           onTouchStart={(e) => {
             if (e.touches.length === 1) {
               touchStartRef.current = e.touches[0]!.clientY;
+              dragDeltaRef.current = 0;
             }
           }}
           onTouchMove={(e) => {
             if (touchStartRef.current !== null && e.touches.length === 1) {
               const delta = e.touches[0]!.clientY - touchStartRef.current;
               if (delta > 0) {
+                dragDeltaRef.current = delta;
+                setIsDragging(true);
                 setDragDelta(delta);
               }
             }
           }}
           onTouchEnd={() => {
-            if (dragDelta > 60) {
+            const shouldDismiss = dragDeltaRef.current > 60;
+            dragDeltaRef.current = 0;
+            touchStartRef.current = null;
+            setIsDragging(false);
+            setDragDelta(0);
+            if (shouldDismiss) {
               onDismiss?.();
             }
-            setDragDelta(0);
-            touchStartRef.current = null;
           }}
           onTouchCancel={() => {
-            setDragDelta(0);
+            dragDeltaRef.current = 0;
             touchStartRef.current = null;
+            setIsDragging(false);
+            setDragDelta(0);
           }}
         >
           <span
@@ -162,7 +181,7 @@ export function ActionSheetItem({
       data-slot="action-sheet-item"
       data-variant={variant}
       className={cn(
-        "flex min-h-13 w-full items-center justify-center gap-2.5 border-t border-border/50 px-4 text-center text-[16px] font-medium transition-colors first:border-0 hover:bg-accent active:bg-accent/80 disabled:pointer-events-none disabled:opacity-50",
+        "flex min-h-13 w-full items-center justify-start gap-3 border-t border-border/50 px-4 text-left text-[15px] font-medium transition-colors first:border-0 hover:bg-accent active:bg-accent/80 disabled:pointer-events-none disabled:opacity-50",
         variant === "destructive"
           ? "font-semibold text-destructive hover:bg-destructive/10 active:bg-destructive/15"
           : "text-foreground",
@@ -170,8 +189,12 @@ export function ActionSheetItem({
       )}
       {...props}
     >
-      {icon}
-      <span>{children}</span>
+      {icon ? (
+        <span className="inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground">
+          {icon}
+        </span>
+      ) : null}
+      <span className="truncate">{children}</span>
     </button>
   );
 }
@@ -187,7 +210,7 @@ export function ActionSheetCancel({
       type="button"
       data-slot="action-sheet-cancel"
       className={cn(
-        "flex min-h-13 w-full items-center justify-center px-4 text-center text-[16px] font-semibold text-foreground transition-colors hover:bg-accent active:bg-accent/80",
+        "flex min-h-13 w-full items-center justify-center px-4 text-center text-[15px] font-semibold text-foreground transition-colors hover:bg-accent active:bg-accent/80",
         className,
       )}
       {...props}
