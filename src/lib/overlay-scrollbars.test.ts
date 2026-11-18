@@ -60,3 +60,27 @@ describe("installOverlayScrollbars", () => {
     }
   });
 });
+
+describe("App.css table and scrollbar corner guards", () => {
+  test("prevents table vertical scrollbar gutter, keeps idle table/code scrollbars zero-sized, and styles transparent scrollbar corners", async () => {
+    // @ts-expect-error Node.js built-in fs in Vitest test runner
+    const { readFileSync } = await import("node:fs");
+    // @ts-expect-error Node.js built-in path in Vitest test runner
+    const { resolve } = await import("node:path");
+    const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
+    const css = readFileSync(resolve(cwd, "src/App.css"), "utf-8") as string;
+
+    expect(css).toContain("::-webkit-scrollbar-corner");
+    expect(css).toMatch(/::-webkit-scrollbar-corner\s*\{\s*background:\s*transparent;/);
+
+    const tableOverflowRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="table-wrapper"\] > div:last-child \{[^}]+\}/)?.[0] ?? "";
+    expect(tableOverflowRule).toContain("overflow-x: auto;");
+    expect(tableOverflowRule).toContain("overflow-y: hidden;");
+
+    const tableIdleScrollbar =
+      css.match(/\.waypoint-markdown \[data-streamdown="table-wrapper"\] > div:last-child::-webkit-scrollbar \{[^}]+\}/)?.[0] ?? "";
+    expect(tableIdleScrollbar).toContain("height: 0;");
+    expect(tableIdleScrollbar).toContain("width: 0;");
+  });
+});
