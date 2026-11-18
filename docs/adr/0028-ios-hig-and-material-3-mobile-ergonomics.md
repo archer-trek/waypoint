@@ -28,5 +28,5 @@ Waypoint 在多端设备矩阵扩展为 macOS、Windows、iOS 与 Android 的背
   - 移动端消息（无框 Agent 文档流与 Owner 气泡）支持长按 500ms 呼出轻量上下文菜单，提供“复制纯文本”、“复制 Markdown”以及针对代码块的“复制代码”纯净操作。
 - **全站浮层滚动条规范（Scroll-Only Overlay Scrollbars）**：
   - 弃用全局强制常驻的 6px 滚动条背景色，全站滚动容器（Detail 详情页时间线、Topic 列表、弹窗与代码块）统一重构为默认完全隐形（`scrollbar-color: transparent transparent`）；
-  - 仅在用户产生滚动交互或悬停于滚动边缘时，发丝滑块平滑淡入浮现（`transition: background-color 0.2s`），停止操作后自动隐形，杜绝画布静态噪点；
+  - 桌面端与移动端悬停均不显现，仅在用户产生滚动交互时（`data-scrolling="true"`），发丝滑块平滑淡入浮现（`transition: background-color 0.2s`），停止操作后自动隐形，杜绝画布静态噪点；
   - Detail 详情页时间线的空间方位感知由现有的“回到底部”悬浮按钮（FAB）协同承接。

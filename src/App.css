@@ -213,19 +213,23 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Native overlay scrollbars: invisible by default, appear on hover/active scroll */
+  /* Native overlay scrollbars: invisible by default, only appear during active scrolling (ADR-0028) */
   * {
     scrollbar-width: thin;
     scrollbar-color: transparent transparent;
   }
 
-  *:hover {
-    scrollbar-color: var(--border) transparent;
+  *[data-scrolling="active"] {
+    scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+  }
+
+  *[data-scrolling="fade"] {
+    scrollbar-color: transparent transparent;
   }
 
   ::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    width: 4px;
+    height: 4px;
   }
 
   ::-webkit-scrollbar-track {
@@ -235,15 +239,16 @@
   ::-webkit-scrollbar-thumb {
     background: transparent;
     border-radius: 9999px;
-    transition: background-color 0.2s ease;
   }
 
-  *:hover::-webkit-scrollbar-thumb {
-    background: var(--border);
+  *[data-scrolling="active"]::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--foreground) 26%, transparent);
+    transition: background-color 0s;
   }
 
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--muted-foreground);
+  *[data-scrolling="fade"]::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   }
 }
 
@@ -603,8 +608,12 @@ a {
   scrollbar-color: transparent transparent;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"]:hover {
-  scrollbar-color: var(--border) transparent;
+.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="active"] {
+  scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="fade"] {
+  scrollbar-color: transparent transparent;
 }
 
 .waypoint-markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"],
@@ -643,8 +652,8 @@ a {
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar {
-  height: 6px;
-  width: 6px;
+  height: 4px;
+  width: 4px;
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-track {
@@ -654,11 +663,16 @@ a {
 .waypoint-markdown [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
   background: transparent;
   border-radius: 9999px;
-  transition: background-color 0.2s ease;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"]:hover::-webkit-scrollbar-thumb {
-  background: var(--border);
+.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="active"]::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--foreground) 26%, transparent);
+  transition: background-color 0s;
+}
+
+.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="fade"]::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .waypoint-markdown [data-streamdown="code-block-body"] pre {
@@ -729,8 +743,36 @@ a {
   scrollbar-color: transparent transparent;
 }
 
-.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child:hover {
-  scrollbar-color: var(--border) transparent;
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="active"] {
+  scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="fade"] {
+  scrollbar-color: transparent transparent;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child::-webkit-scrollbar {
+  height: 4px;
+  width: 4px;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 9999px;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="active"]::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--foreground) 26%, transparent);
+  transition: background-color 0s;
+}
+
+.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="fade"]::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .waypoint-markdown [data-streamdown="table"] {
