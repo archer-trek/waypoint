@@ -290,6 +290,7 @@ function WaypointCodeBlock({
   const parsedStartLine = startLineMatch ? Number.parseInt(startLineMatch[1]!, 10) : undefined;
   const startLine = parsedStartLine !== undefined && parsedStartLine >= 1 ? parsedStartLine : undefined;
   const code = extractCodeText(children);
+  const isSingleLine = !code.replace(/\n+$/, "").includes("\n");
   const wrapLabel = wrapped ? "取消折行" : "允许折行";
 
   return (
@@ -301,6 +302,7 @@ function WaypointCodeBlock({
       lineNumbers={false}
       startLine={startLine}
       data-wrapped={wrapped ? "true" : undefined}
+      data-single-line={isSingleLine ? "true" : undefined}
       {...rest}
     >
       <button

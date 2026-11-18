@@ -215,6 +215,7 @@ describe("MessageBody code blocks and table DOM hooks", () => {
     expect(headerless.querySelector("[data-streamdown=\"code-block-body\"]")?.textContent).toContain(
       "git remote -v && gh auth status",
     );
+    expect(headerless.querySelector("[data-streamdown=\"code-block-body\"]")).toHaveAttribute("data-single-line", "true");
 
     const tagged = blocks[1]!;
     expect(tagged.getAttribute("data-language")).toBe("bash");

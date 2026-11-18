@@ -645,6 +645,33 @@ a {
   min-width: 100%;
 }
 
+/* Single-line headerless code blocks place actions in a non-overlapping right slot */
+.waypoint-markdown [data-streamdown="code-block"][data-language=""]:has(> [data-streamdown="code-block-body"][data-single-line="true"]),
+.waypoint-markdown [data-streamdown="code-block"]:not([data-language]):has(> [data-streamdown="code-block-body"][data-single-line="true"]) {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.waypoint-markdown [data-streamdown="code-block"][data-language=""] > [data-streamdown="code-block-body"][data-single-line="true"],
+.waypoint-markdown [data-streamdown="code-block"]:not([data-language]) > [data-streamdown="code-block-body"][data-single-line="true"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.waypoint-markdown [data-streamdown="code-block"][data-language=""] > [data-streamdown="code-block-body"][data-single-line="true"] pre,
+.waypoint-markdown [data-streamdown="code-block"]:not([data-language]) > [data-streamdown="code-block-body"][data-single-line="true"] pre {
+  padding-right: 0;
+}
+
+.waypoint-markdown [data-streamdown="code-block"][data-language=""]:has(> [data-streamdown="code-block-body"][data-single-line="true"]) > div:has(> [data-streamdown="code-block-actions"]),
+.waypoint-markdown [data-streamdown="code-block"]:not([data-language]):has(> [data-streamdown="code-block-body"][data-single-line="true"]) > div:has(> [data-streamdown="code-block-actions"]) {
+  position: static;
+  flex-shrink: 0;
+  order: 2;
+  padding: 0.5rem 0.5rem 0.5rem 0.25rem;
+  pointer-events: auto;
+}
+
 .waypoint-markdown [data-streamdown="code-block-body"][data-wrapped="true"] {
   overflow-x: hidden;
   white-space: pre-wrap;
