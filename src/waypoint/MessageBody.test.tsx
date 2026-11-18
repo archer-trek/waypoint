@@ -341,4 +341,22 @@ describe("MessageBody code blocks and table DOM hooks", () => {
       }
     }
   });
+
+  test("renders tall Markdown tables inline without Streamdown default 300px maxHeight cap (#114)", () => {
+    const rows = Array.from({ length: 12 }, (_, idx) => `| 标的 ${idx + 1} | ¥${(idx + 1) * 10}.00 | ${(idx + 1).toFixed(1)}% |`);
+    const body = [
+      "| 标的 | 现价 | 权重 |",
+      "| --- | --- | --- |",
+      ...rows,
+    ].join("\n");
+
+    const { container } = render(<MessageBody body={body} richColor />);
+
+    const wrapper = container.querySelector("[data-streamdown=\"table-wrapper\"]") as HTMLElement | null;
+    expect(wrapper).not.toBeNull();
+    const scrollBox = wrapper!.lastElementChild as HTMLElement | null;
+    expect(scrollBox).not.toBeNull();
+    expect(scrollBox!.style.maxHeight).toBe("");
+    expect(container.querySelectorAll("tbody tr")).toHaveLength(12);
+  });
 });

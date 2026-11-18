@@ -543,6 +543,7 @@ export function MessageBody({
         rehypePlugins={richColor ? AGENT_REHYPE_PLUGINS : SAFE_REHYPE_PLUGINS}
         components={components}
         controls={STREAMDOWN_CONTROLS}
+        tableMaxHeight={Infinity}
         remend={STREAMDOWN_REMEND}
         linkSafety={STREAMDOWN_LINK_SAFETY}
         lineNumbers={false}
