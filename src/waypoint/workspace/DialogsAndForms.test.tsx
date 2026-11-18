@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   Clock,
   HomeserverRequest,
@@ -11,6 +11,7 @@ import type {
   ViewportMode,
 } from "../../adapters/types";
 import { WaypointApp } from "../WaypointApp";
+import { ResponsiveFormShell } from "./ResponsiveFormShell";
 
 class ManualClock implements Clock {
   private nextId = 1;
@@ -417,6 +418,64 @@ describe("Responsive Dialogs, Forms, and AlertDialogs (#87)", () => {
       "data-slot",
       "alert-dialog-content",
     );
+  });
+
+  test("ResponsiveFormShell guards unsaved changes with confirmation AlertDialog on dirty back/close (ADR-0028)", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onGoBack = vi.fn();
+
+    // 1. Narrow pushed page with dirty state
+    const { rerender } = render(
+      <ResponsiveFormShell
+        title="新建 Topic"
+        isModal={false}
+        isNarrow={true}
+        safeInset={0}
+        isDirty={true}
+        onClose={onClose}
+        onGoBack={onGoBack}
+      >
+        <div>Form Content</div>
+      </ResponsiveFormShell>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(onGoBack).not.toHaveBeenCalled();
+
+    // AlertDialog appears
+    const alert = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    expect(alert).toBeInTheDocument();
+
+    // Click '继续编辑' cancels
+    await user.click(within(alert).getByRole("button", { name: "继续编辑" }));
+    expect(screen.queryByRole("alertdialog", { name: "放弃未保存的更改吗？" })).not.toBeInTheDocument();
+    expect(onGoBack).not.toHaveBeenCalled();
+
+    // Click back again, and confirm discard
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    const alert2 = screen.getByRole("alertdialog", { name: "放弃未保存的更改吗？" });
+    await user.click(within(alert2).getByRole("button", { name: "放弃更改" }));
+    expect(onGoBack).toHaveBeenCalledTimes(1);
+
+    // 2. When not dirty, back navigates immediately without dialog
+    rerender(
+      <ResponsiveFormShell
+        title="新建 Topic"
+        isModal={false}
+        isNarrow={true}
+        safeInset={0}
+        isDirty={false}
+        onClose={onClose}
+        onGoBack={onGoBack}
+      >
+        <div>Form Content</div>
+      </ResponsiveFormShell>,
+    );
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    expect(onGoBack).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alertdialog", { name: "放弃未保存的更改吗？" })).not.toBeInTheDocument();
   });
 
   test("owned workspace dialog and form files contain zero raw hex color literals", async () => {

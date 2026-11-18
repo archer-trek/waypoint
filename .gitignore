@@ -6,3 +6,4 @@ src-tauri/gen/*
 !src-tauri/gen/android/
 .DS_Store
 *.log
+*.apk

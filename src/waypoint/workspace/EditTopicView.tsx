@@ -13,6 +13,7 @@ export type EditTopicViewProps = {
   isNarrow: boolean;
   safeInset: number;
   nestedModalOpen?: boolean;
+  isDirty?: boolean;
   reauthBanner?: ReactNode;
   editPendingFields: EditPendingFields;
   editNameInput: string;
@@ -38,6 +39,7 @@ export function EditTopicView({
   editDescriptionInput,
   editSubmitting,
   editError,
+  isDirty = false,
   onGoBack,
   onSubmit,
   onEditNameInputChange,
@@ -47,6 +49,7 @@ export function EditTopicView({
   return (
     <ResponsiveFormShell
       title="编辑 Topic"
+      isDirty={isDirty}
       isModal={isModal}
       isNarrow={isNarrow}
       safeInset={safeInset}

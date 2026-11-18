@@ -78,12 +78,18 @@ export function SettingsView({
 }: SettingsViewProps) {
   const [appearanceMode, setAppearanceMode] = useAppearancePreference();
   const busy = agentsSubmitting || exiting;
+  const isDirty = Boolean(
+    agentsForm &&
+      (agentsForm.userId.trim() ||
+        (agentsForm.mode !== "remove" && agentsForm.handwrittenName.trim())),
+  );
   const hasNestedAlertDialog =
     agentsForm?.mode === "remove" || exitConfirmOpen;
 
   return (
     <ResponsiveFormShell
       title="设置"
+      isDirty={isDirty}
       isModal={isModal}
       isNarrow={isNarrow}
       safeInset={safeInset}

@@ -22,6 +22,7 @@ export type TopicHeaderViewProps = {
   deleting: boolean;
   reauthRequired: boolean;
   pinPending: boolean;
+  elevated?: boolean;
   onGoBack: () => void;
   onToggleDescription: () => void;
   onToggleOverflowMenu: () => void;
@@ -51,16 +52,24 @@ export function TopicHeaderView({
   onTogglePin,
   onOpenEditForm,
   onOpenDeleteConfirm,
+  elevated,
 }: TopicHeaderViewProps) {
   const pinDisabled =
     editing || deleteConfirmOpen || deleting || reauthRequired || pinPending;
   const editOrDeleteDisabled = editing || deleteConfirmOpen || deleting;
   const pinLabel = topic.pinned ? "取消置顶" : "置顶";
+  const isElevated = elevated ?? !isNarrow;
 
   return (
     <header
+      data-elevated={isElevated ? "true" : undefined}
       className={cn(
-        "waypoint-topic-header sticky top-0 z-10 shrink-0 bg-background/90 backdrop-blur-md border-b border-border/60 py-2.5 box-border",
+        "waypoint-topic-header sticky top-0 z-10 shrink-0 py-2.5 box-border transition-colors duration-200",
+        isElevated
+          ? "bg-background/90 backdrop-blur-md border-b border-border/60 shadow-xs"
+          : isNarrow
+            ? "bg-background border-b border-transparent"
+            : "bg-background/90 backdrop-blur-md border-b border-border/60",
         isNarrow
           ? "pt-[max(0.65rem,env(safe-area-inset-top,0px))] pl-[max(0.75rem,env(safe-area-inset-left,0px))] pr-[max(0.75rem,env(safe-area-inset-right,0px))]"
           : "px-4 sm:px-6 pt-[calc(0.65rem+env(safe-area-inset-top,0px))]",
@@ -140,10 +149,8 @@ export function TopicHeaderView({
                 aria-label="话题操作"
                 align="end"
                 sideOffset={8}
-                className="waypoint-overflow-menu min-w-36 p-1.5"
+                className="waypoint-overflow-menu min-w-40 p-1.5 rounded-xl shadow-lg border-border/80 bg-popover/95 backdrop-blur-md"
                 onPointerDown={(event) => {
-                  // Prevent TopicsWorkspace's document pointerdown outside listener
-                  // from unmounting the portaled menu before click/onSelect fires.
                   event.stopPropagation();
                   event.nativeEvent.stopPropagation();
                 }}
