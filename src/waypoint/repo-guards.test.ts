@@ -165,6 +165,30 @@ describe("Repository, asset, and error-copy guards", () => {
     const devSection = cargoToml.match(/\[profile\.dev\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
     expect(devSection).not.toMatch(/\bstrip\s*=\s*true\b/);
     expect(devSection).not.toMatch(/\bdebug\s*=\s*0\b/);
+
+    const releaseSection = cargoToml.match(/\[profile\.release\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+    expect(releaseSection).toContain("opt-level = \"z\"");
+    expect(releaseSection).toContain("lto = true");
+    expect(releaseSection).toContain("strip = true");
+    expect(releaseSection).toContain("panic = \"abort\"");
+    expect(releaseSection).toContain("codegen-units = 1");
+
+    const gradleKts = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
+      "utf-8",
+    );
+    expect(gradleKts).toContain("isMinifyEnabled = true");
+    expect(gradleKts).toContain("isShrinkResources = true");
+    expect(gradleKts).toContain("WAYPOINT_ANDROID_KEYSTORE_PATH");
+    expect(gradleKts).toContain("keystore.properties");
+
+    const androidGitignore = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/.gitignore"),
+      "utf-8",
+    );
+    expect(androidGitignore).toContain("keystore.properties");
+    expect(androidGitignore).toContain("*.jks");
+    expect(androidGitignore).toContain("*.keystore");
   });
 
   test("Mobile viewport strategy, composer padding contract, and button transition hygiene are preserved", () => {
