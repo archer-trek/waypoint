@@ -160,6 +160,13 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(violations).toEqual([]);
   });
 
+  test("src-tauri/Cargo.toml preserves debug symbols on [profile.dev] and isolates slim build overrides", () => {
+    const cargoToml = readFileSync(resolve(ROOT_DIR, "src-tauri/Cargo.toml"), "utf-8");
+    const devSection = cargoToml.match(/\[profile\.dev\]([\s\S]*?)(?=\n\[|$)/)?.[1] ?? "";
+    expect(devSection).not.toMatch(/\bstrip\s*=\s*true\b/);
+    expect(devSection).not.toMatch(/\bdebug\s*=\s*0\b/);
+  });
+
   test("Mobile viewport strategy, composer padding contract, and button transition hygiene are preserved", () => {
     const indexHtml = readFileSync(resolve(ROOT_DIR, "index.html"), "utf-8");
     expect(
