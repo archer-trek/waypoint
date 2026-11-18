@@ -213,18 +213,22 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Native overlay scrollbars: invisible by default, only appear during active scrolling (ADR-0028) */
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: transparent transparent;
-  }
+  /* Native overlay scrollbars: invisible by default, only appear during active scrolling (ADR-0028).
+   * Isolate standard scrollbar-width/scrollbar-color to engines lacking ::-webkit-scrollbar so Chromium/WebView 121+
+   * honors the 4px ::-webkit-scrollbar width and smooth background-color fade transitions. */
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: transparent transparent;
+    }
 
-  *[data-scrolling="active"] {
-    scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
-  }
+    *[data-scrolling="active"] {
+      scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+    }
 
-  *[data-scrolling="fade"] {
-    scrollbar-color: transparent transparent;
+    *[data-scrolling="fade"] {
+      scrollbar-color: transparent transparent;
+    }
   }
 
   ::-webkit-scrollbar {
@@ -604,16 +608,21 @@ a {
   font-size: 13px;
   line-height: 1.55;
   white-space: pre;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
 }
 
-.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="active"] {
-  scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
-}
+@supports not selector(::-webkit-scrollbar) {
+  .waypoint-markdown [data-streamdown="code-block-body"] {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
 
-.waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="fade"] {
-  scrollbar-color: transparent transparent;
+  .waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="active"] {
+    scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+  }
+
+  .waypoint-markdown [data-streamdown="code-block-body"][data-scrolling="fade"] {
+    scrollbar-color: transparent transparent;
+  }
 }
 
 .waypoint-markdown [data-streamdown="code-block"][data-language=""] [data-streamdown="code-block-body"],
@@ -739,16 +748,21 @@ a {
   overflow-y: auto;
   max-width: 100%;
   background: transparent;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
 }
 
-.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="active"] {
-  scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
-}
+@supports not selector(::-webkit-scrollbar) {
+  .waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
 
-.waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="fade"] {
-  scrollbar-color: transparent transparent;
+  .waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="active"] {
+    scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
+  }
+
+  .waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child[data-scrolling="fade"] {
+    scrollbar-color: transparent transparent;
+  }
 }
 
 .waypoint-markdown [data-streamdown="table-wrapper"] > div:last-child::-webkit-scrollbar {
@@ -987,6 +1001,72 @@ a {
   .waypoint-auth-step-forward,
   .waypoint-auth-step-back,
   .waypoint-auth-fade {
+    animation: none;
+  }
+}
+
+/* ActionSheet enter/exit slide animations (ADR-0028) */
+[data-slot="action-sheet-overlay"][data-state="open"] {
+  animation: waypoint-sheet-fade-in 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-slot="action-sheet-overlay"][data-state="closed"] {
+  animation: waypoint-sheet-fade-out 150ms ease-in;
+}
+
+[data-slot="action-sheet-content"][data-state="open"] {
+  animation: waypoint-sheet-slide-up 240ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-slot="action-sheet-content"][data-state="closed"] {
+  animation: waypoint-sheet-slide-down 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes waypoint-sheet-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes waypoint-sheet-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes waypoint-sheet-slide-up {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 100%, 0);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes waypoint-sheet-slide-down {
+  from {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    opacity: 0;
+    transform: translate3d(0, 100%, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="action-sheet-overlay"][data-state="open"],
+  [data-slot="action-sheet-overlay"][data-state="closed"],
+  [data-slot="action-sheet-content"][data-state="open"],
+  [data-slot="action-sheet-content"][data-state="closed"] {
     animation: none;
   }
 }

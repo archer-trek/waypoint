@@ -11,6 +11,7 @@ import {
   type ErrorInfo,
   type ReactNode,
 } from "react";
+import { copyToClipboard } from "@/lib/utils";
 import {
   CodeBlock,
   Streamdown,
@@ -214,55 +215,6 @@ function extractCodeText(children: ReactNode): string {
   return "";
 }
 
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  if (typeof window === "undefined") {
-    return false;
-  }
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // Fall back to execCommand when Clipboard API rejects or is blocked.
-    }
-  }
-
-  if (typeof document === "undefined" || typeof document.execCommand !== "function") {
-    return false;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.top = "0";
-  textarea.style.left = "0";
-  textarea.style.width = "1px";
-  textarea.style.height = "1px";
-  textarea.style.padding = "0";
-  textarea.style.border = "0";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  textarea.style.fontSize = "16px";
-  textarea.style.userSelect = "text";
-
-  const activeElement = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  document.body.appendChild(textarea);
-  try {
-    textarea.focus({ preventScroll: true });
-    textarea.select();
-    textarea.setSelectionRange(0, text.length);
-    return document.execCommand("copy");
-  } catch {
-    return false;
-  } finally {
-    document.body.removeChild(textarea);
-    if (activeElement && activeElement.isConnected) {
-      activeElement.focus({ preventScroll: true });
-    }
-  }
-}
-
 function WaypointCodeCopyButton({ code }: { code: string }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<number | null>(null);
@@ -279,7 +231,7 @@ function WaypointCodeCopyButton({ code }: { code: string }) {
     if (copied) {
       return;
     }
-    const ok = await copyTextToClipboard(code);
+    const ok = await copyToClipboard(code);
     if (!ok) {
       return;
     }

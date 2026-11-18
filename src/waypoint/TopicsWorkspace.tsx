@@ -57,7 +57,8 @@ import { DeleteTopicDialog } from "./workspace/DeleteTopicDialog";
 import { EditTopicView } from "./workspace/EditTopicView";
 import { EmptyDetailView } from "./workspace/EmptyDetailView";
 import { ReauthBanner } from "./workspace/ReauthBanner";
-import { SettingsView } from "./workspace/SettingsView";
+import { DiscardChangesDialog } from "./workspace/ResponsiveFormShell";
+import { isSettingsAgentsFormDirty, SettingsView } from "./workspace/SettingsView";
 import { SidebarView } from "./workspace/SidebarView";
 import { TimelineView } from "./workspace/TimelineView";
 import { TopicHeaderView } from "./workspace/TopicHeaderView";
@@ -155,13 +156,19 @@ export function TopicsWorkspace({
   const [openFailedMenu, setOpenFailedMenu] = useState<{ roomId: string; id: string } | null>(null);
   const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
   const [headerElevated, setHeaderElevated] = useState(false);
+  const [pendingDiscardAction, setPendingDiscardAction] = useState<(() => void) | null>(null);
   const [swipeBackOffset, setSwipeBackOffset] = useState(0);
   const [isSwipingBack, setIsSwipingBack] = useState(false);
+  const detailContainerRef = useRef<HTMLDivElement | null>(null);
   const edgeSwipeTrackingRef = useRef<{
     startX: number;
     startY: number;
     tracking: boolean;
+    engaged: boolean;
+    offset: number;
   } | null>(null);
+
+  const EDGE_SWIPE_SLOP_PX = 10;
 
   function isInsideScrolledHorizontalContainer(target: EventTarget | null): boolean {
     let el = target as HTMLElement | null;
@@ -199,6 +206,8 @@ export function TopicsWorkspace({
       startX: touch.clientX,
       startY: touch.clientY,
       tracking: true,
+      engaged: false,
+      offset: 0,
     };
   }
 
@@ -211,29 +220,32 @@ export function TopicsWorkspace({
     const deltaX = touch.clientX - track.startX;
     const deltaY = touch.clientY - track.startY;
 
-    if (!isSwipingBack && Math.abs(deltaY) > Math.abs(deltaX)) {
-      edgeSwipeTrackingRef.current = null;
-      return;
+    if (!track.engaged) {
+      if (Math.abs(deltaY) > EDGE_SWIPE_SLOP_PX && Math.abs(deltaY) > Math.abs(deltaX)) {
+        edgeSwipeTrackingRef.current = null;
+        return;
+      }
+      if (deltaX <= EDGE_SWIPE_SLOP_PX || deltaX <= Math.abs(deltaY)) {
+        return;
+      }
+      track.engaged = true;
+      setIsSwipingBack(true);
     }
 
-    if (deltaX > 0) {
-      setIsSwipingBack(true);
-      setSwipeBackOffset(deltaX);
-    } else {
-      setSwipeBackOffset(0);
-    }
+    const nextOffset = Math.max(0, deltaX);
+    track.offset = nextOffset;
+    setSwipeBackOffset(nextOffset);
   }
 
   function handleEdgeSwipeTouchEnd() {
     const track = edgeSwipeTrackingRef.current;
-    if (track?.tracking && isSwipingBack) {
-      if (swipeBackOffset > 80) {
-        goBack();
-      }
-    }
+    const shouldGoBack = Boolean(track?.tracking && track.engaged && track.offset > 80);
+    edgeSwipeTrackingRef.current = null;
     setIsSwipingBack(false);
     setSwipeBackOffset(0);
-    edgeSwipeTrackingRef.current = null;
+    if (shouldGoBack) {
+      goBack();
+    }
   }
   const [showScrollBottomFab, setShowScrollBottomFab] = useState(false);
   const [composerMultiline, setComposerMultiline] = useState(false);
@@ -405,14 +417,45 @@ export function TopicsWorkspace({
 
   const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting || reauthSubmitting;
 
+  const createIsDirty = Boolean(
+    nameInput.trim() ||
+      descriptionInput.trim() ||
+      quickUserId.trim() ||
+      quickHandwrittenName.trim(),
+  );
+  const editIsDirty = activeTopic
+    ? editNameInput !== activeTopic.name ||
+      editDescriptionInput !== (activeTopic.description ?? "")
+    : false;
+  const settingsIsDirty = isSettingsAgentsFormDirty(agentsForm, registeredAgents);
+
+  function requestGuardedExit(isDirty: boolean, action: () => void) {
+    if (isDirty) {
+      setPendingDiscardAction(() => action);
+    } else {
+      action();
+    }
+  }
+
   backHandlerRef.current = () => {
     if (viewportMode !== "narrow") {
       return false;
+    }
+    if (pendingDiscardAction !== null) {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+      syncNavigationDepth(targetDepth);
+      setPendingDiscardAction(null);
+      return true;
     }
     if (settingsOpen) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
       if (agentsSubmitting || exiting) {
         syncNavigationDepth(targetDepth);
+        return true;
+      }
+      if (settingsIsDirty) {
+        syncNavigationDepth(targetDepth);
+        setPendingDiscardAction(() => closeSettings);
         return true;
       }
       setSettingsOpen(false);
@@ -426,6 +469,11 @@ export function TopicsWorkspace({
         syncNavigationDepth(targetDepth);
         return true;
       }
+      if (createIsDirty) {
+        syncNavigationDepth(targetDepth);
+        setPendingDiscardAction(() => closeCreateForm);
+        return true;
+      }
       resetCreateForm();
       return true;
     }
@@ -433,6 +481,11 @@ export function TopicsWorkspace({
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
       if (editSubmitting) {
         syncNavigationDepth(targetDepth);
+        return true;
+      }
+      if (editIsDirty) {
+        syncNavigationDepth(targetDepth);
+        setPendingDiscardAction(() => closeEditForm);
         return true;
       }
       resetEditForm();
@@ -470,25 +523,28 @@ export function TopicsWorkspace({
 
   const onGlobalKeyDown = useEffectEvent((event: globalThis.KeyboardEvent) => {
     if (event.key === "Escape") {
-      if (event.defaultPrevented) return;
+      if (event.defaultPrevented || pendingDiscardAction !== null) return;
       if (overflowMenuOpen) {
         setOverflowMenuOpen(false);
       } else if (creating) {
+        if (submitting || quickSubmitting) return;
         if (quickRegisterOpen) {
           closeQuickRegister();
         } else {
-          closeCreateForm();
+          requestGuardedExit(createIsDirty, closeCreateForm);
         }
       } else if (settingsOpen) {
-        if (agentsForm) {
+        if (agentsSubmitting || exiting) return;
+        if (agentsForm && agentsForm.mode !== "remove") {
           cancelAgentsAction();
         } else if (exitConfirmOpen) {
           cancelExitConfirm();
         } else {
-          closeSettings();
+          requestGuardedExit(settingsIsDirty, closeSettings);
         }
       } else if (editing) {
-        closeEditForm();
+        if (editSubmitting) return;
+        requestGuardedExit(editIsDirty, closeEditForm);
       } else if (deleteConfirmOpen) {
         cancelDeleteConfirm();
       } else if (exitConfirmOpen) {
@@ -673,6 +729,7 @@ export function TopicsWorkspace({
       mode: "edit",
       userId,
       handwrittenName: currentName ?? "",
+      initialHandwrittenName: currentName ?? "",
     });
     setAgentsError(undefined);
   }
@@ -1012,15 +1069,18 @@ export function TopicsWorkspace({
 
   function goBack() {
     if (settingsOpen) {
-      closeSettings();
+      if (agentsSubmitting || exiting) return;
+      requestGuardedExit(settingsIsDirty, closeSettings);
       return;
     }
     if (creating) {
-      closeCreateForm();
+      if (submitting || quickSubmitting) return;
+      requestGuardedExit(createIsDirty, closeCreateForm);
       return;
     }
     if (editing && activeTopic) {
-      closeEditForm();
+      if (editSubmitting) return;
+      requestGuardedExit(editIsDirty, closeEditForm);
       return;
     }
     if (activeTopic) {
@@ -1493,12 +1553,19 @@ export function TopicsWorkspace({
     };
   }, [client, clock, retryQueue, providedRetryQueue, platform, initialReauthRequired]);
 
+  function syncHeaderElevation(container: HTMLElement | null) {
+    const isScrolled = Boolean(container && container.scrollTop > 4);
+    setHeaderElevated((prev) => (prev !== isScrolled ? isScrolled : prev));
+  }
+
   function setTimelineScrollTop(container: HTMLElement, nextTop: number) {
     if (Math.abs(container.scrollTop - nextTop) < 0.5) {
+      syncHeaderElevation(container);
       return;
     }
     programmaticScrollRef.current = { active: true, top: nextTop };
     container.scrollTop = nextTop;
+    syncHeaderElevation(container);
   }
 
   async function triggerScrollBackfill(roomId: string) {
@@ -1708,6 +1775,7 @@ export function TopicsWorkspace({
 
   function handleTimelineScroll() {
     const el = timelineRef.current;
+    syncHeaderElevation(el);
     if (el && programmaticScrollRef.current.active) {
       const same = Math.abs(el.scrollTop - programmaticScrollRef.current.top) < 1;
       programmaticScrollRef.current.active = false;
@@ -2014,6 +2082,7 @@ export function TopicsWorkspace({
     } else {
       syncTimelineHeightAnchor(container, visibleComposerRoomId);
     }
+    syncHeaderElevation(container);
     evaluateVisibleReadPosition(visibleComposerRoomId);
   });
   function bumpDraftSeq(roomId: string): number {
@@ -2783,6 +2852,22 @@ export function TopicsWorkspace({
   } else if (!isNarrow && pageMotionRef.current.key !== "wide") {
     pageMotionRef.current = { key: "wide", depth: 0, direction: "none" };
   }
+  useEffect(() => {
+    const container = detailContainerRef.current;
+    if (!container) return;
+    const preventVerticalScrollWhenSwiping = (event: TouchEvent) => {
+      if (edgeSwipeTrackingRef.current?.engaged && event.cancelable) {
+        event.preventDefault();
+      }
+    };
+    container.addEventListener("touchmove", preventVerticalScrollWhenSwiping, {
+      passive: false,
+    });
+    return () => {
+      container.removeEventListener("touchmove", preventVerticalScrollWhenSwiping);
+    };
+  }, [showDetail, isNarrow, narrowPageKey]);
+
   const pageEnterClass =
     isNarrow && pageMotionRef.current.direction === "forward"
       ? "waypoint-page-enter-forward"
@@ -2796,6 +2881,7 @@ export function TopicsWorkspace({
         isModal={isModal}
         isNarrow={isNarrow}
         safeInset={safeInset}
+        nestedModalOpen={pendingDiscardAction !== null}
         reauthBanner={reauthRequired ? renderReauthBanner() : null}
         registeredAgents={registeredAgents}
         roomList={roomList}
@@ -2806,6 +2892,7 @@ export function TopicsWorkspace({
         exiting={exiting}
         onGoBack={goBack}
         onCloseSettings={closeSettings}
+        onRequestExit={(action) => requestGuardedExit(settingsIsDirty, action)}
         onOpenAddAgentForm={openAddAgentForm}
         onOpenEditAgentForm={openEditAgentForm}
         onOpenRemoveAgentConfirm={openRemoveAgentConfirm}
@@ -2827,7 +2914,7 @@ export function TopicsWorkspace({
         isModal={isModal}
         isNarrow={isNarrow}
         safeInset={safeInset}
-        nestedModalOpen={exitConfirmOpen}
+        nestedModalOpen={exitConfirmOpen || pendingDiscardAction !== null}
         reauthRequired={reauthRequired}
         reauthBanner={reauthRequired ? renderReauthBanner() : null}
         registeredAgents={registeredAgents}
@@ -2844,6 +2931,7 @@ export function TopicsWorkspace({
         quickError={quickError}
         onGoBack={goBack}
         onCloseCreateForm={closeCreateForm}
+        onRequestExit={(action) => requestGuardedExit(createIsDirty, action)}
         onSubmit={(event) => void handleSubmit(event)}
         onNameInputChange={setNameInput}
         onDescriptionInputChange={setDescriptionInput}
@@ -2859,17 +2947,13 @@ export function TopicsWorkspace({
   }
 
   function renderEditDialog(isModal: boolean) {
-    const editIsDirty = activeTopic
-      ? editNameInput !== activeTopic.name ||
-        editDescriptionInput !== (activeTopic.description ?? "")
-      : false;
     return (
       <EditTopicView
         isModal={isModal}
         isNarrow={isNarrow}
         isDirty={editIsDirty}
         safeInset={safeInset}
-        nestedModalOpen={exitConfirmOpen}
+        nestedModalOpen={exitConfirmOpen || pendingDiscardAction !== null}
         reauthBanner={reauthRequired ? renderReauthBanner() : null}
         editPendingFields={editPendingFields}
         editNameInput={editNameInput}
@@ -2880,6 +2964,7 @@ export function TopicsWorkspace({
         onEditNameInputChange={setEditNameInput}
         onEditDescriptionInputChange={setEditDescriptionInput}
         onCloseEditForm={closeEditForm}
+        onRequestExit={(action) => requestGuardedExit(editIsDirty, action)}
         onGoBack={goBack}
       />
     );
@@ -2995,6 +3080,7 @@ export function TopicsWorkspace({
               onSelectPromptOption={(eventId, optionKey) =>
                 void handleSelectPromptOption(roomId, eventId, optionKey)
               }
+              onCopyFeedback={showToastNotice}
             />
             <ComposerView
               safeInset={safeInset}
@@ -3064,10 +3150,12 @@ export function TopicsWorkspace({
 
       {showDetail ? (
         <div
+          ref={detailContainerRef}
           key={isNarrow ? narrowPageKey : "wide"}
           className={cn(
             "waypoint-detail relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background",
             isNarrow && "w-full",
+            isSwipingBack && "[&_.waypoint-timeline]:overflow-y-hidden [&>section]:overflow-y-hidden",
             pageEnterClass,
           )}
           style={{
@@ -3128,6 +3216,17 @@ export function TopicsWorkspace({
           </ErrorBoundary>
         </div>
       ) : null}
+      <DiscardChangesDialog
+        open={pendingDiscardAction !== null}
+        onConfirmDiscard={() => {
+          const action = pendingDiscardAction;
+          setPendingDiscardAction(null);
+          action?.();
+        }}
+        onCancelDiscard={() => {
+          setPendingDiscardAction(null);
+        }}
+      />
       {toastNotice ? (
         <div
           role="status"

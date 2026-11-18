@@ -10,6 +10,7 @@ export type AgentsFormState =
       mode: "edit";
       userId: string;
       handwrittenName: string;
+      initialHandwrittenName?: string;
     }
   | {
       mode: "remove";

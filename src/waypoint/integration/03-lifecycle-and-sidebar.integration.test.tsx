@@ -633,9 +633,13 @@ test("窄视口提交新建 Topic 期间触发系统返回时留在新建页并�
     expect(await screen.findByRole("alert")).toHaveTextContent("服务器暂时无法创建 Topic，请稍后重试。");
     expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
 
-    // 再次按下系统返回应回到 Topic 列表（不漏出应用外）
+    // 再次按下系统返回时因存在未保存输入，先弹出放弃确认；确认放弃后回到 Topic 列表（不漏出应用外）
     await act(async () => {
       window.history.back();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    await user.click(await screen.findByRole("button", { name: "放弃更改" }));
+    await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeVisible();
@@ -814,10 +818,11 @@ test("宽视口同时打开 Topic 与新建表单时快速切换 宽 -> 窄 -> �
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
-    // 新建表单与草稿仍完好保留，取消后原打开的 Topic 也仍保持打开
+    // 新建表单与草稿仍完好保留，取消时拦截确认放弃后关闭，原打开的 Topic 也仍保持打开
     expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
     expect(screen.getByLabelText("Topic 名字")).toHaveValue("切屏保留草稿");
     await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(await screen.findByRole("button", { name: "放弃更改" }));
     expect(screen.getByRole("banner")).toHaveTextContent("双层栈话题");
     expect(window.history.state).toEqual({ testRoot: "rapid-switch" });
 
