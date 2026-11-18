@@ -53,7 +53,7 @@ describe("installOverlayScrollbars", () => {
       vi.advanceTimersByTime(500);
       expect(container.getAttribute("data-scrolling")).toBe("fade");
 
-      vi.advanceTimersByTime(450);
+      vi.advanceTimersByTime(550);
       expect(container.getAttribute("data-scrolling")).toBeNull();
     } finally {
       cleanup();
@@ -105,7 +105,7 @@ describe("installOverlayScrollbars", () => {
       expect(thumbX?.getAttribute("data-state")).toBe("fade");
       expect(thumbY?.getAttribute("data-state")).toBe("fade");
 
-      vi.advanceTimersByTime(450);
+      vi.advanceTimersByTime(550);
       expect(document.querySelector('[data-overlay-scrollbar="x"]')).toBeNull();
       expect(document.querySelector('[data-overlay-scrollbar="y"]')).toBeNull();
     } finally {
@@ -123,8 +123,8 @@ describe("App.css table and scrollbar corner guards", () => {
     const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
     const css = readFileSync(resolve(cwd, "src/App.css"), "utf-8") as string;
 
-    expect(css).toContain("::-webkit-scrollbar-corner");
-    expect(css).toMatch(/::-webkit-scrollbar-corner\s*\{\s*background:\s*transparent;/);
+    expect(css).toContain("[data-overlay-scrollbar][data-state=\"fade\"]");
+    expect(css).toContain("scrollbar-width: none;");
 
     const tableOverflowRule =
       css.match(/\.waypoint-markdown \[data-streamdown="table-wrapper"\] > div:last-child \{[^}]+\}/)?.[0] ?? "";

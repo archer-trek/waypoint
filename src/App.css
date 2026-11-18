@@ -213,50 +213,15 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Native overlay scrollbars: invisible by default, only appear during active scrolling (ADR-0028).
-   * Isolate standard scrollbar-width/scrollbar-color to engines lacking ::-webkit-scrollbar so Chromium/WebView 121+
-   * honors the 4px ::-webkit-scrollbar width and smooth background-color fade transitions. */
-  @supports not selector(::-webkit-scrollbar) {
-    * {
-      scrollbar-width: thin;
-      scrollbar-color: transparent transparent;
-    }
-
-    *[data-scrolling="active"] {
-      scrollbar-color: color-mix(in srgb, var(--foreground) 26%, transparent) transparent;
-    }
-
-    *[data-scrolling="fade"] {
-      scrollbar-color: transparent transparent;
-    }
+  /* Native scrollbars hidden globally; smooth GPU-composited floating overlay thumbs are managed on scroll (ADR-0028) */
+  * {
+    scrollbar-width: none;
   }
 
   ::-webkit-scrollbar {
-    width: 4px;
-    height: 4px;
-  }
-
-  ::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  ::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    background: transparent;
-    border-radius: 9999px;
-  }
-
-  *[data-scrolling="active"]::-webkit-scrollbar-thumb {
-    background-color: color-mix(in srgb, var(--foreground) 26%, transparent);
-    transition: background-color 0s;
-  }
-
-  *[data-scrolling="fade"]::-webkit-scrollbar-thumb {
-    background-color: transparent;
-    transition: background-color 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    display: none;
+    width: 0;
+    height: 0;
   }
 }
 
@@ -1038,16 +1003,16 @@ a {
   }
 }
 
-/* Zero-layout-shift floating overlay scrollbar thumbs for Markdown cards (ADR-0028) */
+/* Zero-layout-shift floating overlay scrollbar thumbs across all scroll containers (ADR-0028) */
 [data-overlay-scrollbar="x"],
 [data-overlay-scrollbar="y"] {
   position: fixed;
-  z-index: 30;
+  z-index: 60;
   pointer-events: none;
   border-radius: 9999px;
-  background-color: color-mix(in srgb, var(--foreground) 26%, transparent);
+  background-color: color-mix(in srgb, var(--foreground) 30%, transparent);
   opacity: 0;
-  transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 [data-overlay-scrollbar][data-state="active"] {
@@ -1057,4 +1022,5 @@ a {
 
 [data-overlay-scrollbar][data-state="fade"] {
   opacity: 0;
+  transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }

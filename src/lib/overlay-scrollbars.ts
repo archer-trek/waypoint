@@ -19,14 +19,11 @@ type ScrollTrackedElement = HTMLElement & {
   _overlayThumbY?: HTMLDivElement;
 };
 
-function isInlineCardScroller(el: HTMLElement): boolean {
-  return (
-    el.getAttribute("data-streamdown") === "code-block-body" ||
-    Boolean(el.parentElement?.getAttribute("data-streamdown") === "table-wrapper")
-  );
-}
-
-function getVisibleCardRect(el: HTMLElement): {
+function getVisibleRect(
+  el: HTMLElement,
+  win: Window,
+  doc: Document,
+): {
   left: number;
   top: number;
   right: number;
@@ -36,14 +33,14 @@ function getVisibleCardRect(el: HTMLElement): {
   if (rect.width <= 0 || rect.height <= 0) {
     return null;
   }
-  let left = rect.left;
-  let top = rect.top;
-  let right = rect.right;
-  let bottom = rect.bottom;
+  let left = Math.max(0, rect.left);
+  let top = Math.max(0, rect.top);
+  let right = Math.min(win.innerWidth || rect.right, rect.right);
+  let bottom = Math.min(win.innerHeight || rect.bottom, rect.bottom);
 
   let ancestor = el.parentElement;
-  while (ancestor && ancestor !== el.ownerDocument.body) {
-    const style = el.ownerDocument.defaultView?.getComputedStyle(ancestor);
+  while (ancestor && ancestor !== doc.body && ancestor !== doc.documentElement) {
+    const style = doc.defaultView?.getComputedStyle(ancestor);
     if (
       style &&
       (style.overflowY === "auto" ||
@@ -70,7 +67,7 @@ function getVisibleCardRect(el: HTMLElement): {
   return { left, top, right, bottom };
 }
 
-function removeCardThumb(
+function removeThumb(
   el: ScrollTrackedElement,
   axis: "x" | "y",
   activeThumbs: Set<HTMLDivElement>,
@@ -85,10 +82,10 @@ function removeCardThumb(
 }
 
 /**
- * Enable scroll-only overlay scrollbars that stay hidden during programmatic jumps,
- * remain active throughout touch momentum scrolling, and fade out smoothly when settled.
- * Inline Markdown cards (code blocks and tables) use zero-gutter floating overlay thumbs
- * so neither horizontal nor vertical scrolling shifts card dimensions.
+ * Enable scroll-only floating overlay scrollbars across all scroll containers
+ * (timeline, topic list, dialogs, code blocks, tables).
+ * Native scrollbars stay hidden (0px gutter, 0px layout shift), while lightweight
+ * GPU-composited floating thumbs appear during active/momentum scrolling and fade out smoothly.
  */
 export function installOverlayScrollbars(
   win: Window,
@@ -97,7 +94,7 @@ export function installOverlayScrollbars(
   let userInteracting = false;
   let interactionTimer: ReturnType<typeof setTimeout> | undefined;
   const activeThumbs = new Set<HTMLDivElement>();
-  const activeCards = new Set<ScrollTrackedElement>();
+  const activeElements = new Set<ScrollTrackedElement>();
 
   const markUserInteraction = (durationMs = 350) => {
     userInteracting = true;
@@ -108,16 +105,16 @@ export function installOverlayScrollbars(
     }, durationMs);
   };
 
-  const clearCardThumbs = (el: ScrollTrackedElement) => {
-    removeCardThumb(el, "x", activeThumbs);
-    removeCardThumb(el, "y", activeThumbs);
-    activeCards.delete(el);
+  const clearElementThumbs = (el: ScrollTrackedElement) => {
+    removeThumb(el, "x", activeThumbs);
+    removeThumb(el, "y", activeThumbs);
+    activeElements.delete(el);
   };
 
-  const syncInlineCardThumbs = (el: ScrollTrackedElement) => {
-    const visible = getVisibleCardRect(el);
+  const syncOverlayThumbs = (el: ScrollTrackedElement) => {
+    const visible = getVisibleRect(el, win, doc);
     if (!visible) {
-      clearCardThumbs(el);
+      clearElementThumbs(el);
       return;
     }
 
@@ -161,7 +158,7 @@ export function installOverlayScrollbars(
       thumbX.style.height = "4px";
       thumbX.setAttribute("data-state", "active");
     } else {
-      removeCardThumb(el, "x", activeThumbs);
+      removeThumb(el, "x", activeThumbs);
     }
 
     if (showY) {
@@ -192,11 +189,11 @@ export function installOverlayScrollbars(
       thumbY.style.height = `${Math.round(thumbHeight)}px`;
       thumbY.setAttribute("data-state", "active");
     } else {
-      removeCardThumb(el, "y", activeThumbs);
+      removeThumb(el, "y", activeThumbs);
     }
 
     if (showX || showY) {
-      activeCards.add(el);
+      activeElements.add(el);
     }
   };
 
@@ -224,11 +221,11 @@ export function installOverlayScrollbars(
       return;
     }
 
-    // If an outer container scrolls, dismiss floating inline card thumbs so they never lag behind
-    if (!isInlineCardScroller(target) && activeCards.size > 0) {
-      for (const card of Array.from(activeCards)) {
-        if (target.contains(card)) {
-          clearCardThumbs(card);
+    // Dismiss floating child thumbs if an outer scroll container moves
+    if (activeElements.size > 0) {
+      for (const child of Array.from(activeElements)) {
+        if (child !== target && target.contains(child)) {
+          clearElementThumbs(child);
         }
       }
     }
@@ -240,26 +237,23 @@ export function installOverlayScrollbars(
     }
 
     const el = target as ScrollTrackedElement;
-    const inlineCard = isInlineCardScroller(el);
     target.setAttribute("data-scrolling", "active");
-    if (inlineCard) {
-      syncInlineCardThumbs(el);
-    }
+    syncOverlayThumbs(el);
 
     if (el._scrollFadeTimer) clearTimeout(el._scrollFadeTimer);
     if (el._scrollCleanTimer) clearTimeout(el._scrollCleanTimer);
 
-    // Trigger fade-out 500ms after scroll events stop settling
+    // Trigger smooth 500ms opacity fade-out after scroll events settle
     el._scrollFadeTimer = setTimeout(() => {
       target.setAttribute("data-scrolling", "fade");
       el._overlayThumbX?.setAttribute("data-state", "fade");
       el._overlayThumbY?.setAttribute("data-state", "fade");
       el._scrollCleanTimer = setTimeout(() => {
         target.removeAttribute("data-scrolling");
-        clearCardThumbs(el);
+        clearElementThumbs(el);
         delete el._scrollFadeTimer;
         delete el._scrollCleanTimer;
-      }, 450);
+      }, 550);
     }, 500);
   };
 
@@ -273,10 +267,10 @@ export function installOverlayScrollbars(
 
   return () => {
     if (interactionTimer) clearTimeout(interactionTimer);
-    for (const card of Array.from(activeCards)) {
-      if (card._scrollFadeTimer) clearTimeout(card._scrollFadeTimer);
-      if (card._scrollCleanTimer) clearTimeout(card._scrollCleanTimer);
-      clearCardThumbs(card);
+    for (const el of Array.from(activeElements)) {
+      if (el._scrollFadeTimer) clearTimeout(el._scrollFadeTimer);
+      if (el._scrollCleanTimer) clearTimeout(el._scrollCleanTimer);
+      clearElementThumbs(el);
     }
     for (const thumb of activeThumbs) {
       thumb.remove();
