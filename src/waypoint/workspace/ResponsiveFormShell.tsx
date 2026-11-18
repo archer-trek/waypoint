@@ -201,7 +201,7 @@ export function ResponsiveFormShell({
                 event.preventDefault();
               }
             }}
-            className="max-h-[85vh] gap-0 overflow-y-auto p-0 sm:max-w-lg"
+            className="max-h-[85vh] gap-0 overflow-y-auto overscroll-contain p-0 sm:max-w-lg"
           >
             {reauthBanner}
             <div
@@ -243,7 +243,7 @@ export function ResponsiveFormShell({
       <section
         aria-label={title}
         role="region"
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-background"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-background"
       >
         <div
           className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur-xs"

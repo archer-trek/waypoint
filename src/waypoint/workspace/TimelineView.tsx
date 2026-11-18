@@ -1,4 +1,9 @@
-import { useState, useRef, type RefObject } from "react";
+import { useEffect, useState, useRef, type RefObject } from "react";
+import {
+  canScrollVerticallyInDirection,
+  installTouchScrollBoundaryLock,
+  isViewportKeyboardConstrained,
+} from "@/lib/viewport-lock";
 import { copyToClipboard } from "@/lib/utils";
 import { Code2, Copy, FileText, MoreHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +33,7 @@ export type TimelineViewProps = {
   reauthRequired: boolean;
   openFailedMenuId: string | null;
   isNarrow?: boolean;
+  safeInset?: number;
   getLocalImageUrl: (key: string, attachment: DraftAttachment) => string;
   getDownloadedImageUrl: (mxcUrl: string) => string | undefined;
   onScroll: () => void;
@@ -143,6 +149,7 @@ export function TimelineView({
   reauthRequired,
   openFailedMenuId,
   isNarrow,
+  safeInset = 0,
   getLocalImageUrl,
   getDownloadedImageUrl,
   onScroll,
@@ -156,6 +163,23 @@ export function TimelineView({
   onCopyFeedback,
 }: TimelineViewProps) {
   const longPressTimerRef = useRef<number | null>(null);
+  const safeInsetRef = useRef(safeInset);
+  useEffect(() => {
+    safeInsetRef.current = safeInset;
+  }, [safeInset]);
+
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    return installTouchScrollBoundaryLock(el, {
+      isLocked: () => isViewportKeyboardConstrained(safeInsetRef.current),
+      onlyVertical: true,
+      shouldIgnoreHorizontalEdge: (startX, dx, dy) =>
+        startX <= 24 && Math.abs(dx) > Math.abs(dy),
+      allowVerticalScroll: (target, dy) =>
+        canScrollVerticallyInDirection(target, el, dy),
+    });
+  }, [timelineRef]);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const [contextMenuItem, setContextMenuItem] = useState<{
     item: TimelineItem;
@@ -221,7 +245,7 @@ export function TimelineView({
       ref={timelineRef}
       role="log"
       aria-label="对话时间线"
-      className="waypoint-timeline relative flex-1 min-h-0 overflow-y-auto px-4 py-5 sm:px-6 flex flex-col gap-4"
+      className="waypoint-timeline relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 flex flex-col gap-4"
       onScroll={onScroll}
     >
       {items.map((item) =>

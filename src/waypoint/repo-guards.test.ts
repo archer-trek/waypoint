@@ -227,5 +227,32 @@ describe("Repository, asset, and error-copy guards", () => {
       workspaceTsx,
       "TopicsWorkspace singleLinePadX must match 2 * 48px composer horizontal padding",
     ).toContain("const singleLinePadX = 96;");
+
+    const appCss = readFileSync(resolve(ROOT_DIR, "src/App.css"), "utf-8");
+    expect(appCss).toContain("overflow: hidden;");
+    expect(appCss).toContain("overscroll-behavior: none;");
+    expect(appCss).toContain("position: fixed;");
+
+    const topicHeaderTsx = readFileSync(
+      resolve(ROOT_DIR, "src/waypoint/workspace/TopicHeaderView.tsx"),
+      "utf-8",
+    );
+    expect(topicHeaderTsx).toContain("touch-none");
+
+    const timelineTsx = readFileSync(
+      resolve(ROOT_DIR, "src/waypoint/workspace/TimelineView.tsx"),
+      "utf-8",
+    );
+    expect(timelineTsx).toContain("overscroll-contain");
+
+    const mainActivityKt = readFileSync(
+      resolve(
+        ROOT_DIR,
+        "src-tauri/gen/android/app/src/main/java/app/waypoint/client/MainActivity.kt",
+      ),
+      "utf-8",
+    );
+    expect(mainActivityKt).toContain("View.OVER_SCROLL_NEVER");
+    expect(mainActivityKt).toContain("setOnScrollChangeListener");
   });
 });

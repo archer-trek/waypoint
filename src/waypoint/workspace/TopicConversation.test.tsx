@@ -687,6 +687,114 @@ describe("ComposerView (#89)", () => {
     fireEvent.click(within(hintRegion).getByRole("button", { name: "/model" }));
     expect(onSelectSlashCommand).toHaveBeenCalledWith("/model");
   });
+  test("applies touch-action and overscroll containment across header, timeline, and composer (#115)", () => {
+    const header = render(
+      <TopicHeaderView
+        isNarrow
+        topic={sampleTopic}
+        descriptionExpanded={false}
+        overflowMenuOpen={false}
+        overflowMenuRef={createRef()}
+        editing={false}
+        editSubmitting={false}
+        deleteConfirmOpen={false}
+        deleting={false}
+        reauthRequired={false}
+        pinPending={false}
+        onGoBack={vi.fn()}
+        onToggleDescription={vi.fn()}
+        onToggleOverflowMenu={vi.fn()}
+        onCloseOverflowMenu={vi.fn()}
+        onTogglePin={vi.fn()}
+        onOpenEditForm={vi.fn()}
+        onOpenDeleteConfirm={vi.fn()}
+      />,
+    );
+    expect(header.container.querySelector(".waypoint-topic-header")).toHaveClass("touch-none");
+    header.unmount();
+
+    const tl = render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={[]}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        isNarrow
+        safeInset={300}
+        getLocalImageUrl={() => ""}
+        getDownloadedImageUrl={() => undefined}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+      />,
+    );
+    expect(tl.container.querySelector(".waypoint-timeline")).toHaveClass("overscroll-contain");
+    tl.unmount();
+
+    const compLocked = render(
+      <ComposerView
+        safeInset={300}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        composerTextareaScrollable={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        hasDraftAttachment={false}
+        draftText="hello"
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="narrow"
+        supportsFileDropAndPaste={false}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={vi.fn()}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+    expect(compLocked.container.querySelector(".waypoint-composer-safe-area")).toHaveClass("touch-none");
+    expect(compLocked.container.querySelector("form.waypoint-composer")).toHaveClass("touch-none");
+    expect(compLocked.getByRole("textbox", { name: "输入消息" })).toHaveClass("touch-none", "overscroll-contain");
+
+    compLocked.rerender(
+      <ComposerView
+        safeInset={300}
+        showScrollBottomFab={false}
+        composerMultiline
+        composerTextareaScrollable
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        hasDraftAttachment={false}
+        draftText={"1\n2\n3\n4\n5\n6"}
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="narrow"
+        supportsFileDropAndPaste={false}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={vi.fn()}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+    expect(compLocked.container.querySelector(".waypoint-composer-safe-area")).toHaveClass("touch-pan-y");
+    expect(compLocked.container.querySelector("form.waypoint-composer")).toHaveClass("touch-pan-y");
+    expect(compLocked.getByRole("textbox", { name: "输入消息" })).toHaveClass("touch-pan-y", "overscroll-contain");
+  });
 });
 
 describe("Theme hygiene (#89)", () => {

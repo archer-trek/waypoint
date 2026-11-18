@@ -1,4 +1,9 @@
-import type { FormEvent, KeyboardEvent, RefObject } from "react";
+import { useEffect, useRef, type FormEvent, type KeyboardEvent, type RefObject } from "react";
+import {
+  canScrollVerticallyInDirection,
+  installTouchScrollBoundaryLock,
+  isViewportKeyboardConstrained,
+} from "@/lib/viewport-lock";
 import { ArrowUp, ChevronDown, Plus } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -10,6 +15,7 @@ export type ComposerViewProps = {
   safeInset: number;
   showScrollBottomFab: boolean;
   composerMultiline: boolean;
+  composerTextareaScrollable?: boolean;
   composerError?: string;
   activeTopicUnavailable: boolean;
   reauthRequired: boolean;
@@ -38,6 +44,7 @@ export function ComposerView({
   safeInset,
   showScrollBottomFab,
   composerMultiline,
+  composerTextareaScrollable = false,
   composerError,
   activeTopicUnavailable,
   reauthRequired,
@@ -61,11 +68,36 @@ export function ComposerView({
   const inputDisabled = persistingSend || activeTopicUnavailable || reauthRequired;
   const isSendActive = Boolean(draftText.trim() || hasDraftAttachment);
   const isNarrowMode = viewportMode === "narrow";
+  const safeAreaRef = useRef<HTMLDivElement | null>(null);
+  const safeInsetRef = useRef(safeInset);
+  useEffect(() => {
+    safeInsetRef.current = safeInset;
+  }, [safeInset]);
+
+  useEffect(() => {
+    const safeAreaEl = safeAreaRef.current;
+    if (!safeAreaEl) return;
+    return installTouchScrollBoundaryLock(safeAreaEl, {
+      isLocked: () => isViewportKeyboardConstrained(safeInsetRef.current),
+      onlyVertical: false,
+      shouldIgnoreHorizontalEdge: (startX, dx, dy) =>
+        startX <= 24 && Math.abs(dx) > Math.abs(dy),
+      allowVerticalScroll: (target, dy) => {
+        const textarea = composerTextareaRef.current;
+        if (!textarea || !(target instanceof Node) || !textarea.contains(target)) {
+          return false;
+        }
+        return canScrollVerticallyInDirection(textarea, textarea, dy);
+      },
+    });
+  }, [composerTextareaRef]);
 
   return (
     <div
+      ref={safeAreaRef}
       className={cn(
         "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        composerTextareaScrollable ? "touch-pan-y" : "touch-none",
         safeInset === 0
           ? "pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]"
           : "pb-1.5",
@@ -78,7 +110,7 @@ export function ComposerView({
           variant="outline"
           size="icon"
           aria-label="回到底部"
-          className="waypoint-scroll-bottom-fab absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-8 rounded-full border-border/80 bg-background/90 backdrop-blur-md text-foreground shadow-sm hover:bg-accent hover:-translate-y-0.5 transition-transform"
+          className="waypoint-scroll-bottom-fab touch-none absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-8 rounded-full border-border/80 bg-background/90 backdrop-blur-md text-foreground shadow-sm hover:bg-accent hover:-translate-y-0.5 transition-transform"
           onClick={onScrollToBottom}
         >
           <ChevronDown aria-hidden="true" className="size-4" />
@@ -93,7 +125,7 @@ export function ComposerView({
         <div
           role="region"
           aria-label="已选附件"
-          className="waypoint-draft-attachment flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[13px]"
+          className="waypoint-draft-attachment touch-none flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[13px]"
         >
           <span className="waypoint-draft-attachment-name min-w-0 truncate text-foreground">
             {draftAttachmentName}
@@ -118,7 +150,7 @@ export function ComposerView({
         <div
           role="region"
           aria-label="斜杠命令提示"
-          className="waypoint-slash-hints relative px-3 py-2 mb-2 rounded-xl border border-border/80 bg-card/95 backdrop-blur-sm shadow-xs"
+          className="waypoint-slash-hints touch-none relative px-3 py-2 mb-2 rounded-xl border border-border/80 bg-card/95 backdrop-blur-sm shadow-xs"
         >
           <ul className="waypoint-slash-hint-list flex flex-wrap gap-1.5 list-none m-0 p-0">
             {SLASH_COMMAND_HINTS.map((command) => (
@@ -141,6 +173,7 @@ export function ComposerView({
         ref={composerFormRef}
         className={cn(
           "waypoint-composer relative border border-border/90 bg-background dark:bg-card/75 shadow-xs dark:shadow-none box-border transition-[border-color,border-radius] focus-within:border-muted-foreground/45",
+          composerTextareaScrollable ? "touch-pan-y" : "touch-none",
           composerMultiline
             ? cn(
                 "multiline block rounded-[18px]",
@@ -159,7 +192,7 @@ export function ComposerView({
       >
         <label
           className={cn(
-            "waypoint-attach-button absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
+            "waypoint-attach-button touch-none absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
             isNarrowMode
               ? "bottom-[9px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
               : "bottom-[7px] left-2 size-8 min-w-8",
@@ -190,7 +223,10 @@ export function ComposerView({
           rows={1}
           disabled={inputDisabled}
           value={draftText}
-          className="block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[16px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed"
+          className={cn(
+            "block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[16px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto overscroll-contain box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed",
+            composerTextareaScrollable ? "touch-pan-y" : "touch-none",
+          )}
           onFocus={onFocusTextarea}
           onChange={(event) => onDraftTextChange(event.target.value)}
           onKeyDown={(event) => {
@@ -225,7 +261,7 @@ export function ComposerView({
           size="icon"
           aria-label="发送"
           className={cn(
-            "waypoint-send-button absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-colors",
+            "waypoint-send-button touch-none absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-colors",
             isNarrowMode
               ? "bottom-[9px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
               : "bottom-[7px] right-2 size-8 min-w-8",

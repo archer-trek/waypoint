@@ -246,7 +246,7 @@ export function SidebarView({
       <p className="sr-only">已连接</p>
       <div
         className={cn(
-          "waypoint-sidebar-header flex shrink-0 items-center gap-2 border-b border-border/60",
+          "waypoint-sidebar-header flex shrink-0 items-center gap-2 border-b border-border/60 touch-none",
           isNarrow
             ? "min-h-13 justify-between pt-[max(0.75rem,env(safe-area-inset-top,0px))] pb-2 pl-[max(20px,env(safe-area-inset-left,0px))] pr-[max(8px,env(safe-area-inset-right,0px))]"
             : trafficLightHeader
@@ -276,7 +276,7 @@ export function SidebarView({
 
       <div
         className={cn(
-          "waypoint-sidebar-scroll flex min-h-0 flex-1 flex-col overflow-y-auto",
+          "waypoint-sidebar-scroll flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain",
           isNarrow
             ? "pb-[max(0.875rem,env(safe-area-inset-bottom,0px))]"
             : "pb-3",

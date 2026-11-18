@@ -64,7 +64,7 @@ export function TopicHeaderView({
     <header
       data-elevated={isElevated ? "true" : undefined}
       className={cn(
-        "waypoint-topic-header sticky top-0 z-10 shrink-0 py-2.5 box-border transition-colors duration-200",
+        "waypoint-topic-header sticky top-0 z-10 shrink-0 py-2.5 box-border touch-none transition-colors duration-200",
         isElevated
           ? "bg-background/90 backdrop-blur-md border-b border-border/60 shadow-xs"
           : isNarrow

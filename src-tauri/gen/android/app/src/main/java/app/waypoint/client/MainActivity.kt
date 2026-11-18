@@ -1,6 +1,7 @@
 package app.waypoint.client
 
 import android.os.Bundle
+import android.view.View
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.ViewCompat
@@ -48,5 +49,13 @@ class MainActivity : TauriActivity() {
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     currentWebView = webView
+    webView.overScrollMode = View.OVER_SCROLL_NEVER
+    webView.isVerticalScrollBarEnabled = false
+    webView.isHorizontalScrollBarEnabled = false
+    webView.setOnScrollChangeListener { v, scrollX, scrollY, _, _ ->
+      if (scrollX != 0 || scrollY != 0) {
+        v.scrollTo(0, 0)
+      }
+    }
   }
 }
