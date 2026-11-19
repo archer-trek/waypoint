@@ -542,6 +542,26 @@ test("软键盘弹出时将 keyboard inset 传入界面与输入区容器，收�
     });
     expect(prodMain.style.paddingBottom).toBe("300px");
 
+    // 当 visualViewport 发生纵向偏移 (offsetTop > 0) 时，paddingBottom 不回退且自动复位视口偏移
+    const originalScrollIntoView = document.documentElement.scrollIntoView;
+    const scrollIntoViewSpy = vi.fn(() => {
+      fakeVisualViewport.offsetTop = 0;
+    });
+    document.documentElement.scrollIntoView = scrollIntoViewSpy;
+    try {
+      act(() => {
+        fakeVisualViewport.offsetTop = 210;
+        for (const listener of vvListeners.get("scroll") ?? []) {
+          listener(new Event("scroll"));
+        }
+      });
+      expect(prodMain.style.paddingBottom).toBe("300px");
+      expect(scrollIntoViewSpy).toHaveBeenCalled();
+      expect(fakeVisualViewport.offsetTop).toBe(0);
+    } finally {
+      document.documentElement.scrollIntoView = originalScrollIntoView;
+    }
+
     act(() => {
       fakeVisualViewport.height = 800;
       for (const listener of vvListeners.get("resize") ?? []) {

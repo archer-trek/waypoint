@@ -730,7 +730,7 @@ export function WaypointApp({
   const isNarrow = viewportMode === "narrow";
 
   const authMainClassName = cn(
-    "flex min-h-full w-full max-w-full overflow-y-auto bg-background px-6 text-foreground",
+    "flex h-full w-full max-w-full overflow-y-auto overscroll-contain bg-background px-6 text-foreground",
     isNarrow
       ? "flex-col pt-[max(3.25rem,env(safe-area-inset-top,0px))] pb-[calc(max(1.5rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))] transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
       : "items-center justify-center py-8 pt-[max(2rem,env(safe-area-inset-top,0px))] pb-[calc(max(2rem,env(safe-area-inset-bottom,0px))+var(--keyboard-inset,0px))]",

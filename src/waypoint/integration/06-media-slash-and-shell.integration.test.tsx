@@ -1365,6 +1365,7 @@ test("双端都不申请通知权限、不发系统通知、不设角标、不�
       const homeserver = new FakeHomeserver();
       let syncCalls = 0;
       let visible = true;
+      let releaseProactive = false;
       const visibilityListeners = new Set<(v: boolean) => void>();
 
       homeserver.handler = passwordLoginHandler(async (input) => {
@@ -1418,7 +1419,9 @@ test("双端都不申请通知权限、不发系统通知、不设角标、不�
               },
             };
           }
-          if (syncCalls === 2) {
+          // 登录后的增量 sync 次数在慢速 CI 上不稳定。只要测试已经放开投递，
+          // 下一次成功的 /sync 就要带上这条主动消息，而不是写死 syncCalls === 2。
+          if (releaseProactive) {
             return {
               type: "response",
               status: 200,
@@ -1475,14 +1478,17 @@ test("双端都不申请通知权限、不发系统通知、不设角标、不�
         "定时投递旧话题",
       ]);
 
+      releaseProactive = true;
       if (deviceDisplayName === "Waypoint macOS") {
-        // macOS 窗口失焦时收到 Agent 主动投递消息
+        // macOS 窗口失焦不挂起同步。失焦后要等前台 sync 定时器真正排上，
+        // 再推进 ManualClock；在 act 里提前 advance 会把这一跳丢掉，CI 上 waitFor 就会超时。
         await act(async () => {
           window.dispatchEvent(new Event("blur"));
-          clock.advance(1000);
         });
+        await advanceWhenTimerScheduled(clock, 1000);
       } else {
         // Android 切后台再回到前台收到 Agent 主动投递消息
+        await waitFor(() => expect(visibilityListeners.size).toBeGreaterThan(0));
         await act(async () => {
           visible = false;
           for (const listener of visibilityListeners) listener(false);

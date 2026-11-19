@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   Clock,
   HomeserverRequest,
@@ -1764,6 +1764,155 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
       expect(header).toHaveAttribute("data-elevated", "true");
       view.unmount();
     } finally {
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    }
+  });
+
+  test("mobile soft keyboard locks root/visual viewport against vertical composer drag while keeping timeline and scrollable textarea functional (#115)", async () => {
+    const user = userEvent.setup();
+    const messages = Array.from({ length: 10 }, (_, idx) =>
+      makeTextEvent(`$k${idx}`, idx % 2 === 0 ? "@alice:example.com" : "@bot:example.com", `消息 ${idx}`, 1_700_000_000_000 + idx * 1000),
+    );
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-lock" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!lock:example.com": makeStoredRoom({
+          name: "键盘视口锁定",
+          messages,
+        }),
+      },
+    });
+
+    const originalVv = window.visualViewport;
+    const originalScrollIntoView = document.documentElement.scrollIntoView;
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const vvListeners = new Map<string, Set<EventListener>>();
+    const fakeVv = {
+      height: 500,
+      offsetTop: 0,
+      offsetLeft: 0,
+      addEventListener: (type: string, fn: EventListener) => {
+        if (!vvListeners.has(type)) vvListeners.set(type, new Set());
+        vvListeners.get(type)!.add(fn);
+      },
+      removeEventListener: (type: string, fn: EventListener) => {
+        vvListeners.get(type)?.delete(fn);
+      },
+    };
+    const scrollIntoViewMock = vi.fn(() => {
+      fakeVv.offsetTop = 0;
+    });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: fakeVv });
+    document.documentElement.scrollIntoView = scrollIntoViewMock;
+
+    let textareaScrollableMock = false;
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 320;
+        if (this.tagName === "TEXTAREA") return 92;
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 1000;
+        if (this.tagName === "TEXTAREA") return textareaScrollableMock ? 220 : 28;
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+
+    const dispatchTouch = (target: EventTarget, type: string, x: number, y: number) => {
+      const ev = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent;
+      Object.defineProperty(ev, "touches", {
+        configurable: true,
+        value: type === "touchend" ? [] : [{ clientX: x, clientY: y }],
+      });
+      target.dispatchEvent(ev);
+      return ev;
+    };
+
+    try {
+      const clock = new ManualClock();
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+          keyboardInsetBottom={300}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /键盘视口锁定/ }));
+      const timeline = screen.getByRole("log", { name: "对话时间线" });
+      const textarea = screen.getByRole("textbox", { name: "输入消息" }) as HTMLTextAreaElement;
+      const safeArea = document.querySelector(".waypoint-composer-safe-area") as HTMLElement;
+
+      expect(safeArea).toHaveClass("touch-none");
+      expect(textarea).toHaveClass("touch-none", "overscroll-contain");
+
+      // Scroll timeline upward then back to bottom
+      timeline.scrollTop = 680;
+      fireEvent.scroll(timeline);
+
+      // Dragging on single-line textarea is prevented (cannot pan visualViewport)
+      dispatchTouch(textarea, "touchstart", 180, 460);
+      const dragTextarea = dispatchTouch(textarea, "touchmove", 180, 380);
+      expect(dragTextarea.defaultPrevented).toBe(true);
+      dispatchTouch(textarea, "touchend", 180, 380);
+
+      // At bottom of timeline, dragging past bottom is prevented; dragging down to scroll up is allowed
+      dispatchTouch(timeline, "touchstart", 180, 300);
+      const pastBottom = dispatchTouch(timeline, "touchmove", 180, 260);
+      expect(pastBottom.defaultPrevented).toBe(true);
+      dispatchTouch(timeline, "touchend", 180, 260);
+
+      dispatchTouch(timeline, "touchstart", 180, 300);
+      const scrollHistory = dispatchTouch(timeline, "touchmove", 180, 340);
+      expect(scrollHistory.defaultPrevented).toBe(false);
+      dispatchTouch(timeline, "touchend", 180, 340);
+
+      // If visualViewport.offsetTop shifts anyway (e.g. long-press selection auto-scroll), lock snaps it back while keeping timeline scrollTop
+      fakeVv.offsetTop = 210;
+      for (const fn of vvListeners.get("scroll") ?? []) {
+        fn(new Event("scroll"));
+      }
+      expect(scrollIntoViewMock).toHaveBeenCalled();
+      expect(fakeVv.offsetTop).toBe(0);
+      expect(timeline.scrollTop).toBe(680);
+
+      // Multiline (>4 lines) textarea allows internal scrolling within bounds and prevents boundary drag
+      textareaScrollableMock = true;
+      await user.type(textarea, "1\n2\n3\n4\n5\n6");
+      expect(textarea).toHaveClass("touch-pan-y", "overscroll-contain");
+      textarea.scrollTop = 40;
+      dispatchTouch(textarea, "touchstart", 180, 440);
+      const internalScroll = dispatchTouch(textarea, "touchmove", 180, 460);
+      expect(internalScroll.defaultPrevented).toBe(false);
+      dispatchTouch(textarea, "touchend", 180, 460);
+
+      textarea.scrollTop = 0;
+      dispatchTouch(textarea, "touchstart", 180, 440);
+      const pastTopTextarea = dispatchTouch(textarea, "touchmove", 180, 470);
+      expect(pastTopTextarea.defaultPrevented).toBe(true);
+      dispatchTouch(textarea, "touchend", 180, 470);
+
+      view.unmount();
+    } finally {
+      Object.defineProperty(window, "visualViewport", { configurable: true, value: originalVv });
+      document.documentElement.scrollIntoView = originalScrollIntoView;
       if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
       if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
     }

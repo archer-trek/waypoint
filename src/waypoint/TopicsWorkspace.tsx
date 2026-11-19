@@ -12,6 +12,7 @@ import {
 } from "react";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { cn } from "@/lib/utils";
+import { installViewportScrollLock, resetRootViewportOffset } from "@/lib/viewport-lock";
 import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, TransportResult, ViewportMode } from "../adapters/types";
 import {
@@ -249,6 +250,8 @@ export function TopicsWorkspace({
   }
   const [showScrollBottomFab, setShowScrollBottomFab] = useState(false);
   const [composerMultiline, setComposerMultiline] = useState(false);
+  const [composerTextareaScrollable, setComposerTextareaScrollable] = useState(false);
+  const focusViewportRafRef = useRef<number | undefined>(undefined);
   const overflowMenuRef = useRef<HTMLDivElement | null>(null);
   const composerFormRef = useRef<HTMLFormElement | null>(null);
   const resendingLocalIdsRef = useRef(new Set<string>());
@@ -648,6 +651,8 @@ export function TopicsWorkspace({
       ? Math.min(Math.max(scrollHeight, line), maxHeight)
       : Math.max(scrollHeight, line);
     textarea.style.height = `${nextHeight}px`;
+    const nextScrollable = exceeds && scrollHeight > nextHeight + 1;
+    setComposerTextareaScrollable((prev) => (prev === nextScrollable ? prev : nextScrollable));
   }, [currentDraftText, activeRoomId, composerMultiline, composerWidth, viewportMode]);
 
   function openSettings() {
@@ -2828,6 +2833,28 @@ export function TopicsWorkspace({
   const showSidebar = !isNarrow || !isNarrowPushed;
   const showDetail = !isNarrow || isNarrowPushed;
   const safeInset = normalizeInset(keyboardInsetBottom);
+
+  useEffect(() => {
+    return () => {
+      if (focusViewportRafRef.current !== undefined && typeof window !== "undefined") {
+        window.cancelAnimationFrame(focusViewportRafRef.current);
+        focusViewportRafRef.current = undefined;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (safeInset === 0 && !isNarrow) {
+      return undefined;
+    }
+    return installViewportScrollLock();
+  }, [safeInset, isNarrow]);
+
+  useLayoutEffect(() => {
+    if (safeInset > 0) {
+      resetRootViewportOffset();
+    }
+  }, [safeInset]);
   const narrowPageKey = !isNarrow
     ? "wide"
     : settingsOpen
@@ -3008,7 +3035,7 @@ export function TopicsWorkspace({
           <div
             role="status"
             aria-label="Topic 不可用"
-            className="waypoint-unavailable-banner flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-5 py-2.5 text-sm font-medium text-warning-foreground"
+            className="waypoint-unavailable-banner touch-none flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning px-5 py-2.5 text-sm font-medium text-warning-foreground"
           >
             {activeTopic.unavailableReason}
           </div>
@@ -3055,6 +3082,7 @@ export function TopicsWorkspace({
               timelineRef={timelineRef}
               items={activeTimelineItems}
               isNarrow={isNarrow}
+              safeInset={safeInset}
               activeTopicUnavailable={activeTopic.unavailable}
               reauthRequired={reauthRequired}
               openFailedMenuId={openFailedMenuId}
@@ -3086,6 +3114,7 @@ export function TopicsWorkspace({
               safeInset={safeInset}
               showScrollBottomFab={showScrollBottomFab}
               composerMultiline={composerMultiline}
+              composerTextareaScrollable={composerTextareaScrollable}
               composerError={composerError}
               activeTopicUnavailable={activeTopic.unavailable}
               reauthRequired={reauthRequired}
@@ -3104,7 +3133,22 @@ export function TopicsWorkspace({
               }
               onSendMessage={(event) => void handleSendMessage(event)}
               onPickedFiles={(files) => handlePickedFiles(roomId, files)}
-              onFocusTextarea={() => setOverflowMenuOpen(false)}
+              onFocusTextarea={() => {
+                setOverflowMenuOpen(false);
+                resetRootViewportOffset();
+                if (
+                  typeof window !== "undefined" &&
+                  typeof window.requestAnimationFrame === "function"
+                ) {
+                  if (focusViewportRafRef.current !== undefined) {
+                    window.cancelAnimationFrame(focusViewportRafRef.current);
+                  }
+                  focusViewportRafRef.current = window.requestAnimationFrame(() => {
+                    focusViewportRafRef.current = undefined;
+                    resetRootViewportOffset();
+                  });
+                }
+              }}
               onDraftTextChange={(text) => updateDraftText(roomId, text)}
               extractDataTransferFiles={extractDataTransferFiles}
             />

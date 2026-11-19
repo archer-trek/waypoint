@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { installViewportScrollLock } from "../lib/viewport-lock";
 import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
@@ -152,7 +153,7 @@ export function detectPlatform(): PlatformAdapter {
     }
     const vv = window.visualViewport;
     const vvInset = vv
-      ? normalizeInset(window.innerHeight - (vv.height + vv.offsetTop))
+      ? normalizeInset(window.innerHeight - vv.height)
       : 0;
     const vk = getVirtualKeyboard();
     const vkInset =
@@ -191,12 +192,17 @@ export function detectPlatform(): PlatformAdapter {
         /* ignore */
       }
     }
+    const removeViewportLock = installViewportScrollLock(
+      window,
+      typeof document !== "undefined" ? document : undefined,
+    );
     vv?.addEventListener("resize", notify);
     vv?.addEventListener("scroll", notify);
     vk?.addEventListener?.("geometrychange", notify);
     window.addEventListener("resize", notify);
     window.addEventListener(KEYBOARD_INSET_EVENT, handleCustomInset);
     return () => {
+      removeViewportLock();
       vv?.removeEventListener("resize", notify);
       vv?.removeEventListener("scroll", notify);
       vk?.removeEventListener?.("geometrychange", notify);
