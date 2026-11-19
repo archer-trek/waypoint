@@ -23,3 +23,10 @@ inherits = "dev"
 opt-level = 1
 debug = 0
 strip = true
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

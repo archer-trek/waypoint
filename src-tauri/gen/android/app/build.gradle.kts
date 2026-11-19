@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -14,6 +15,43 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
+fun resolveSigningProp(envName: String, propName: String): String? =
+    System.getenv(envName)?.takeIf { it.isNotBlank() }
+        ?: keystoreProperties.getProperty(propName)?.takeIf { it.isNotBlank() }
+
+fun resolveStoreFile(rawPath: String): File {
+    val expanded = if (rawPath.startsWith("~/")) {
+        File(System.getProperty("user.home"), rawPath.removePrefix("~/"))
+    } else {
+        File(rawPath)
+    }
+    return if (expanded.isAbsolute) expanded else rootProject.file(rawPath)
+}
+
+val releaseStorePath = resolveSigningProp("WAYPOINT_ANDROID_KEYSTORE_PATH", "storeFile")
+val releaseStorePassword = resolveSigningProp("WAYPOINT_ANDROID_KEYSTORE_PASSWORD", "storePassword")
+val releaseKeyAlias = resolveSigningProp("WAYPOINT_ANDROID_KEY_ALIAS", "keyAlias")
+val releaseKeyPassword = resolveSigningProp("WAYPOINT_ANDROID_KEY_PASSWORD", "keyPassword")
+val hasReleaseSigning =
+    releaseStorePath != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
+val overrideVersionCode = (project.findProperty("waypointVersionCode") as String?)
+    ?: System.getenv("WAYPOINT_ANDROID_VERSION_CODE")
+val overrideVersionName = (project.findProperty("waypointVersionName") as String?)
+    ?: System.getenv("WAYPOINT_ANDROID_VERSION_NAME")
+val overrideAbiFilters = (project.findProperty("waypointAbiFilters") as String?)
+    ?: System.getenv("WAYPOINT_ANDROID_ABI_FILTERS")
+
 android {
     compileSdk = 37
     namespace = "app.waypoint.client"
@@ -22,8 +60,28 @@ android {
         applicationId = "app.waypoint.client"
         minSdk = 24
         targetSdk = 37
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
-        versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        versionCode = overrideVersionCode?.toIntOrNull()
+            ?: tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
+        versionName = overrideVersionName?.takeIf { it.isNotBlank() }
+            ?: tauriProperties.getProperty("tauri.android.versionName", "1.0")
+        if (!overrideAbiFilters.isNullOrBlank()) {
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(
+                    overrideAbiFilters.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+                )
+            }
+        }
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = resolveStoreFile(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -36,8 +94,9 @@ android {
             }
         }
         getByName("release") {
-            optimization {
-               enable = true
+            isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
             }
             proguardFiles(
                 *fileTree(".") {
@@ -45,6 +104,11 @@ android {
                   exclude("build/**")
                 }.files.toTypedArray()
             )
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
         }
     }
     compileOptions {
