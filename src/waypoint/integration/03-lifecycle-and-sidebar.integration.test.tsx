@@ -1190,6 +1190,140 @@ test("生产平台适配器支持 virtualKeyboard、waypoint:keyboard-inset 事�
   }
 });
 
+test("发送收起软键盘后，过期 inset 不再垫高 Composer，离开再进入也不恢复 (#120)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "键盘收起话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      return { type: "response", status: 200, body: { event_id: "$sent-1" } };
+    }
+    throw new Error(input.url);
+  });
+
+  const { detectPlatform } = await import("../../adapters/production");
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerHeight = window.innerHeight;
+  const originalVisualViewport = window.visualViewport;
+  const vvListeners = new Map<string, Set<EventListener>>();
+  const fakeVisualViewport = {
+    height: 800,
+    offsetTop: 0,
+    offsetLeft: 0,
+    addEventListener: (type: string, listener: EventListener) => {
+      if (!vvListeners.has(type)) {
+        vvListeners.set(type, new Set());
+      }
+      vvListeners.get(type)?.add(listener);
+    },
+    removeEventListener: (type: string, listener: EventListener) => {
+      vvListeners.get(type)?.delete(listener);
+    },
+  };
+  const emitViewport = (type: string) => {
+    for (const listener of vvListeners.get(type) ?? []) {
+      listener(new Event(type));
+    }
+  };
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn((query: string) => ({
+      matches: query === "(min-width: 48em)" ? false : true,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      onchange: null,
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  Object.defineProperty(window, "innerHeight", { configurable: true, value: 800 });
+  Object.defineProperty(window, "visualViewport", { configurable: true, value: fakeVisualViewport });
+
+  try {
+    const view = render(
+      <WaypointApp homeserver={homeserver} platform={detectPlatform()} clock={new ManualClock()} />,
+    );
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "键盘收起话题" }));
+
+    const insetOf = () => {
+      const main = screen.getByRole("main");
+      const safeArea = main.querySelector(".waypoint-composer-safe-area");
+      return {
+        padding: main.style.paddingBottom,
+        marker: safeArea?.getAttribute("data-keyboard-inset"),
+      };
+    };
+    expect(insetOf()).toEqual({ padding: "0px", marker: "0" });
+
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+    await user.click(input);
+    act(() => {
+      fakeVisualViewport.height = 488;
+      emitViewport("resize");
+      window.dispatchEvent(new CustomEvent("waypoint:keyboard-inset", { detail: { bottom: 312 } }));
+      document.documentElement.style.setProperty("--keyboard-inset", "312px");
+    });
+    expect(insetOf()).toEqual({ padding: "312px", marker: "312" });
+
+    await user.type(input, "发完就收起");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    act(() => {
+      fakeVisualViewport.height = 800;
+      emitViewport("resize");
+    });
+    expect(insetOf()).toEqual({ padding: "0px", marker: "0" });
+    expect(document.documentElement.style.getPropertyValue("--keyboard-inset")).toBe("312px");
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(await screen.findByRole("button", { name: "键盘收起话题" }));
+    expect(insetOf()).toEqual({ padding: "0px", marker: "0" });
+
+    act(() => {
+      fakeVisualViewport.height = 520;
+      emitViewport("resize");
+    });
+    expect(insetOf()).toEqual({ padding: "280px", marker: "280" });
+    act(() => {
+      fakeVisualViewport.height = 800;
+      emitViewport("resize");
+    });
+    expect(insetOf()).toEqual({ padding: "0px", marker: "0" });
+
+    view.unmount();
+  } finally {
+    document.documentElement.style.removeProperty("--keyboard-inset");
+    Object.defineProperty(window, "matchMedia", { configurable: true, value: originalMatchMedia });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    Object.defineProperty(window, "visualViewport", { configurable: true, value: originalVisualViewport });
+  }
+});
+
 test("进入 Topic 列表后可在设置里查看 Bot 名册（展示名字优先级与用户 ID），并适配宽窄视口与返回", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();

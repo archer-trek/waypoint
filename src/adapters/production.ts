@@ -146,22 +146,58 @@ export function detectPlatform(): PlatformAdapter {
   let queuedPushes = 0;
   let hasSystemBackListener = false;
   let customEventInset = 0;
+  let customEventEpoch = 0;
+  let sawViewportKeyboard = false;
+  let viewportDismissed = false;
+  let expiredEpoch = 0;
+  let expiredCssInset = -1;
+  let pendingClosedPublication = false;
 
-  function measureKeyboardInsetBottom(): number {
+  function readViewportKeyboardInset(): number {
     if (typeof window === "undefined") {
       return 0;
     }
     const vv = window.visualViewport;
-    const vvInset = vv
-      ? normalizeInset(window.innerHeight - vv.height)
-      : 0;
+    const vvInset = vv ? normalizeInset(window.innerHeight - vv.height) : 0;
     const vk = getVirtualKeyboard();
     const vkInset =
       vk?.boundingRect && typeof vk.boundingRect.height === "number"
         ? normalizeInset(vk.boundingRect.height)
         : 0;
+    return Math.max(vvInset, vkInset);
+  }
+
+  // A restored visual viewport is the keyboard being gone. Native IME events and the
+  // root --keyboard-inset written with them keep their last height until a newer
+  // publication, and that leftover must not keep the composer raised. While the
+  // viewport reports an open keyboard, its CSS-pixel overlap is the height — a
+  // mismatched native unit cannot outrank it.
+  function measureKeyboardInsetBottom(): number {
+    const viewportInset = readViewportKeyboardInset();
     const cssInset = readRootCssKeyboardInset();
-    return Math.max(vvInset, vkInset, customEventInset, cssInset);
+    if (viewportInset > 0) {
+      sawViewportKeyboard = true;
+      pendingClosedPublication = false;
+      return viewportInset;
+    }
+    if (sawViewportKeyboard) {
+      sawViewportKeyboard = false;
+      viewportDismissed = true;
+      if (pendingClosedPublication && customEventInset > 0) {
+        expiredEpoch = customEventEpoch - 1;
+        expiredCssInset = cssInset === customEventInset ? -1 : cssInset;
+      } else {
+        expiredEpoch = customEventEpoch;
+        expiredCssInset = cssInset;
+      }
+      pendingClosedPublication = false;
+    }
+    if (!viewportDismissed) {
+      return Math.max(customEventInset, cssInset);
+    }
+    const nativeLive = customEventEpoch > expiredEpoch ? customEventInset : 0;
+    const cssLive = expiredCssInset >= 0 && cssInset === expiredCssInset ? 0 : cssInset;
+    return Math.max(nativeLive, cssLive);
   }
 
   function subscribeKeyboardInsetBottom(onChange: (insetBottom: number) => void): () => void {
@@ -178,10 +214,15 @@ export function detectPlatform(): PlatformAdapter {
     };
     const handleCustomInset = (event: Event) => {
       const parsed = parseKeyboardInsetEvent(event);
-      if (parsed !== undefined) {
-        customEventInset = parsed;
-        notify();
+      if (parsed === undefined) {
+        return;
       }
+      customEventInset = parsed;
+      customEventEpoch += 1;
+      if (readViewportKeyboardInset() === 0) {
+        pendingClosedPublication = true;
+      }
+      notify();
     };
     const vv = window.visualViewport;
     const vk = getVirtualKeyboard();
