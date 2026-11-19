@@ -177,8 +177,7 @@ describe("Repository, asset, and error-copy guards", () => {
       resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
       "utf-8",
     );
-    expect(gradleKts).toContain("isMinifyEnabled = true");
-    expect(gradleKts).toContain("isShrinkResources = true");
+    expect(gradleKts).toContain("isMinifyEnabled = false");
     expect(gradleKts).toContain("WAYPOINT_ANDROID_KEYSTORE_PATH");
     expect(gradleKts).toContain("keystore.properties");
 
