@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 import type { TransportResult } from "../../adapters/types";
+import { loadSession, saveSession } from "../session-store";
 import { WaypointApp } from "../WaypointApp";
 import {
   setupIntegrationTestEnv,
@@ -604,31 +605,18 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
 
   // 给「另一条话题」持久化一个待重放的 reaction（非 m.room.message），重启后重试队列重放期间列表行不显示任何标记
   first.unmount();
-  await new Promise<void>((resolve, reject) => {
-    const req = indexedDB.open("waypoint", 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction("records", "readwrite");
-      const store = tx.objectStore("records");
-      const getReq = store.get("session");
-      getReq.onsuccess = () => {
-        const session = getReq.result;
-        session.pendingEvents = [
-          {
-            txnId: "txn-reaction-1",
-            roomId: "!t2:example.com",
-            type: "m.reaction",
-            sender: "@alice:example.com",
-            content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$x", key: "✅" } },
-          },
-        ];
-        store.put(session, "session");
-      };
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); reject(tx.error); };
-    };
-    req.onerror = () => reject(req.error);
-  });
+  const savedSession = await loadSession();
+  if (!savedSession) throw new Error("expected persisted session");
+  savedSession.pendingEvents = [
+    {
+      txnId: "txn-reaction-1",
+      roomId: "!t2:example.com",
+      type: "m.reaction",
+      sender: "@alice:example.com",
+      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$x", key: "✅" } },
+    },
+  ];
+  await saveSession(savedSession);
 
   sendBehavior = "offline";
   const second = renderApp(homeserver);

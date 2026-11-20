@@ -6,7 +6,7 @@ import {
   isRecord,
   transportFailureMessage,
 } from "./matrix-errors";
-import type { DraftAttachment, PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
+import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
 export type RegisteredAgent = {
   userId: string;
@@ -58,7 +58,14 @@ export async function setTopicPinned(
     };
   }
   if (result.type === "response" && result.status >= 200 && result.status < 300) {
-    await client.retainRoomTag(roomId, "im.waypoint.pinned", pinned ? { order: 0 } : undefined);
+    try {
+      await client.retainRoomTag(roomId, "im.waypoint.pinned", pinned ? { order: 0 } : undefined);
+    } catch {
+      return {
+        ok: false,
+        message: "本地存储空间不足，未能保存置顶状态，请清理空间后重试。",
+      };
+    }
     return { ok: true };
   }
   return {
@@ -279,7 +286,14 @@ export async function saveRegisteredAgents(
     };
   }
   if (result.type === "response" && result.status >= 200 && result.status < 300) {
-    await client.retainAccountData("im.waypoint.agents", nextContent);
+    try {
+      await client.retainAccountData("im.waypoint.agents", nextContent);
+    } catch {
+      return {
+        ok: false,
+        message: "本地存储空间不足，未能保存 Bot 名册，请清理空间后重试。",
+      };
+    }
     return { ok: true };
   }
   return { ok: false, message: formatMatrixActionFailure(action, result) };
@@ -662,11 +676,15 @@ export async function createTopicRoom(
     agentMemberEvent,
   ];
 
-  await client.rememberRoomStateEvents(
-    roomId,
-    initialStateEvents,
-    inviteFailed ? { inviteFailed: true } : undefined,
-  );
+  try {
+    await client.rememberRoomStateEvents(
+      roomId,
+      initialStateEvents,
+      inviteFailed ? { inviteFailed: true } : undefined,
+    );
+  } catch {
+    return { ok: false, message: "本地存储空间不足，未能保存 Topic 状态，请清理空间后重试。" };
+  }
   return { ok: true, roomId };
 }
 
@@ -1080,15 +1098,22 @@ export async function updateTopicDetails(
         isRecord(result.body) && typeof result.body.event_id === "string" && result.body.event_id
           ? result.body.event_id
           : undefined;
-      await client.rememberRoomStateEvents(input.roomId, [
-        {
-          type: eventType,
-          state_key: "",
-          origin_server_ts: input.now,
-          ...(eventId ? { event_id: eventId } : {}),
-          content,
-        },
-      ]);
+      try {
+        await client.rememberRoomStateEvents(input.roomId, [
+          {
+            type: eventType,
+            state_key: "",
+            origin_server_ts: input.now,
+            ...(eventId ? { event_id: eventId } : {}),
+            content,
+          },
+        ]);
+      } catch {
+        return {
+          ok: false,
+          message: "本地存储空间不足，未能保存 Topic 状态，请清理空间后重试。",
+        };
+      }
       return { ok: true };
     }
     return {
@@ -1151,6 +1176,13 @@ export type TimelinePrompt = {
   superseded: boolean;
 };
 
+export type LocalAttachmentRef = {
+  attachmentId: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
 export type TimelineMedia = {
   kind: "image" | "file";
   msgtype: "m.image" | "m.file" | "m.audio" | "m.video";
@@ -1160,7 +1192,7 @@ export type TimelineMedia = {
   caption?: string;
   mimeType?: string;
   size?: number;
-  localAttachment?: DraftAttachment;
+  localAttachment?: LocalAttachmentRef;
 };
 
 export type TimelineItem =
@@ -1194,7 +1226,7 @@ function isSafeHttpUrl(value: string): boolean {
 
 export function extractMediaFromContent(
   content: Record<string, unknown>,
-  localAttachment?: DraftAttachment,
+  localAttachment?: LocalAttachmentRef,
 ): TimelineMedia | undefined {
   const msgtype = content.msgtype;
   if (
@@ -1370,7 +1402,16 @@ export function deriveRoomTimelineItems(
         if (!isRecord(event.content)) {
           return;
         }
-        const media = extractMediaFromContent(event.content, local.attachment);
+        const localAttachmentRef: LocalAttachmentRef | undefined =
+          local.attachmentId && local.attachmentMeta
+            ? {
+                attachmentId: local.attachmentId,
+                name: local.attachmentMeta.name,
+                mimeType: local.attachmentMeta.mimeType,
+                size: local.attachmentMeta.size,
+              }
+            : undefined;
+        const media = extractMediaFromContent(event.content, localAttachmentRef);
         if (media) {
           items.push({
             kind: "message",
@@ -1472,7 +1513,16 @@ export function deriveRoomTimelineItems(
     if (pending.type !== "m.room.message") {
       continue;
     }
-    const media = extractMediaFromContent(pending.content, pending.attachment);
+    const pendingLocalRef: LocalAttachmentRef | undefined =
+      pending.attachmentId && pending.attachmentMeta
+        ? {
+            attachmentId: pending.attachmentId,
+            name: pending.attachmentMeta.name,
+            mimeType: pending.attachmentMeta.mimeType,
+            size: pending.attachmentMeta.size,
+          }
+        : undefined;
+    const media = extractMediaFromContent(pending.content, pendingLocalRef);
     if (media) {
       items.push({
         kind: "message",

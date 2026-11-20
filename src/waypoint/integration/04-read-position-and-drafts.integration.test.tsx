@@ -753,7 +753,7 @@ test("点发送后等本地写入成功才离开输入区，服务器发送失�
   const input = screen.getByRole("textbox", { name: "输入消息" });
   await user.type(input, "必须落盘后才离开输入区");
 
-  // 拦住 IndexedDB put 完成回调，模拟本地写入尚未完成
+  // 拦住 IndexedDB 事务完成回调，模拟本地写入尚未完成
   const writeGate = deferred<void>();
   const origPut = IDBObjectStore.prototype.put;
   let putIntercepted = false;
@@ -763,25 +763,28 @@ test("点发送后等本地写入成功才离开输入区，服务器发送失�
     key?: IDBValidKey,
   ) {
     const req = origPut.call(this, value, key);
-    if (!putIntercepted) {
+    if (!putIntercepted && this.name === "pending_events") {
       putIntercepted = true;
-      let userOnSuccess: ((this: IDBRequest<IDBValidKey>, ev: Event) => unknown) | null = null;
-      let firedEvent: Event | null = null;
-      Object.defineProperty(req, "onsuccess", {
-        configurable: true,
-        get() {
-          return null;
-        },
-        set(fn) {
-          userOnSuccess = fn;
-        },
-      });
-      req.addEventListener("success", (ev) => {
-        firedEvent = ev;
-        void writeGate.promise.then(() => {
-          userOnSuccess?.call(req, firedEvent!);
+      const tx = req.transaction;
+      if (tx) {
+        let userOnComplete: ((this: IDBTransaction, ev: Event) => unknown) | null = null;
+        let completedEvent: Event | null = null;
+        Object.defineProperty(tx, "oncomplete", {
+          configurable: true,
+          get() {
+            return null;
+          },
+          set(fn) {
+            userOnComplete = fn;
+          },
         });
-      });
+        tx.addEventListener("complete", (ev) => {
+          completedEvent = ev;
+          void writeGate.promise.then(() => {
+            userOnComplete?.call(tx, completedEvent!);
+          });
+        });
+      }
     }
     return req;
   });

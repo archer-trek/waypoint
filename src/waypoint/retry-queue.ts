@@ -194,15 +194,63 @@ export class RetryQueue {
           continue;
         }
         if (
-          head.attachment &&
+          (head.attachmentId || head.attachment) &&
           (typeof head.content.url !== "string" || head.content.url === "")
         ) {
+          let uploadData: Uint8Array | undefined;
+          let uploadMimeType =
+            head.attachmentMeta?.mimeType ?? head.attachment?.mimeType ?? "application/octet-stream";
+          let uploadFilename = head.attachmentMeta?.name ?? head.attachment?.name ?? "file";
+          if (head.attachmentId) {
+            let blob;
+            try {
+              blob = await this.client.loadBlob(head.attachmentId);
+            } catch {
+              if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
+                this.scheduleRetry();
+              }
+              break;
+            }
+            if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
+              break;
+            }
+            if (!blob) {
+              try {
+                await this.client.failPendingRoomEvent(head.roomId, head.txnId);
+              } catch {
+                if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {
+                  this.scheduleRetry();
+                }
+                break;
+              }
+              this.backoffStep = 0;
+              if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
+                break;
+              }
+              this.callbacks.onFailed?.();
+              continue;
+            }
+            uploadData = blob.data;
+            uploadMimeType = blob.mimeType || uploadMimeType;
+            uploadFilename = blob.name || uploadFilename;
+          } else if (head.attachment) {
+            uploadData = head.attachment.data;
+          }
+          if (!uploadData) {
+            await this.client.failPendingRoomEvent(head.roomId, head.txnId);
+            this.backoffStep = 0;
+            if (this.disposed) {
+              break;
+            }
+            this.callbacks.onFailed?.();
+            continue;
+          }
           let uploadResult;
           try {
             uploadResult = await this.client.uploadMedia(
-              head.attachment.data,
-              head.attachment.mimeType,
-              head.attachment.name,
+              uploadData,
+              uploadMimeType,
+              uploadFilename,
             );
           } catch {
             if (!this.disposed && !this.paused && this.runEpoch === myEpoch) {

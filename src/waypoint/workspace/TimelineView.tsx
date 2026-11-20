@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { MessageBody } from "../MessageBody";
-import type { DraftAttachment } from "../session-store";
 import type { TimelineItem, TimelineMedia } from "../topics";
 
 export type TimelineViewProps = {
@@ -34,7 +33,7 @@ export type TimelineViewProps = {
   openFailedMenuId: string | null;
   isNarrow?: boolean;
   safeInset?: number;
-  getLocalImageUrl: (key: string, attachment: DraftAttachment) => string;
+  getLocalImageUrl: (attachmentId: string) => string | undefined;
   getDownloadedImageUrl: (mxcUrl: string) => string | undefined;
   onScroll: () => void;
   onToggleFailedMenu: (localId: string) => void;
@@ -371,10 +370,7 @@ export function TimelineView({
                       >
                         {(() => {
                           const imageSrc = item.media.localAttachment
-                            ? getLocalImageUrl(
-                                item.localId ?? item.key,
-                                item.media.localAttachment,
-                              )
+                            ? getLocalImageUrl(item.media.localAttachment.attachmentId)
                             : item.media.mxcUrl
                               ? getDownloadedImageUrl(item.media.mxcUrl)
                               : undefined;

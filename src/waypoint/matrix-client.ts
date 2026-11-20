@@ -3,15 +3,36 @@ import { isCredentialRejected } from "./matrix-errors";
 import {
   dropCredential,
   dropPreListSession,
-  loadSession,
-  saveSession,
+  generateAttachmentId,
+  loadBlob,
+  loadV2Snapshot,
+  pruneOrphanBlobs,
+  replacePendingEvent,
+  resetSessionStores,
+  saveConfirmedEvent,
+  saveDiscardFailedEvent,
+  saveDraftInStore,
+  saveEnqueuedEvent,
+  saveFailedEvent,
+  saveLeftRoomRemoval,
+  saveMeta,
+  saveReadMarkerConfirmation,
+  saveResendEvent,
+  saveRoomAndTimeline,
+  saveRoomMeta,
+  saveRoomMetaAndReadMarker,
+  saveSyncBatch,
+  saveUploadedMediaUrl,
+  type AttachmentMeta,
+  type BlobRecord,
   type DraftAttachment,
   type DraftRecord,
   type PendingReadMarker,
   type PendingRoomEvent,
   type RawMatrixEvent,
-  type SessionRecord,
+  type SessionMeta,
   type StoredRoomEvents,
+  type StoredRoomMeta,
   type StoredTimelineGap,
 } from "./session-store";
 
@@ -31,7 +52,8 @@ export type WaypointLocalMeta = {
   id: string;
   status: LocalMessageStatus;
   txnId: string;
-  attachment?: DraftAttachment;
+  attachmentId?: string;
+  attachmentMeta?: AttachmentMeta;
 };
 
 export class MatrixClient {
@@ -46,6 +68,7 @@ export class MatrixClient {
   private storedPendingReadMarkers: PendingReadMarker[] = [];
   private storedDrafts: Record<string, DraftRecord> = {};
   private txnCounter = 0;
+  private pendingOrderSeq = 0;
   private leaveGeneration = 0;
   private tokenGeneration = 0;
   private credentialRejectedHandler?: (result: TransportResult) => void;
@@ -79,6 +102,32 @@ export class MatrixClient {
 
   setCredentialRejectedHandler(handler?: (result: TransportResult) => void): void {
     this.credentialRejectedHandler = handler;
+  }
+
+  resetInMemoryForDatabaseReset(preserveAddress = true): void {
+    this.tokenGeneration += 1;
+    this.optimisticReadPositions.clear();
+    if (!preserveAddress) {
+      this.baseUrl = "";
+      this.userId = "";
+    }
+    this.accessToken = undefined;
+    this.deviceId = undefined;
+    this.syncCursor = undefined;
+    this.storedAccountData = {};
+    this.storedRooms = {};
+    this.storedPendingEvents = [];
+    this.storedPendingReadMarkers = [];
+    this.storedDrafts = {};
+    this.pendingOrderSeq = 0;
+    this.leaveGeneration = 0;
+    this.leftAtGeneration.clear();
+    this.tagGeneration = 0;
+    this.tagUpdatedAtGeneration.clear();
+  }
+
+  loadBlob(attachmentId: string): Promise<BlobRecord | undefined> {
+    return loadBlob(attachmentId);
   }
 
   accountData(type: string): unknown {
@@ -115,24 +164,215 @@ export class MatrixClient {
     return cloneDrafts(this.storedDrafts);
   }
 
-  async setDraft(roomId: string, draft: DraftRecord | undefined): Promise<void> {
-    const normalized = normalizeDraftRecord(draft);
+  async setDraft(
+    roomId: string,
+    draft: DraftRecord | undefined,
+    blobData?: Uint8Array,
+  ): Promise<void> {
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
         return;
       }
-      const nextDrafts = cloneDrafts(this.storedDrafts);
+      const existing = this.storedDrafts[roomId];
+      const text =
+        typeof draft?.text === "string" && draft.text.trim() !== "" ? draft.text : undefined;
+
+      let attachmentId: string | undefined;
+      let attachmentMeta: AttachmentMeta | undefined;
+      let putBlob: BlobRecord | undefined;
+
+      if (draft?.attachmentId && draft?.attachmentMeta) {
+        attachmentId = draft.attachmentId;
+        attachmentMeta = { ...draft.attachmentMeta };
+        if (blobData) {
+          putBlob = {
+            id: attachmentId,
+            name: attachmentMeta.name,
+            mimeType: attachmentMeta.mimeType,
+            size: attachmentMeta.size,
+            data: new Uint8Array(blobData),
+          };
+        }
+      } else if (draft?.attachment) {
+        attachmentId = draft.attachmentId ?? generateAttachmentId();
+        attachmentMeta = {
+          name: draft.attachment.name,
+          mimeType: draft.attachment.mimeType,
+          size: draft.attachment.size,
+        };
+        putBlob = {
+          id: attachmentId,
+          name: attachmentMeta.name,
+          mimeType: attachmentMeta.mimeType,
+          size: attachmentMeta.size,
+          data: new Uint8Array(draft.attachment.data),
+        };
+      }
+
+      const normalized: DraftRecord | undefined =
+        text !== undefined || (attachmentId && attachmentMeta)
+          ? {
+              ...(text !== undefined ? { text } : {}),
+              ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
+            }
+          : undefined;
+
+      if (!normalized && !existing) {
+        return;
+      }
+
+      const nextDrafts = { ...this.storedDrafts };
       if (normalized) {
         nextDrafts[roomId] = normalized;
       } else {
-        if (!(roomId in nextDrafts)) {
-          return;
-        }
         delete nextDrafts[roomId];
       }
-      await saveSession(this.sessionRecord({ drafts: nextDrafts }));
+
+      const deleteBlobIds: string[] = [];
+      if (
+        existing?.attachmentId &&
+        existing.attachmentId !== attachmentId &&
+        !isAttachmentReferenced(
+          existing.attachmentId,
+          nextDrafts,
+          this.storedPendingEvents,
+          this.storedRooms,
+        )
+      ) {
+        deleteBlobIds.push(existing.attachmentId);
+      }
+
+      await saveDraftInStore({
+        roomId,
+        draft: normalized,
+        putBlob,
+        deleteBlobIds,
+      });
       this.storedDrafts = nextDrafts;
     });
+  }
+
+  async setDraftText(roomId: string, text: string): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const existing = this.storedDrafts[roomId];
+      const nextText = text.trim() !== "" ? text : undefined;
+      const nextDraft: DraftRecord | undefined =
+        nextText !== undefined || (existing?.attachmentId && existing?.attachmentMeta)
+          ? {
+              ...(nextText !== undefined ? { text: nextText } : {}),
+              ...(existing?.attachmentId && existing?.attachmentMeta
+                ? {
+                    attachmentId: existing.attachmentId,
+                    attachmentMeta: { ...existing.attachmentMeta },
+                  }
+                : {}),
+            }
+          : undefined;
+
+      if (!nextDraft && !existing) {
+        return;
+      }
+      if (
+        nextDraft &&
+        existing &&
+        nextDraft.text === existing.text &&
+        nextDraft.attachmentId === existing.attachmentId
+      ) {
+        return;
+      }
+
+      const nextDrafts = { ...this.storedDrafts };
+      if (nextDraft) {
+        nextDrafts[roomId] = nextDraft;
+      } else {
+        delete nextDrafts[roomId];
+      }
+
+      await saveDraftInStore({
+        roomId,
+        draft: nextDraft,
+      });
+      this.storedDrafts = nextDrafts;
+    });
+  }
+
+  async setDraftAttachment(
+    roomId: string,
+    attachmentMeta: AttachmentMeta | undefined,
+    blobData?: Uint8Array,
+  ): Promise<{ attachmentId: string; attachmentMeta: AttachmentMeta } | undefined> {
+    let assigned: { attachmentId: string; attachmentMeta: AttachmentMeta } | undefined;
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const existing = this.storedDrafts[roomId];
+      let attachmentId: string | undefined;
+      let nextMeta: AttachmentMeta | undefined;
+      let putBlob: BlobRecord | undefined;
+
+      if (attachmentMeta && blobData) {
+        attachmentId = generateAttachmentId();
+        nextMeta = { ...attachmentMeta };
+        putBlob = {
+          id: attachmentId,
+          name: nextMeta.name,
+          mimeType: nextMeta.mimeType,
+          size: nextMeta.size,
+          data: new Uint8Array(blobData),
+        };
+      }
+
+      const nextDraft: DraftRecord | undefined =
+        existing?.text !== undefined || (attachmentId && nextMeta)
+          ? {
+              ...(existing?.text !== undefined ? { text: existing.text } : {}),
+              ...(attachmentId && nextMeta
+                ? { attachmentId, attachmentMeta: nextMeta }
+                : {}),
+            }
+          : undefined;
+
+      if (!nextDraft && !existing) {
+        return;
+      }
+
+      const nextDrafts = { ...this.storedDrafts };
+      if (nextDraft) {
+        nextDrafts[roomId] = nextDraft;
+      } else {
+        delete nextDrafts[roomId];
+      }
+
+      const deleteBlobIds: string[] = [];
+      if (
+        existing?.attachmentId &&
+        existing.attachmentId !== attachmentId &&
+        !isAttachmentReferenced(
+          existing.attachmentId,
+          nextDrafts,
+          this.storedPendingEvents,
+          this.storedRooms,
+        )
+      ) {
+        deleteBlobIds.push(existing.attachmentId);
+      }
+
+      await saveDraftInStore({
+        roomId,
+        draft: nextDraft,
+        putBlob,
+        deleteBlobIds,
+      });
+      this.storedDrafts = nextDrafts;
+      if (attachmentId && nextMeta) {
+        assigned = { attachmentId, attachmentMeta: nextMeta };
+      }
+    });
+    return assigned;
   }
 
   pendingRoomEvents(roomId?: string): PendingRoomEvent[] {
@@ -152,28 +392,68 @@ export class MatrixClient {
   }
 
   async restore(): Promise<"sync" | "password" | "address"> {
-    const stored = await loadSession();
-    if (!stored?.baseUrl) {
+    const snapshot = await loadV2Snapshot();
+    if (!snapshot.meta?.baseUrl) {
+      try {
+        await pruneOrphanBlobs(new Set());
+      } catch {
+        // best-effort orphan cleanup
+      }
       return "address";
     }
-    this.baseUrl = stored.baseUrl;
-    this.userId = stored.userId;
-    this.syncCursor = stored.syncCursor;
-    this.storedAccountData = isAccountData(stored.accountData) ? stored.accountData : {};
-    this.storedRooms = isPlainObject(stored.rooms) ? cloneStoredRooms(stored.rooms) : {};
-    this.storedPendingEvents = Array.isArray(stored.pendingEvents)
-      ? clonePendingEvents(stored.pendingEvents)
-      : [];
-    this.storedPendingReadMarkers = Array.isArray(stored.pendingReadMarkers)
-      ? clonePendingReadMarkers(stored.pendingReadMarkers)
-      : [];
-    this.storedDrafts = isPlainObject(stored.drafts) ? cloneDrafts(stored.drafts) : {};
-    if (stored.accessToken && stored.deviceId) {
-      this.accessToken = stored.accessToken;
-      this.deviceId = stored.deviceId;
+    const meta = snapshot.meta;
+    const rawRooms: Record<string, unknown> = {};
+    for (const [roomId, roomMeta] of Object.entries(snapshot.rooms)) {
+      rawRooms[roomId] = {
+        ...roomMeta,
+        timelineEvents: snapshot.timelines[roomId] ?? [],
+      };
+    }
+    for (const [roomId, timelineEvents] of Object.entries(snapshot.timelines)) {
+      if (!(roomId in rawRooms)) {
+        rawRooms[roomId] = { stateEvents: [], timelineEvents };
+      }
+    }
+
+    const restoredRooms = normalizeStoredRooms(rawRooms);
+    const restoredPending = clonePendingEvents(snapshot.pendingEvents);
+    const restoredMarkers = clonePendingReadMarkers(snapshot.pendingReadMarkers);
+    const restoredDrafts = cloneDrafts(snapshot.drafts);
+
+    const referencedIds = collectReferencedAttachmentIds(
+      restoredDrafts,
+      restoredPending,
+      restoredRooms,
+    );
+    try {
+      await pruneOrphanBlobs(referencedIds);
+    } catch {
+      // best-effort orphan cleanup
+    }
+
+    this.baseUrl = meta.baseUrl;
+    this.userId = meta.userId;
+    this.syncCursor = meta.syncCursor;
+    this.storedAccountData = isAccountData(meta.accountData) ? meta.accountData : {};
+    this.storedRooms = restoredRooms;
+    this.storedPendingEvents = restoredPending;
+    this.storedPendingReadMarkers = restoredMarkers;
+    this.storedDrafts = restoredDrafts;
+
+    let maxOrder = restoredPending.length;
+    for (const item of restoredPending) {
+      if (item.order !== undefined && item.order + 1 > maxOrder) {
+        maxOrder = item.order + 1;
+      }
+    }
+    this.pendingOrderSeq = maxOrder;
+
+    if (meta.accessToken && meta.deviceId) {
+      this.accessToken = meta.accessToken;
+      this.deviceId = meta.deviceId;
       return "sync";
     }
-    if (stored.userId) {
+    if (meta.userId) {
       return "password";
     }
     return "address";
@@ -215,20 +495,32 @@ export class MatrixClient {
   }
 
   async completeReauth(accessToken: string, deviceId?: string): Promise<void> {
-    this.tokenGeneration += 1;
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
+      const nextDeviceId = deviceId ?? this.deviceId;
+      await saveMeta(
+        this.sessionMeta({
+          accessToken,
+          deviceId: nextDeviceId,
+        }),
+      );
+      this.tokenGeneration += 1;
       this.accessToken = accessToken;
       if (deviceId) {
         this.deviceId = deviceId;
       }
-      return saveSession(this.sessionRecord());
     });
   }
 
   async rememberLogin(userId: string, accessToken: string, deviceId: string): Promise<void> {
-    this.tokenGeneration += 1;
-    this.optimisticReadPositions.clear();
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
+      await resetSessionStores({
+        baseUrl: this.baseUrl,
+        userId,
+        accessToken,
+        deviceId,
+      });
+      this.tokenGeneration += 1;
+      this.optimisticReadPositions.clear();
       this.userId = userId;
       this.accessToken = accessToken;
       this.deviceId = deviceId;
@@ -238,16 +530,11 @@ export class MatrixClient {
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
+      this.pendingOrderSeq = 0;
       this.leaveGeneration = 0;
       this.leftAtGeneration.clear();
       this.tagGeneration = 0;
       this.tagUpdatedAtGeneration.clear();
-      return saveSession({
-        baseUrl: this.baseUrl,
-        userId,
-        accessToken,
-        deviceId,
-      });
     });
   }
 
@@ -350,12 +637,12 @@ export class MatrixClient {
   }
 
   async dropSyncCursor(): Promise<void> {
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
       if (!this.accessToken) {
-        return Promise.resolve();
+        return;
       }
+      await saveMeta(this.sessionMeta({ syncCursor: undefined }));
       this.syncCursor = undefined;
-      return saveSession(this.sessionRecord());
     });
   }
 
@@ -364,12 +651,12 @@ export class MatrixClient {
       return;
     }
     const body = attempt.result.body;
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
       if (!this.accessToken) {
-        return Promise.resolve();
+        return;
       }
-      this.storedAccountData = mergeAccountData(this.storedAccountData, body);
-      this.storedRooms = mergeSyncRooms(
+      const nextAccountData = mergeAccountData(this.storedAccountData, body);
+      const roomMerge = mergeSyncRooms(
         this.storedRooms,
         body,
         this.userId,
@@ -378,23 +665,71 @@ export class MatrixClient {
         attempt.tagGeneration,
         this.tagUpdatedAtGeneration,
       );
+      const pendingMerge = reconcilePendingWithSync(this.storedPendingEvents, body);
+      const markerMerge = reconcilePendingReadMarkersWithSync(
+        this.storedPendingReadMarkers,
+        roomMerge.rooms,
+        body,
+      );
+      const draftMerge = reconcileDraftsWithSync(this.storedDrafts, body);
+      const cursor = nextBatch(body);
+      const nextCursor = cursor ?? this.syncCursor;
+
+      const candidateDeleteBlobs = new Set<string>([
+        ...roomMerge.removedAttachmentIds,
+        ...pendingMerge.removedAttachmentIds,
+        ...draftMerge.removedAttachmentIds,
+      ]);
+      const deleteBlobIds = Array.from(candidateDeleteBlobs).filter(
+        (id) =>
+          !isAttachmentReferenced(
+            id,
+            draftMerge.drafts,
+            pendingMerge.pending,
+            roomMerge.rooms,
+          ),
+      );
+
+      const metaChanged =
+        nextAccountData !== this.storedAccountData || nextCursor !== this.syncCursor;
+
+      await saveSyncBatch({
+        ...(metaChanged
+          ? {
+              meta: this.sessionMeta({
+                syncCursor: nextCursor,
+                accountData: nextAccountData,
+              }),
+            }
+          : {}),
+        putRooms: roomMerge.metaChangedRoomIds.map((roomId) => [
+          roomId,
+          extractRoomMeta(roomMerge.rooms[roomId]!),
+        ]),
+        deleteRoomIds: roomMerge.deletedRoomIds,
+        putTimelines: roomMerge.timelineChangedRoomIds.map((roomId) => [
+          roomId,
+          roomMerge.rooms[roomId]!.timelineEvents,
+        ]),
+        deletePendingTxnIds: pendingMerge.deletedTxnIds,
+        deleteReadMarkerRoomIds: markerMerge.deletedRoomIds,
+        deleteDraftRoomIds: draftMerge.deletedRoomIds,
+        deleteBlobIds,
+      });
+
+      this.storedAccountData = nextAccountData;
+      this.storedRooms = roomMerge.rooms;
       for (const roomId of Array.from(this.optimisticReadPositions.keys())) {
         if (!(roomId in this.storedRooms)) {
           this.optimisticReadPositions.delete(roomId);
         }
       }
-      this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
-      this.storedPendingReadMarkers = reconcilePendingReadMarkersWithSync(
-        this.storedPendingReadMarkers,
-        this.storedRooms,
-        body,
-      );
-      this.storedDrafts = reconcileDraftsWithSync(this.storedDrafts, body);
-      const cursor = nextBatch(body);
+      this.storedPendingEvents = pendingMerge.pending;
+      this.storedPendingReadMarkers = markerMerge.markers;
+      this.storedDrafts = draftMerge.drafts;
       if (cursor) {
         this.syncCursor = cursor;
       }
-      return saveSession(this.sessionRecord());
     });
   }
 
@@ -448,10 +783,15 @@ export class MatrixClient {
         };
         return;
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      nextRooms[roomId] = applied.room;
-      await saveSession(this.sessionRecord({ rooms: nextRooms }));
-      this.storedRooms = nextRooms;
+      await saveRoomAndTimeline(
+        roomId,
+        extractRoomMeta(applied.room),
+        applied.room.timelineEvents,
+      );
+      this.storedRooms = {
+        ...this.storedRooms,
+        [roomId]: applied.room,
+      };
       outcome = {
         prependedCount: applied.prependedCount,
         reachedStart: Boolean(applied.room.reachedStart),
@@ -496,12 +836,13 @@ export class MatrixClient {
   }
 
   async retainAccountData(type: string, content: unknown): Promise<void> {
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
       if (!this.accessToken) {
-        return Promise.resolve();
+        return;
       }
-      this.storedAccountData = { ...this.storedAccountData, [type]: content };
-      return saveSession(this.sessionRecord());
+      const nextAccountData = { ...this.storedAccountData, [type]: content };
+      await saveMeta(this.sessionMeta({ accountData: nextAccountData }));
+      this.storedAccountData = nextAccountData;
     });
   }
 
@@ -564,8 +905,6 @@ export class MatrixClient {
     tag: string,
     content: Record<string, unknown> | undefined,
   ): Promise<void> {
-    this.tagGeneration += 1;
-    this.tagUpdatedAtGeneration.set(roomId, this.tagGeneration);
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
         return;
@@ -574,21 +913,29 @@ export class MatrixClient {
       if (!existing) {
         return;
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const room = nextRooms[roomId];
-      const nextTags: Record<string, unknown> = isPlainObject(room.tags) ? { ...room.tags } : {};
+      const nextTags: Record<string, unknown> = isPlainObject(existing.tags)
+        ? { ...existing.tags }
+        : {};
       if (content !== undefined) {
         nextTags[tag] = cloneValue(content);
       } else {
         delete nextTags[tag];
       }
+      const nextRoom: StoredRoomEvents = {
+        ...existing,
+      };
       if (Object.keys(nextTags).length > 0) {
-        room.tags = nextTags;
+        nextRoom.tags = nextTags;
       } else {
-        delete room.tags;
+        delete nextRoom.tags;
       }
-      await saveSession(this.sessionRecord({ rooms: nextRooms }));
-      this.storedRooms = nextRooms;
+      await saveRoomMeta(roomId, extractRoomMeta(nextRoom));
+      this.tagGeneration += 1;
+      this.tagUpdatedAtGeneration.set(roomId, this.tagGeneration);
+      this.storedRooms = {
+        ...this.storedRooms,
+        [roomId]: nextRoom,
+      };
     });
   }
 
@@ -621,29 +968,58 @@ export class MatrixClient {
   }
 
   async removeLeftRoom(roomId: string): Promise<void> {
-    this.leaveGeneration += 1;
-    this.leftAtGeneration.set(roomId, this.leaveGeneration);
     this.optimisticReadPositions.delete(roomId);
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
         return;
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
+      const nextRooms = { ...this.storedRooms };
+      const removedRoom = nextRooms[roomId];
       delete nextRooms[roomId];
-      const nextPending = this.storedPendingEvents.filter((item) => item.roomId !== roomId);
+
+      const removedPendingTxns: string[] = [];
+      const candidateAttachmentIds = new Set<string>();
+      const nextPending = this.storedPendingEvents.filter((item) => {
+        if (item.roomId === roomId) {
+          removedPendingTxns.push(item.txnId);
+          if (item.attachmentId) {
+            candidateAttachmentIds.add(item.attachmentId);
+          }
+          return false;
+        }
+        return true;
+      });
+      if (removedRoom) {
+        for (const ev of removedRoom.timelineEvents) {
+          const local = localPlaceholderOf(ev);
+          if (local?.attachmentId) {
+            candidateAttachmentIds.add(local.attachmentId);
+          }
+        }
+      }
+      const removedDraft = this.storedDrafts[roomId];
+      if (removedDraft?.attachmentId) {
+        candidateAttachmentIds.add(removedDraft.attachmentId);
+      }
+
       const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
         (item) => item.roomId !== roomId,
       );
-      const nextDrafts = cloneDrafts(this.storedDrafts);
+      const nextDrafts = { ...this.storedDrafts };
       delete nextDrafts[roomId];
-      await saveSession(
-        this.sessionRecord({
-          rooms: nextRooms,
-          pending: nextPending,
-          pendingReadMarkers: nextPendingReadMarkers,
-          drafts: nextDrafts,
-        }),
+
+      const deleteBlobIds = Array.from(candidateAttachmentIds).filter(
+        (id) => !isAttachmentReferenced(id, nextDrafts, nextPending, nextRooms),
       );
+
+      await saveLeftRoomRemoval({
+        roomId,
+        pendingTxnIds: removedPendingTxns,
+        deleteBlobIds,
+      });
+
+      this.leaveGeneration += 1;
+      this.leftAtGeneration.set(roomId, this.leaveGeneration);
       this.storedRooms = nextRooms;
       this.storedPendingEvents = nextPending;
       this.storedPendingReadMarkers = nextPendingReadMarkers;
@@ -701,22 +1077,24 @@ export class MatrixClient {
       if (!this.accessToken) {
         return;
       }
-      let changed = false;
+      let updatedPending: PendingRoomEvent | undefined;
       const nextPending = this.storedPendingEvents.map((item) => {
         if (item.roomId === roomId && item.txnId === txnId) {
-          changed = true;
-          return {
+          updatedPending = {
             ...clonePendingEvent(item),
             content: {
               ...(cloneValue(item.content) as Record<string, unknown>),
               url: mxcUrl,
             },
           };
+          return updatedPending;
         }
         return item;
       });
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const room = nextRooms[roomId];
+
+      let nextRooms = this.storedRooms;
+      let updatedTimeline: RawMatrixEvent[] | undefined;
+      const room = this.storedRooms[roomId];
       if (room) {
         const placeholderIndex = room.timelineEvents.findIndex(
           (ev) => localPlaceholderOf(ev)?.txnId === txnId,
@@ -724,20 +1102,34 @@ export class MatrixClient {
         if (placeholderIndex !== -1) {
           const placeholder = room.timelineEvents[placeholderIndex];
           const existingContent = isPlainObject(placeholder.content) ? placeholder.content : {};
-          room.timelineEvents[placeholderIndex] = {
+          const nextTimeline = [...room.timelineEvents];
+          nextTimeline[placeholderIndex] = {
             ...placeholder,
             content: {
               ...existingContent,
               url: mxcUrl,
             },
           };
-          changed = true;
+          updatedTimeline = nextTimeline;
+          nextRooms = {
+            ...this.storedRooms,
+            [roomId]: {
+              ...room,
+              timelineEvents: nextTimeline,
+            },
+          };
         }
       }
-      if (!changed) {
+
+      if (!updatedPending && !updatedTimeline) {
         return;
       }
-      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+
+      await saveUploadedMediaUrl({
+        pendingEvent: updatedPending,
+        roomId,
+        timelineEvents: updatedTimeline,
+      });
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
     });
@@ -747,32 +1139,72 @@ export class MatrixClient {
     roomId: string,
     type: string,
     content: Record<string, unknown>,
-    options?: { clearDraft?: boolean; attachment?: DraftAttachment },
+    options?: {
+      clearDraft?: boolean;
+      attachmentId?: string;
+      attachmentMeta?: AttachmentMeta;
+      attachmentData?: Uint8Array;
+      attachment?: DraftAttachment;
+    },
   ): Promise<PendingRoomEvent> {
     if (!this.accessToken || !this.userId) {
       throw new Error("没有 access token");
     }
-    const copiedAttachment = options?.attachment
-      ? cloneDraftAttachment(options.attachment)
-      : undefined;
-    const item: PendingRoomEvent = {
-      txnId: this.nextTxnId(),
-      roomId,
-      type,
-      sender: this.userId,
-      content: cloneValue(content) as Record<string, unknown>,
-      ...(copiedAttachment ? { attachment: copiedAttachment } : {}),
-    };
+    let created!: PendingRoomEvent;
     await this.enqueuePersist(async () => {
-      if (!this.accessToken) {
+      if (!this.accessToken || !this.userId) {
         throw new Error("没有 access token");
       }
+
+      let attachmentId = options?.attachmentId;
+      let attachmentMeta = options?.attachmentMeta ? { ...options.attachmentMeta } : undefined;
+      let putBlob: BlobRecord | undefined;
+
+      if (attachmentId && attachmentMeta) {
+        if (options?.attachmentData) {
+          putBlob = {
+            id: attachmentId,
+            name: attachmentMeta.name,
+            mimeType: attachmentMeta.mimeType,
+            size: attachmentMeta.size,
+            data: new Uint8Array(options.attachmentData),
+          };
+        }
+      } else if (options?.attachment) {
+        attachmentId = generateAttachmentId();
+        attachmentMeta = {
+          name: options.attachment.name,
+          mimeType: options.attachment.mimeType,
+          size: options.attachment.size,
+        };
+        putBlob = {
+          id: attachmentId,
+          name: attachmentMeta.name,
+          mimeType: attachmentMeta.mimeType,
+          size: attachmentMeta.size,
+          data: new Uint8Array(options.attachment.data),
+        };
+      }
+
+      const item: PendingRoomEvent = {
+        txnId: this.nextTxnId(),
+        roomId,
+        type,
+        sender: this.userId,
+        content: cloneValue(content) as Record<string, unknown>,
+        order: this.pendingOrderSeq,
+        ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
+      };
+
       const nextPending = [...this.storedPendingEvents, clonePendingEvent(item)];
       let nextRooms = this.storedRooms;
+      let nextRoom: StoredRoomEvents | undefined;
+      let isNewRoom = false;
+
       if (type === "m.room.message") {
-        nextRooms = cloneStoredRooms(this.storedRooms);
-        const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
-        existingRoom.timelineEvents.push({
+        isNewRoom = !(roomId in this.storedRooms);
+        const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+        const placeholderEvent: RawMatrixEvent = {
           type,
           sender: this.userId,
           content: cloneValue(content),
@@ -780,22 +1212,51 @@ export class MatrixClient {
             id: item.txnId,
             status: "unconfirmed",
             txnId: item.txnId,
-            ...(copiedAttachment ? { attachment: cloneDraftAttachment(copiedAttachment) } : {}),
+            ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
           },
-        });
-        nextRooms[roomId] = existingRoom;
+        };
+        nextRoom = {
+          ...existingRoom,
+          timelineEvents: [...existingRoom.timelineEvents, placeholderEvent],
+        };
+        nextRooms = {
+          ...this.storedRooms,
+          [roomId]: nextRoom,
+        };
       }
+
       let nextDrafts = this.storedDrafts;
-      if (options?.clearDraft && roomId in this.storedDrafts) {
-        nextDrafts = cloneDrafts(this.storedDrafts);
+      const clearDraft = Boolean(options?.clearDraft && roomId in this.storedDrafts);
+      const deleteBlobIds: string[] = [];
+      if (clearDraft) {
+        const prevDraft = this.storedDrafts[roomId];
+        nextDrafts = { ...this.storedDrafts };
         delete nextDrafts[roomId];
+        if (
+          prevDraft?.attachmentId &&
+          !isAttachmentReferenced(prevDraft.attachmentId, nextDrafts, nextPending, nextRooms)
+        ) {
+          deleteBlobIds.push(prevDraft.attachmentId);
+        }
       }
-      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms, drafts: nextDrafts }));
+
+      await saveEnqueuedEvent({
+        pendingEvent: item,
+        roomId,
+        roomMeta: isNewRoom && nextRoom ? extractRoomMeta(nextRoom) : undefined,
+        timelineEvents: nextRoom?.timelineEvents,
+        clearDraft,
+        putBlob,
+        deleteBlobIds,
+      });
+
+      this.pendingOrderSeq += 1;
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
       this.storedDrafts = nextDrafts;
+      created = clonePendingEvent(item);
     });
-    return clonePendingEvent(item);
+    return clonePendingEvent(created);
   }
 
   async enqueueOrReplacePromptReaction(
@@ -806,19 +1267,7 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId) {
       throw new Error("没有 access token");
     }
-    const item: PendingRoomEvent = {
-      txnId: this.nextTxnId(),
-      roomId,
-      type: "m.reaction",
-      sender: this.userId,
-      content: {
-        "m.relates_to": {
-          rel_type: "m.annotation",
-          event_id: targetEventId,
-          key,
-        },
-      },
-    };
+    let created!: PendingRoomEvent;
     await this.enqueuePersist(async () => {
       if (!this.accessToken || !this.userId) {
         throw new Error("没有 access token");
@@ -838,16 +1287,36 @@ export class MatrixClient {
           relatesTo.event_id === targetEventId
         );
       });
+      const replaced = existingIndex !== -1 ? this.storedPendingEvents[existingIndex] : undefined;
+      const item: PendingRoomEvent = {
+        txnId: this.nextTxnId(),
+        roomId,
+        type: "m.reaction",
+        sender: this.userId,
+        content: {
+          "m.relates_to": {
+            rel_type: "m.annotation",
+            event_id: targetEventId,
+            key,
+          },
+        },
+        order: replaced?.order ?? this.pendingOrderSeq,
+      };
       const nextPending = [...this.storedPendingEvents];
       if (existingIndex !== -1) {
         nextPending[existingIndex] = item;
       } else {
         nextPending.push(item);
       }
-      await saveSession(this.sessionRecord({ pending: nextPending }));
+
+      await replacePendingEvent(replaced?.txnId, item);
+      if (replaced?.order === undefined) {
+        this.pendingOrderSeq += 1;
+      }
       this.storedPendingEvents = nextPending;
+      created = clonePendingEvent(item);
     });
-    return clonePendingEvent(item);
+    return clonePendingEvent(created);
   }
 
   sendRoomEvent(
@@ -889,18 +1358,20 @@ export class MatrixClient {
         if (!room || !canAdvanceReadPosition(room, eventId, room.readPositionEventId)) {
           return;
         }
-        const nextRooms = cloneStoredRooms(this.storedRooms);
-        nextRooms[roomId] = {
-          ...nextRooms[roomId],
+        const nextRoom: StoredRoomEvents = {
+          ...room,
           readPositionEventId: eventId,
+        };
+        const nextRooms = {
+          ...this.storedRooms,
+          [roomId]: nextRoom,
         };
         const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
           (item) => item.roomId !== roomId,
         );
-        nextPendingReadMarkers.push({ roomId, eventId });
-        await saveSession(
-          this.sessionRecord({ rooms: nextRooms, pendingReadMarkers: nextPendingReadMarkers }),
-        );
+        const newMarker: PendingReadMarker = { roomId, eventId };
+        nextPendingReadMarkers.push(newMarker);
+        await saveRoomMetaAndReadMarker(roomId, extractRoomMeta(nextRoom), newMarker);
         this.storedRooms = nextRooms;
         this.storedPendingReadMarkers = nextPendingReadMarkers;
         changed = true;
@@ -936,29 +1407,32 @@ export class MatrixClient {
       const currentPending = this.storedPendingReadMarkers.find(
         (item) => item.roomId === roomId,
       );
-      const nextPendingReadMarkers =
-        currentPending && currentPending.eventId === eventId
-          ? this.storedPendingReadMarkers.filter((item) => item.roomId !== roomId)
-          : this.storedPendingReadMarkers;
+      const deletePendingMarker = Boolean(currentPending && currentPending.eventId === eventId);
+      const nextPendingReadMarkers = deletePendingMarker
+        ? this.storedPendingReadMarkers.filter((item) => item.roomId !== roomId)
+        : this.storedPendingReadMarkers;
 
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const room = nextRooms[roomId];
-      let roomsChanged = false;
+      const room = this.storedRooms[roomId];
+      let nextRooms = this.storedRooms;
+      let updatedRoom: StoredRoomEvents | undefined;
       if (room) {
         const eventIdx = timelineIndexOf(room.timelineEvents, eventId);
         const fullyIdx = timelineIndexOf(room.timelineEvents, room.fullyReadEventId);
         const privateIdx = timelineIndexOf(room.timelineEvents, room.privateReadEventId);
         const nextFully =
-          room.fullyReadEventId === undefined || (eventIdx !== -1 && (fullyIdx === -1 || eventIdx > fullyIdx))
+          room.fullyReadEventId === undefined ||
+          (eventIdx !== -1 && (fullyIdx === -1 || eventIdx > fullyIdx))
             ? eventId
             : room.fullyReadEventId;
         const nextPrivate =
-          room.privateReadEventId === undefined || (eventIdx !== -1 && (privateIdx === -1 || eventIdx > privateIdx))
+          room.privateReadEventId === undefined ||
+          (eventIdx !== -1 && (privateIdx === -1 || eventIdx > privateIdx))
             ? eventId
             : room.privateReadEventId;
         const readIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
         const nextRead =
-          room.readPositionEventId === undefined || (eventIdx !== -1 && readIdx !== -1 && eventIdx > readIdx)
+          room.readPositionEventId === undefined ||
+          (eventIdx !== -1 && readIdx !== -1 && eventIdx > readIdx)
             ? eventId
             : room.readPositionEventId;
         if (
@@ -966,25 +1440,27 @@ export class MatrixClient {
           nextPrivate !== room.privateReadEventId ||
           nextRead !== room.readPositionEventId
         ) {
-          nextRooms[roomId] = {
+          updatedRoom = {
             ...room,
             readPositionEventId: nextRead,
             fullyReadEventId: nextFully,
             privateReadEventId: nextPrivate,
           };
-          roomsChanged = true;
+          nextRooms = {
+            ...this.storedRooms,
+            [roomId]: updatedRoom,
+          };
         }
       }
-      if (nextPendingReadMarkers === this.storedPendingReadMarkers && !roomsChanged) {
+      if (!deletePendingMarker && !updatedRoom) {
         return;
       }
-      await saveSession(
-        this.sessionRecord({
-          ...(roomsChanged ? { rooms: nextRooms } : {}),
-          pendingReadMarkers: nextPendingReadMarkers,
-        }),
-      );
-      if (roomsChanged) {
+      await saveReadMarkerConfirmation({
+        roomId,
+        roomMeta: updatedRoom ? extractRoomMeta(updatedRoom) : undefined,
+        deletePendingMarker,
+      });
+      if (updatedRoom) {
         this.storedRooms = nextRooms;
       }
       this.storedPendingReadMarkers = nextPendingReadMarkers;
@@ -1002,17 +1478,32 @@ export class MatrixClient {
       const nextPending = this.storedPendingEvents.filter(
         (item) => !(item.roomId === roomId && item.txnId === txnId),
       );
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const isNewRoom = !(roomId in this.storedRooms);
+      const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const alreadyConfirmed = existingRoom.timelineEvents.some(
         (ev) => !localPlaceholderOf(ev) && (eventIdOf(ev) === eventId || transactionIdOf(ev) === txnId),
       );
       const placeholderIndex = existingRoom.timelineEvents.findIndex(
         (ev) => localPlaceholderOf(ev)?.txnId === txnId,
       );
+      const placeholder =
+        placeholderIndex !== -1 ? existingRoom.timelineEvents[placeholderIndex] : undefined;
+      const placeholderMeta = placeholder ? localPlaceholderOf(placeholder) : undefined;
+
+      let nextTimeline = existingRoom.timelineEvents;
       if (!alreadyConfirmed) {
-        const placeholder = placeholderIndex !== -1 ? existingRoom.timelineEvents[placeholderIndex] : undefined;
-        const source = pending ?? (placeholder && typeof placeholder.type === "string" && typeof placeholder.sender === "string" && isPlainObject(placeholder.content) ? { type: placeholder.type, sender: placeholder.sender, content: placeholder.content } : undefined);
+        const source =
+          pending ??
+          (placeholder &&
+          typeof placeholder.type === "string" &&
+          typeof placeholder.sender === "string" &&
+          isPlainObject(placeholder.content)
+            ? {
+                type: placeholder.type,
+                sender: placeholder.sender,
+                content: placeholder.content,
+              }
+            : undefined);
         if (source) {
           const confirmedEvent: RawMatrixEvent = {
             type: source.type,
@@ -1021,18 +1512,46 @@ export class MatrixClient {
             content: cloneValue(source.content),
             unsigned: { transaction_id: txnId },
           };
+          nextTimeline = [...existingRoom.timelineEvents];
           if (placeholderIndex !== -1) {
-            existingRoom.timelineEvents[placeholderIndex] = confirmedEvent;
+            nextTimeline[placeholderIndex] = confirmedEvent;
           } else {
-            existingRoom.timelineEvents.push(confirmedEvent);
+            nextTimeline.push(confirmedEvent);
           }
-          nextRooms[roomId] = existingRoom;
         }
       } else if (placeholderIndex !== -1) {
-        existingRoom.timelineEvents.splice(placeholderIndex, 1);
-        nextRooms[roomId] = existingRoom;
+        nextTimeline = [...existingRoom.timelineEvents];
+        nextTimeline.splice(placeholderIndex, 1);
       }
-      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+
+      const nextRoom: StoredRoomEvents =
+        nextTimeline !== existingRoom.timelineEvents
+          ? { ...existingRoom, timelineEvents: nextTimeline }
+          : existingRoom;
+      const nextRooms =
+        nextRoom !== existingRoom || isNewRoom
+          ? { ...this.storedRooms, [roomId]: nextRoom }
+          : this.storedRooms;
+
+      const candidateIds = new Set<string>();
+      if (pending?.attachmentId) {
+        candidateIds.add(pending.attachmentId);
+      }
+      if (placeholderMeta?.attachmentId) {
+        candidateIds.add(placeholderMeta.attachmentId);
+      }
+      const deleteBlobIds = Array.from(candidateIds).filter(
+        (id) => !isAttachmentReferenced(id, this.storedDrafts, nextPending, nextRooms),
+      );
+
+      await saveConfirmedEvent({
+        roomId,
+        txnId,
+        timelineEvents: nextRoom.timelineEvents,
+        roomMeta: isNewRoom ? extractRoomMeta(nextRoom) : undefined,
+        deleteBlobIds,
+      });
+
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
     });
@@ -1044,8 +1563,7 @@ export class MatrixClient {
       if (!this.accessToken || !this.userId) {
         return;
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const existingRoom = nextRooms[roomId];
+      const existingRoom = this.storedRooms[roomId];
       if (!existingRoom) {
         return;
       }
@@ -1067,8 +1585,9 @@ export class MatrixClient {
         return;
       }
       const placeholderMeta = localPlaceholderOf(placeholder);
-      const copiedAttachment = placeholderMeta?.attachment
-        ? cloneDraftAttachment(placeholderMeta.attachment)
+      const attachmentId = placeholderMeta?.attachmentId;
+      const attachmentMeta = placeholderMeta?.attachmentMeta
+        ? { ...placeholderMeta.attachmentMeta }
         : undefined;
       const newTxnId = this.nextTxnId();
       const item: PendingRoomEvent = {
@@ -1077,19 +1596,33 @@ export class MatrixClient {
         type: placeholder.type,
         sender: placeholder.sender,
         content: cloneValue(placeholder.content) as Record<string, unknown>,
-        ...(copiedAttachment ? { attachment: copiedAttachment } : {}),
+        order: this.pendingOrderSeq,
+        ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
       };
-      existingRoom.timelineEvents[placeholderIndex] = {
+      const nextTimeline = [...existingRoom.timelineEvents];
+      nextTimeline[placeholderIndex] = {
         ...placeholder,
         waypoint_local: {
           id: localId,
           status: "unconfirmed",
           txnId: newTxnId,
-          ...(copiedAttachment ? { attachment: cloneDraftAttachment(copiedAttachment) } : {}),
+          ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
+        },
+      };
+      const nextRooms = {
+        ...this.storedRooms,
+        [roomId]: {
+          ...existingRoom,
+          timelineEvents: nextTimeline,
         },
       };
       const nextPending = [...this.storedPendingEvents, item];
-      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+      await saveResendEvent({
+        roomId,
+        pendingEvent: item,
+        timelineEvents: nextTimeline,
+      });
+      this.pendingOrderSeq += 1;
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
       created = clonePendingEvent(item);
@@ -1103,8 +1636,7 @@ export class MatrixClient {
       if (!this.accessToken) {
         return;
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const existingRoom = nextRooms[roomId];
+      const existingRoom = this.storedRooms[roomId];
       if (!existingRoom) {
         return;
       }
@@ -1115,8 +1647,33 @@ export class MatrixClient {
       if (placeholderIndex === -1) {
         return;
       }
-      existingRoom.timelineEvents.splice(placeholderIndex, 1);
-      await saveSession(this.sessionRecord({ rooms: nextRooms }));
+      const removedMeta = localPlaceholderOf(existingRoom.timelineEvents[placeholderIndex]);
+      const nextTimeline = [...existingRoom.timelineEvents];
+      nextTimeline.splice(placeholderIndex, 1);
+      const nextRooms = {
+        ...this.storedRooms,
+        [roomId]: {
+          ...existingRoom,
+          timelineEvents: nextTimeline,
+        },
+      };
+      const deleteBlobIds: string[] = [];
+      if (
+        removedMeta?.attachmentId &&
+        !isAttachmentReferenced(
+          removedMeta.attachmentId,
+          this.storedDrafts,
+          this.storedPendingEvents,
+          nextRooms,
+        )
+      ) {
+        deleteBlobIds.push(removedMeta.attachmentId);
+      }
+      await saveDiscardFailedEvent({
+        roomId,
+        timelineEvents: nextTimeline,
+        deleteBlobIds,
+      });
       this.storedRooms = nextRooms;
       removed = true;
     });
@@ -1134,44 +1691,65 @@ export class MatrixClient {
       const nextPending = this.storedPendingEvents.filter(
         (item) => !(item.roomId === roomId && item.txnId === txnId),
       );
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      const existingRoom = nextRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const isNewRoom = !(roomId in this.storedRooms);
+      const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const placeholderIndex = existingRoom.timelineEvents.findIndex(
         (ev) => localPlaceholderOf(ev)?.txnId === txnId,
       );
+      let nextTimeline = existingRoom.timelineEvents;
       if (placeholderIndex !== -1) {
         const placeholder = existingRoom.timelineEvents[placeholderIndex];
         const meta = localPlaceholderOf(placeholder)!;
-        const preservedAttachment = meta.attachment ?? pending?.attachment;
-        existingRoom.timelineEvents[placeholderIndex] = {
+        const attachmentId = meta.attachmentId ?? pending?.attachmentId;
+        const attachmentMeta = meta.attachmentMeta ?? pending?.attachmentMeta;
+        nextTimeline = [...existingRoom.timelineEvents];
+        nextTimeline[placeholderIndex] = {
           ...placeholder,
           waypoint_local: {
             id: meta.id,
             status: "failed",
             txnId,
-            ...(preservedAttachment
-              ? { attachment: cloneDraftAttachment(preservedAttachment) }
+            ...(attachmentId && attachmentMeta
+              ? { attachmentId, attachmentMeta: { ...attachmentMeta } }
               : {}),
           },
         };
-        nextRooms[roomId] = existingRoom;
       } else if (pending && pending.type === "m.room.message") {
-        existingRoom.timelineEvents.push({
-          type: pending.type,
-          sender: pending.sender,
-          content: cloneValue(pending.content),
-          waypoint_local: {
-            id: pending.txnId,
-            status: "failed",
-            txnId: pending.txnId,
-            ...(pending.attachment
-              ? { attachment: cloneDraftAttachment(pending.attachment) }
-              : {}),
+        nextTimeline = [
+          ...existingRoom.timelineEvents,
+          {
+            type: pending.type,
+            sender: pending.sender,
+            content: cloneValue(pending.content),
+            waypoint_local: {
+              id: pending.txnId,
+              status: "failed",
+              txnId: pending.txnId,
+              ...(pending.attachmentId && pending.attachmentMeta
+                ? {
+                    attachmentId: pending.attachmentId,
+                    attachmentMeta: { ...pending.attachmentMeta },
+                  }
+                : {}),
+            },
           },
-        });
-        nextRooms[roomId] = existingRoom;
+        ];
       }
-      await saveSession(this.sessionRecord({ pending: nextPending, rooms: nextRooms }));
+      const nextRoom: StoredRoomEvents =
+        nextTimeline !== existingRoom.timelineEvents
+          ? { ...existingRoom, timelineEvents: nextTimeline }
+          : existingRoom;
+      const nextRooms =
+        nextRoom !== existingRoom || isNewRoom
+          ? { ...this.storedRooms, [roomId]: nextRoom }
+          : this.storedRooms;
+
+      await saveFailedEvent({
+        roomId,
+        txnId,
+        timelineEvents: nextRoom.timelineEvents,
+        roomMeta: isNewRoom ? extractRoomMeta(nextRoom) : undefined,
+      });
       this.storedPendingEvents = nextPending;
       this.storedRooms = nextRooms;
     });
@@ -1182,9 +1760,9 @@ export class MatrixClient {
     stateEvents: RawMatrixEvent[],
     options?: { inviteFailed?: boolean },
   ): Promise<void> {
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
       if (!this.accessToken) {
-        return Promise.resolve();
+        return;
       }
       const existing = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const gaps = roomTimelineGaps(existing).map((g) => ({ ...g }));
@@ -1194,21 +1772,22 @@ export class MatrixClient {
           : options?.inviteFailed === false
             ? undefined
             : existing.inviteFailed;
-      this.storedRooms = {
-        ...this.storedRooms,
-        [roomId]: {
-          ...existing,
-          stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
-          timelineEvents: existing.timelineEvents.map(cloneObject),
-          ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
-          ...(existing.encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
-          ...(nextInviteFailed ? { inviteFailed: true as const } : {}),
-        },
+      const nextRoom: StoredRoomEvents = {
+        ...existing,
+        stateEvents: mergeStateEvents(existing.stateEvents, stateEvents),
+        timelineEvents: existing.timelineEvents,
+        ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
+        ...(existing.encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
+        ...(nextInviteFailed ? { inviteFailed: true as const } : {}),
       };
       if (!nextInviteFailed) {
-        delete this.storedRooms[roomId].inviteFailed;
+        delete nextRoom.inviteFailed;
       }
-      return saveSession(this.sessionRecord());
+      await saveRoomMeta(roomId, extractRoomMeta(nextRoom));
+      this.storedRooms = {
+        ...this.storedRooms,
+        [roomId]: nextRoom,
+      };
     });
   }
 
@@ -1243,7 +1822,8 @@ export class MatrixClient {
       }
     }
     this.optimisticReadPositions.clear();
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
+      await dropPreListSession();
       this.accessToken = undefined;
       this.deviceId = undefined;
       this.syncCursor = undefined;
@@ -1252,59 +1832,43 @@ export class MatrixClient {
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
+      this.pendingOrderSeq = 0;
       this.leaveGeneration = 0;
       this.leftAtGeneration.clear();
       this.tagGeneration = 0;
       this.tagUpdatedAtGeneration.clear();
-      return dropPreListSession();
     });
   }
 
   async forgetCredential(): Promise<void> {
     this.tokenGeneration += 1;
     this.optimisticReadPositions.clear();
-    await this.enqueuePersist(() => {
+    await this.enqueuePersist(async () => {
+      await dropCredential();
       this.accessToken = undefined;
       this.deviceId = undefined;
-      return dropCredential();
     });
   }
 
-  private sessionRecord(overrides?: {
-    pending?: PendingRoomEvent[];
-    pendingReadMarkers?: PendingReadMarker[];
-    rooms?: Record<string, StoredRoomEvents>;
-    drafts?: Record<string, DraftRecord>;
-  }): SessionRecord {
-    const session: SessionRecord = {
+  private sessionMeta(overrides?: {
+    accessToken?: string;
+    deviceId?: string;
+    syncCursor?: string;
+    accountData?: Record<string, unknown>;
+  }): SessionMeta {
+    const syncCursor = overrides && "syncCursor" in overrides ? overrides.syncCursor : this.syncCursor;
+    const accountData = overrides?.accountData ?? this.storedAccountData;
+    const accessToken =
+      overrides && "accessToken" in overrides ? overrides.accessToken : this.accessToken;
+    const deviceId = overrides && "deviceId" in overrides ? overrides.deviceId : this.deviceId;
+    return {
       baseUrl: this.baseUrl,
       userId: this.userId,
-      accessToken: this.accessToken,
-      deviceId: this.deviceId,
+      ...(accessToken ? { accessToken } : {}),
+      ...(deviceId ? { deviceId } : {}),
+      ...(syncCursor ? { syncCursor } : {}),
+      ...(Object.keys(accountData).length > 0 ? { accountData } : {}),
     };
-    if (this.syncCursor) {
-      session.syncCursor = this.syncCursor;
-    }
-    if (Object.keys(this.storedAccountData).length > 0) {
-      session.accountData = this.storedAccountData;
-    }
-    const rooms = overrides?.rooms ?? this.storedRooms;
-    if (Object.keys(rooms).length > 0) {
-      session.rooms = rooms;
-    }
-    const pending = overrides?.pending ?? this.storedPendingEvents;
-    if (pending.length > 0) {
-      session.pendingEvents = pending;
-    }
-    const pendingReadMarkers = overrides?.pendingReadMarkers ?? this.storedPendingReadMarkers;
-    if (pendingReadMarkers.length > 0) {
-      session.pendingReadMarkers = pendingReadMarkers;
-    }
-    const drafts = overrides?.drafts ?? this.storedDrafts;
-    if (Object.keys(drafts).length > 0) {
-      session.drafts = cloneDrafts(drafts);
-    }
-    return session;
   }
 
   private nextTxnId(): string {
@@ -1324,6 +1888,66 @@ export class MatrixClient {
     );
     return run;
   }
+}
+
+function extractRoomMeta(room: StoredRoomEvents): StoredRoomMeta {
+  const { timelineEvents: _ignored, ...meta } = room;
+  void _ignored;
+  return meta;
+}
+
+function collectReferencedAttachmentIds(
+  drafts: Record<string, DraftRecord>,
+  pendingEvents: PendingRoomEvent[],
+  rooms: Record<string, StoredRoomEvents>,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const draft of Object.values(drafts)) {
+    if (draft.attachmentId) {
+      ids.add(draft.attachmentId);
+    }
+  }
+  for (const pending of pendingEvents) {
+    if (pending.attachmentId) {
+      ids.add(pending.attachmentId);
+    }
+  }
+  for (const room of Object.values(rooms)) {
+    for (const ev of room.timelineEvents) {
+      const local = localPlaceholderOf(ev);
+      if (local?.attachmentId) {
+        ids.add(local.attachmentId);
+      }
+    }
+  }
+  return ids;
+}
+
+function isAttachmentReferenced(
+  attachmentId: string,
+  drafts: Record<string, DraftRecord>,
+  pendingEvents: PendingRoomEvent[],
+  rooms: Record<string, StoredRoomEvents>,
+): boolean {
+  for (const draft of Object.values(drafts)) {
+    if (draft.attachmentId === attachmentId) {
+      return true;
+    }
+  }
+  for (const pending of pendingEvents) {
+    if (pending.attachmentId === attachmentId) {
+      return true;
+    }
+  }
+  for (const room of Object.values(rooms)) {
+    for (const ev of room.timelineEvents) {
+      const local = localPlaceholderOf(ev);
+      if (local?.attachmentId === attachmentId) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function matrixUrl(baseUrl: string, path: string): string {
@@ -1496,7 +2120,21 @@ function normalizeGaps(
   return deduped;
 }
 
-function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, StoredRoomEvents> {
+function sanitizePlaceholderForMemory(event: RawMatrixEvent): RawMatrixEvent {
+  if (!isPlainObject(event.waypoint_local)) {
+    return event;
+  }
+  const local = localPlaceholderOf(event);
+  if (!local) {
+    return event;
+  }
+  return {
+    ...event,
+    waypoint_local: local,
+  };
+}
+
+function normalizeStoredRooms(rooms: Record<string, unknown>): Record<string, StoredRoomEvents> {
   const cloned: Record<string, StoredRoomEvents> = {};
   for (const [roomId, value] of Object.entries(rooms)) {
     if (!isPlainObject(value)) {
@@ -1506,7 +2144,7 @@ function cloneStoredRooms(rooms: Record<string, unknown>): Record<string, Stored
       ? value.stateEvents.filter(isPlainObject).map(cloneObject)
       : [];
     const timelineEvents = Array.isArray(value.timelineEvents)
-      ? value.timelineEvents.filter(isPlainObject).map(cloneObject)
+      ? value.timelineEvents.filter(isPlainObject).map(sanitizePlaceholderForMemory)
       : [];
     const gaps: StoredTimelineGap[] = [];
     if (Array.isArray(value.timelineGaps)) {
@@ -1616,10 +2254,27 @@ function mergeSyncRooms(
   leftAtGeneration?: Map<string, number>,
   tagGeneration?: number,
   tagUpdatedAtGeneration?: Map<string, number>,
-): Record<string, StoredRoomEvents> {
-  const next: Record<string, StoredRoomEvents> = cloneStoredRooms(current);
+): {
+  rooms: Record<string, StoredRoomEvents>;
+  metaChangedRoomIds: string[];
+  timelineChangedRoomIds: string[];
+  deletedRoomIds: string[];
+  removedAttachmentIds: string[];
+} {
+  const next: Record<string, StoredRoomEvents> = { ...current };
+  const metaChangedRoomIds: string[] = [];
+  const timelineChangedRoomIds: string[] = [];
+  const deletedRoomIds: string[] = [];
+  const removedAttachmentIds: string[] = [];
+
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
-    return next;
+    return {
+      rooms: next,
+      metaChangedRoomIds,
+      timelineChangedRoomIds,
+      deletedRoomIds,
+      removedAttachmentIds,
+    };
   }
 
   const joinRooms = body.rooms.join;
@@ -1636,6 +2291,7 @@ function mergeSyncRooms(
         continue;
       }
       const existing = next[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const isNewRoom = !(roomId in next);
       const existingConfirmedCount = existing.timelineEvents.filter(
         (ev) => !localPlaceholderOf(ev),
       ).length;
@@ -1659,10 +2315,16 @@ function mergeSyncRooms(
         roomSync.timeline.prev_batch !== ""
           ? roomSync.timeline.prev_batch
           : undefined;
-      const { timeline: mergedTimeline, redactedIds } = mergeTimelineEventsWithRedactions(
-        existing.timelineEvents,
-        rawTimeline,
-      );
+      const {
+        timeline: mergedTimeline,
+        redactedIds,
+        changed: timelineChanged,
+        removedAttachmentIds: roomRemovedAttachments,
+      } = mergeTimelineEventsWithRedactions(existing.timelineEvents, rawTimeline);
+      for (const attId of roomRemovedAttachments) {
+        removedAttachmentIds.push(attId);
+      }
+
       const existingIds = new Set(
         existing.timelineEvents.map(eventIdOf).filter((id): id is string => id !== undefined),
       );
@@ -1730,15 +2392,17 @@ function mergeSyncRooms(
       }
 
       const syncTags = extractRoomTags(roomSync);
-      const tagLocked = tagGeneration !== undefined && tagUpdatedAtGeneration !== undefined && (tagUpdatedAtGeneration.get(roomId) ?? 0) > tagGeneration;
+      const tagLocked =
+        tagGeneration !== undefined &&
+        tagUpdatedAtGeneration !== undefined &&
+        (tagUpdatedAtGeneration.get(roomId) ?? 0) > tagGeneration;
       const nextTags = tagLocked ? existing.tags : (syncTags ?? existing.tags);
       const syncFullyReadId = extractFullyReadEventId(roomSync);
       const syncPrivateReadIds = extractPrivateReadEventIds(roomSync, ownerUserId);
       const nextFullyReadEventId = syncFullyReadId ?? existing.fullyReadEventId;
-      const bestIncomingPrivateReadId = resolveFurthestInTimeline(
-        mergedTimeline,
-        syncPrivateReadIds,
-      ) ?? syncPrivateReadIds[syncPrivateReadIds.length - 1];
+      const bestIncomingPrivateReadId =
+        resolveFurthestInTimeline(mergedTimeline, syncPrivateReadIds) ??
+        syncPrivateReadIds[syncPrivateReadIds.length - 1];
       const nextPrivateReadEventId =
         resolveFurthestInTimeline(
           mergedTimeline,
@@ -1761,10 +2425,11 @@ function mergeSyncRooms(
         effectiveSyncPrivateReadIds,
       );
 
-      const mergedStateEvents = mergeStateEvents(existing.stateEvents, [
-        ...rawState,
-        ...timelineStateEvents,
-      ]);
+      const incomingStateEvents = [...rawState, ...timelineStateEvents];
+      const mergedStateEvents =
+        incomingStateEvents.length > 0
+          ? mergeStateEvents(existing.stateEvents, incomingStateEvents)
+          : existing.stateEvents;
       const hasEncInExisting =
         existing.encryptedIrreversible === true ||
         existing.stateEvents.some((ev) => ev.type === "m.room.encryption");
@@ -1789,7 +2454,7 @@ function mergeSyncRooms(
         }
       }
 
-      next[roomId] = {
+      const nextRoom: StoredRoomEvents = {
         stateEvents: mergedStateEvents,
         timelineEvents: mergedTimeline,
         ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
@@ -1802,17 +2467,54 @@ function mergeSyncRooms(
         ...(encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
         ...(inviteFailed ? { inviteFailed: true as const } : {}),
       };
+
+      const metaChanged =
+        isNewRoom ||
+        incomingStateEvents.length > 0 ||
+        nextReadPositionEventId !== existing.readPositionEventId ||
+        nextFullyReadEventId !== existing.fullyReadEventId ||
+        nextPrivateReadEventId !== existing.privateReadEventId ||
+        nextBackwardToken !== existing.backwardToken ||
+        nextReachedStart !== Boolean(existing.reachedStart) ||
+        syncTags !== undefined ||
+        encryptedIrreversible !== existing.encryptedIrreversible ||
+        inviteFailed !== existing.inviteFailed ||
+        JSON.stringify(nextGaps) !== JSON.stringify(roomTimelineGaps(existing));
+
+      next[roomId] = nextRoom;
+      if (metaChanged) {
+        metaChangedRoomIds.push(roomId);
+      }
+      if (isNewRoom || timelineChanged) {
+        timelineChangedRoomIds.push(roomId);
+      }
     }
   }
 
   const leaveRooms = body.rooms.leave;
   if (isPlainObject(leaveRooms)) {
     for (const roomId of Object.keys(leaveRooms)) {
-      delete next[roomId];
+      const removed = next[roomId];
+      if (removed) {
+        for (const ev of removed.timelineEvents) {
+          const local = localPlaceholderOf(ev);
+          if (local?.attachmentId) {
+            removedAttachmentIds.push(local.attachmentId);
+          }
+        }
+        delete next[roomId];
+        deletedRoomIds.push(roomId);
+      }
     }
   }
 
-  return next;
+  return {
+    rooms: next,
+    metaChangedRoomIds,
+    timelineChangedRoomIds,
+    deletedRoomIds,
+    removedAttachmentIds,
+  };
 }
 
 function extractRoomTags(roomSync: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -2366,9 +3068,19 @@ function replaceTargetIdOf(event: RawMatrixEvent): string | undefined {
 function mergeTimelineEventsWithRedactions(
   existing: RawMatrixEvent[],
   incoming: RawMatrixEvent[],
-): { timeline: RawMatrixEvent[]; redactedIds: Set<string> } {
+): {
+  timeline: RawMatrixEvent[];
+  redactedIds: Set<string>;
+  changed: boolean;
+  removedAttachmentIds: string[];
+} {
   if (incoming.length === 0) {
-    return { timeline: existing.map(cloneObject), redactedIds: new Set<string>() };
+    return {
+      timeline: existing,
+      redactedIds: new Set<string>(),
+      changed: false,
+      removedAttachmentIds: [],
+    };
   }
   const redactedIds = new Set<string>();
   for (const event of [...existing, ...incoming]) {
@@ -2428,6 +3140,8 @@ function mergeTimelineEventsWithRedactions(
     }
   });
 
+  const removedAttachmentIds: string[] = [];
+
   for (const rawEvent of incoming) {
     let event: RawMatrixEvent;
     if (!shouldOmit(rawEvent)) {
@@ -2447,6 +3161,10 @@ function mergeTimelineEventsWithRedactions(
       }
     } else if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
       const localIndex = indexByLocalTxnId.get(txnId)!;
+      const replacedLocal = localPlaceholderOf(result[localIndex]!);
+      if (replacedLocal?.attachmentId) {
+        removedAttachmentIds.push(replacedLocal.attachmentId);
+      }
       result[localIndex] = event;
       indexByLocalTxnId.delete(txnId);
       if (id !== undefined) {
@@ -2460,7 +3178,7 @@ function mergeTimelineEventsWithRedactions(
     }
   }
 
-  return { timeline: result, redactedIds };
+  return { timeline: result, redactedIds, changed: true, removedAttachmentIds };
 }
 
 function mergeAccountData(
@@ -2503,14 +3221,19 @@ function isAccountData(value: unknown): value is Record<string, unknown> {
 }
 
 function clonePendingEvent(item: PendingRoomEvent): PendingRoomEvent {
-  const attachment = item.attachment ? cloneDraftAttachment(item.attachment) : undefined;
   return {
     txnId: item.txnId,
     roomId: item.roomId,
     type: item.type,
     sender: item.sender,
     content: cloneValue(item.content) as Record<string, unknown>,
-    ...(attachment ? { attachment } : {}),
+    ...(item.order !== undefined ? { order: item.order } : {}),
+    ...(item.attachmentId && item.attachmentMeta
+      ? {
+          attachmentId: item.attachmentId,
+          attachmentMeta: { ...item.attachmentMeta },
+        }
+      : {}),
   };
 }
 
@@ -2529,7 +3252,11 @@ function clonePendingEvents(raw: unknown[]): PendingRoomEvent[] {
       item.sender !== "" &&
       isPlainObject(item.content)
     ) {
-      const attachment = cloneDraftAttachment(item.attachment);
+      const attachmentId =
+        typeof item.attachmentId === "string" && item.attachmentId !== ""
+          ? item.attachmentId
+          : undefined;
+      const attachmentMeta = normalizeAttachmentMeta(item.attachmentMeta);
       out.push(
         clonePendingEvent({
           txnId: item.txnId,
@@ -2537,7 +3264,10 @@ function clonePendingEvents(raw: unknown[]): PendingRoomEvent[] {
           type: item.type,
           sender: item.sender,
           content: item.content,
-          ...(attachment ? { attachment } : {}),
+          ...(typeof item.order === "number" && Number.isFinite(item.order)
+            ? { order: item.order }
+            : {}),
+          ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
         }),
       );
     }
@@ -2556,9 +3286,13 @@ function transactionIdOf(event: RawMatrixEvent): string | undefined {
 function reconcilePendingWithSync(
   pending: PendingRoomEvent[],
   body: unknown,
-): PendingRoomEvent[] {
+): {
+  pending: PendingRoomEvent[];
+  deletedTxnIds: string[];
+  removedAttachmentIds: string[];
+} {
   if (pending.length === 0 || !isPlainObject(body) || !isPlainObject(body.rooms)) {
-    return pending;
+    return { pending, deletedTxnIds: [], removedAttachmentIds: [] };
   }
   const confirmedByRoom = new Map<string, Set<string>>();
   const leftRooms = new Set<string>();
@@ -2596,35 +3330,33 @@ function reconcilePendingWithSync(
   }
 
   if (confirmedByRoom.size === 0 && leftRooms.size === 0) {
-    return pending;
+    return { pending, deletedTxnIds: [], removedAttachmentIds: [] };
   }
 
-  return pending.filter((item) => {
-    if (leftRooms.has(item.roomId)) {
-      return false;
-    }
+  const deletedTxnIds: string[] = [];
+  const removedAttachmentIds: string[] = [];
+  const next = pending.filter((item) => {
     const confirmedTxns = confirmedByRoom.get(item.roomId);
-    if (confirmedTxns && confirmedTxns.has(item.txnId)) {
+    const shouldDelete =
+      leftRooms.has(item.roomId) || Boolean(confirmedTxns && confirmedTxns.has(item.txnId));
+    if (shouldDelete) {
+      deletedTxnIds.push(item.txnId);
+      if (item.attachmentId) {
+        removedAttachmentIds.push(item.attachmentId);
+      }
       return false;
     }
     return true;
   });
+
+  return {
+    pending: deletedTxnIds.length > 0 ? next : pending,
+    deletedTxnIds,
+    removedAttachmentIds,
+  };
 }
 
-function toUint8Array(value: unknown): Uint8Array | undefined {
-  if (value instanceof Uint8Array) {
-    return new Uint8Array(value);
-  }
-  if (value instanceof ArrayBuffer) {
-    return new Uint8Array(value.slice(0));
-  }
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
-  }
-  return undefined;
-}
-
-function cloneDraftAttachment(raw: unknown): DraftAttachment | undefined {
+function normalizeAttachmentMeta(raw: unknown): AttachmentMeta | undefined {
   if (!isPlainObject(raw)) {
     return undefined;
   }
@@ -2638,15 +3370,10 @@ function cloneDraftAttachment(raw: unknown): DraftAttachment | undefined {
   ) {
     return undefined;
   }
-  const data = toUint8Array(raw.data);
-  if (!data) {
-    return undefined;
-  }
   return {
     name: raw.name,
     mimeType: raw.mimeType,
     size: raw.size,
-    data,
   };
 }
 
@@ -2655,27 +3382,25 @@ function normalizeDraftRecord(raw: unknown): DraftRecord | undefined {
     return undefined;
   }
   const text = typeof raw.text === "string" && raw.text.trim() !== "" ? raw.text : undefined;
-  const attachment = cloneDraftAttachment(raw.attachment);
-  if (text === undefined && attachment === undefined) {
+  const attachmentId =
+    typeof raw.attachmentId === "string" && raw.attachmentId !== "" ? raw.attachmentId : undefined;
+  const attachmentMeta = normalizeAttachmentMeta(raw.attachmentMeta);
+  if (text === undefined && (!attachmentId || !attachmentMeta)) {
     return undefined;
   }
   return {
     ...(text !== undefined ? { text } : {}),
-    ...(attachment !== undefined ? { attachment } : {}),
+    ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
   };
 }
 
 function cloneDraftRecord(draft: DraftRecord): DraftRecord {
   return {
     ...(draft.text !== undefined ? { text: draft.text } : {}),
-    ...(draft.attachment !== undefined
+    ...(draft.attachmentId && draft.attachmentMeta
       ? {
-          attachment: {
-            name: draft.attachment.name,
-            mimeType: draft.attachment.mimeType,
-            size: draft.attachment.size,
-            data: new Uint8Array(draft.attachment.data),
-          },
+          attachmentId: draft.attachmentId,
+          attachmentMeta: { ...draft.attachmentMeta },
         }
       : {}),
   };
@@ -2698,27 +3423,40 @@ function cloneDrafts(raw: Record<string, unknown>): Record<string, DraftRecord> 
 function reconcileDraftsWithSync(
   drafts: Record<string, DraftRecord>,
   body: unknown,
-): Record<string, DraftRecord> {
+): {
+  drafts: Record<string, DraftRecord>;
+  deletedRoomIds: string[];
+  removedAttachmentIds: string[];
+} {
   if (Object.keys(drafts).length === 0 || !isPlainObject(body) || !isPlainObject(body.rooms)) {
-    return drafts;
+    return { drafts, deletedRoomIds: [], removedAttachmentIds: [] };
   }
   const leaveRooms = body.rooms.leave;
   if (!isPlainObject(leaveRooms)) {
-    return drafts;
+    return { drafts, deletedRoomIds: [], removedAttachmentIds: [] };
   }
   const leaveKeys = Object.keys(leaveRooms);
   if (leaveKeys.length === 0) {
-    return drafts;
+    return { drafts, deletedRoomIds: [], removedAttachmentIds: [] };
   }
-  let changed = false;
-  const next = cloneDrafts(drafts);
+  const deletedRoomIds: string[] = [];
+  const removedAttachmentIds: string[] = [];
+  const next = { ...drafts };
   for (const roomId of leaveKeys) {
     if (roomId in next) {
+      const removed = next[roomId]!;
+      if (removed.attachmentId) {
+        removedAttachmentIds.push(removed.attachmentId);
+      }
       delete next[roomId];
-      changed = true;
+      deletedRoomIds.push(roomId);
     }
   }
-  return changed ? next : drafts;
+  return {
+    drafts: deletedRoomIds.length > 0 ? next : drafts,
+    deletedRoomIds,
+    removedAttachmentIds,
+  };
 }
 
 function clonePendingReadMarkers(raw: unknown[]): PendingReadMarker[] {
@@ -2741,9 +3479,9 @@ function reconcilePendingReadMarkersWithSync(
   pending: PendingReadMarker[],
   rooms: Record<string, StoredRoomEvents>,
   body: unknown,
-): PendingReadMarker[] {
+): { markers: PendingReadMarker[]; deletedRoomIds: string[] } {
   if (pending.length === 0) {
-    return pending;
+    return { markers: pending, deletedRoomIds: [] };
   }
   const leftRooms = new Set<string>();
   if (isPlainObject(body) && isPlainObject(body.rooms) && isPlainObject(body.rooms.leave)) {
@@ -2751,8 +3489,10 @@ function reconcilePendingReadMarkersWithSync(
       leftRooms.add(roomId);
     }
   }
-  return pending.filter((item) => {
+  const deletedRoomIds: string[] = [];
+  const markers = pending.filter((item) => {
     if (leftRooms.has(item.roomId)) {
+      deletedRoomIds.push(item.roomId);
       return false;
     }
     const room = rooms[item.roomId];
@@ -2763,18 +3503,27 @@ function reconcilePendingReadMarkersWithSync(
       const syncedBoth =
         room.fullyReadEventId === item.eventId &&
         room.privateReadEventId === item.eventId;
+      if (syncedBoth) {
+        deletedRoomIds.push(item.roomId);
+      }
       return !syncedBoth;
     }
     const pendingIdx = timelineIndexOf(room.timelineEvents, item.eventId);
     const adoptedIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
     if (pendingIdx !== -1 && adoptedIdx !== -1 && adoptedIdx > pendingIdx) {
+      deletedRoomIds.push(item.roomId);
       return false;
     }
     if (pendingIdx !== -1 && adoptedIdx === -1) {
+      deletedRoomIds.push(item.roomId);
       return false;
     }
     return true;
   });
+  return {
+    markers: deletedRoomIds.length > 0 ? markers : pending,
+    deletedRoomIds,
+  };
 }
 
 export function parseMxcUri(uri: string): { serverName: string; mediaId: string } | undefined {
@@ -2808,12 +3557,18 @@ export function localPlaceholderOf(event: RawMatrixEvent): WaypointLocalMeta | u
   ) {
     return undefined;
   }
-  const attachment = cloneDraftAttachment(raw.attachment);
+  const attachmentId =
+    typeof raw.attachmentId === "string" && raw.attachmentId !== ""
+      ? raw.attachmentId
+      : undefined;
+  const attachmentMeta =
+    normalizeAttachmentMeta(raw.attachmentMeta) ?? normalizeAttachmentMeta(raw.attachment);
   return {
     id: raw.id,
     status: raw.status,
     txnId: raw.txnId,
-    ...(attachment ? { attachment } : {}),
+    ...(attachmentId ? { attachmentId } : {}),
+    ...(attachmentMeta ? { attachmentMeta } : {}),
   };
 }
 

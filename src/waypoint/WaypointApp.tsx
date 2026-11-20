@@ -1,7 +1,17 @@
 import { AlertCircle, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WaypointBrandIcon } from "./icons";
@@ -26,6 +36,7 @@ import type {
 } from "../adapters/types";
 import { resetAppearancePreference, syncAppearanceLifecycle } from "./appearance";
 import { MatrixClient } from "./matrix-client";
+import { deleteLocalDatabase } from "./session-store";
 import { RetryQueue } from "./retry-queue";
 import {
   classifyLoginFailure,
@@ -47,6 +58,12 @@ type AuthStepDir = "forward" | "back" | "fade";
 
 type Phase =
   | { name: "booting" }
+  | {
+      name: "restore-error";
+      resetting: boolean;
+      resetConfirmOpen: boolean;
+      resetError?: string;
+    }
   | { name: "address"; address: string; submitting: boolean; message?: string }
   | {
       name: "password";
@@ -162,8 +179,29 @@ export function WaypointApp({
     return syncAppearanceLifecycle();
   }, []);
 
+  const unmountedRef = useRef(false);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
+
   const restoreSessionOnMount = useEffectEvent(async (isCancelled: () => boolean) => {
-    const restored = await client().restore();
+    const outcome = await client()
+      .restore()
+      .then(
+        (value) => ({ ok: true as const, value }),
+        () => ({ ok: false as const }),
+      );
+    if (isCancelled()) {
+      return;
+    }
+    if (!outcome.ok) {
+      setAuthStepDir("fade");
+      setPhase({
+        name: "restore-error",
+        resetting: false,
+        resetConfirmOpen: false,
+      });
+      return;
+    }
+    const restored = outcome.value;
     if (isCancelled()) {
       return;
     }
@@ -201,6 +239,17 @@ export function WaypointApp({
   });
 
   useEffect(() => {
+    if (restoreAttempt === 0) {
+      return;
+    }
+    let cancelled = false;
+    void restoreSessionOnMount(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [restoreAttempt]);
+
+  useEffect(() => {
     let cancelled = false;
     if (duplicateInstance || liveAppInstanceToken !== null) {
       platformRef.current.focusMainWindow?.();
@@ -218,9 +267,11 @@ export function WaypointApp({
     const myToken = Symbol("waypoint-app-instance");
     liveAppInstanceToken = myToken;
 
+    unmountedRef.current = false;
     void restoreSessionOnMount(() => cancelled);
     return () => {
       cancelled = true;
+      unmountedRef.current = true;
       epoch.current += 1;
       if (retryTimer.current !== undefined) {
         clock.clearTimeout(retryTimer.current);
@@ -463,8 +514,22 @@ export function WaypointApp({
     }
     if (sync.type === "response" && sync.status === 200) {
       const wasBackedOff = backoffStep.current > 0;
+      try {
+        await matrix.retainSync(attempt);
+      } catch {
+        if (!syncIsCurrent(myEpoch, generation)) {
+          return;
+        }
+        setPhase({
+          name: "syncing",
+          address: matrix.address,
+          userId: matrix.ownerId,
+          message: "本地存储空间不足，已暂停接收新消息",
+        });
+        scheduleRetry();
+        return;
+      }
       backoffStep.current = 0;
-      await matrix.retainSync(attempt);
       if (!syncIsCurrent(myEpoch, generation)) {
         return;
       }
@@ -619,7 +684,23 @@ export function WaypointApp({
       return;
     }
     if (existing.type === "response" && existing.status === 200 && hasValidAgent(existing.body, ownerId)) {
-      await matrix.retainAccountData("im.waypoint.agents", existing.body);
+      try {
+        await matrix.retainAccountData("im.waypoint.agents", existing.body);
+      } catch {
+        if (epoch.current !== myEpoch) {
+          return;
+        }
+        setPhase((prev) =>
+          prev.name === "register"
+            ? {
+                ...prev,
+                submitting: false,
+                message: "本地存储空间不足，未能保存 Bot 名册，请清理空间后重试。",
+              }
+            : prev,
+        );
+        return;
+      }
       if (epoch.current !== myEpoch) {
         return;
       }
@@ -648,7 +729,23 @@ export function WaypointApp({
       return;
     }
     if (written.type === "response" && written.status >= 200 && written.status < 300) {
-      await matrix.retainAccountData("im.waypoint.agents", nextContent);
+      try {
+        await matrix.retainAccountData("im.waypoint.agents", nextContent);
+      } catch {
+        if (epoch.current !== myEpoch) {
+          return;
+        }
+        setPhase((prev) =>
+          prev.name === "register"
+            ? {
+                ...prev,
+                submitting: false,
+                message: "本地存储空间不足，未能保存 Bot 名册，请清理空间后重试。",
+              }
+            : prev,
+        );
+        return;
+      }
       if (epoch.current !== myEpoch) {
         return;
       }
@@ -718,7 +815,23 @@ export function WaypointApp({
       return;
     }
     retryQueue().resume();
-    await matrix.rememberLogin(session.userId, session.accessToken, session.deviceId);
+    try {
+      await matrix.rememberLogin(session.userId, session.accessToken, session.deviceId);
+    } catch {
+      if (epoch.current !== myEpoch) {
+        return;
+      }
+      setPhase((prev) =>
+        prev.name === "password"
+          ? {
+              ...prev,
+              submitting: false,
+              message: "本地存储空间不足，无法保存登录状态，请清理空间后重试。",
+            }
+          : prev,
+      );
+      return;
+    }
     if (epoch.current !== myEpoch) {
       return;
     }
@@ -844,6 +957,159 @@ export function WaypointApp({
             <Loader2 className="size-5 animate-spin text-muted-foreground" />
           </div>
         </div>
+      </main>
+    );
+  }
+
+  if (phase.name === "restore-error") {
+    const handleRetryRestore = () => {
+      if (phase.resetting) {
+        return;
+      }
+      setPhase({ name: "booting" });
+      setRestoreAttempt((n) => n + 1);
+    };
+
+    const handleConfirmReset = async () => {
+      if (phase.resetting) {
+        return;
+      }
+      setPhase((prev) =>
+        prev.name === "restore-error"
+          ? { ...prev, resetting: true, resetError: undefined }
+          : prev,
+      );
+      try {
+        await deleteLocalDatabase(5000);
+        if (unmountedRef.current) {
+          return;
+        }
+        const matrix = client();
+        const cachedAddress = matrix.address;
+        matrix.resetInMemoryForDatabaseReset(true);
+        setAuthStepDir("fade");
+        setPhase({ name: "address", address: cachedAddress, submitting: false });
+      } catch {
+        if (unmountedRef.current) {
+          return;
+        }
+        setPhase((prev) =>
+          prev.name === "restore-error"
+            ? {
+                ...prev,
+                resetting: false,
+                resetError: "重置本地数据失败，请关闭其他占用窗口后重试。",
+              }
+            : prev,
+        );
+      }
+    };
+
+    return (
+      <main
+        data-viewport={viewportMode}
+        className={authMainClassName}
+        style={authMainStyle}
+      >
+        <div
+          className={cn(
+            "mx-auto flex w-full max-w-[23rem] flex-col gap-6 select-none waypoint-auth-fade",
+            isNarrow ? "flex-1 justify-between py-2" : "py-4",
+          )}
+        >
+          <div className={cn("flex flex-col gap-4", isNarrow ? "items-start text-left" : "items-center text-center")}>
+            <div className="text-foreground">
+              <WaypointBrandIcon size={36} />
+            </div>
+            <div className="space-y-1.5">
+              <h1 className="m-0 text-2xl font-bold tracking-tight text-foreground">
+                本地数据读取异常
+              </h1>
+              <p className="m-0 text-sm leading-relaxed text-muted-foreground">
+                当前设备上的本地数据暂时无法读取，你可以重试或重置本地数据后重新连接。
+              </p>
+            </div>
+          </div>
+
+          <div className={cn("flex w-full flex-col gap-2.5", isNarrow && "mt-auto pt-2")}>
+            <Button
+              className={authPrimaryButtonClassName}
+              type="button"
+              disabled={phase.resetting}
+              onClick={handleRetryRestore}
+            >
+              重试
+            </Button>
+            <Button
+              variant="outline"
+              className={authPrimaryButtonClassName}
+              type="button"
+              disabled={phase.resetting}
+              onClick={() =>
+                setPhase((prev) =>
+                  prev.name === "restore-error"
+                    ? { ...prev, resetConfirmOpen: true, resetError: undefined }
+                    : prev,
+                )
+              }
+            >
+              重置本地数据并重新连接
+            </Button>
+          </div>
+        </div>
+
+        <AlertDialog
+          open={phase.resetConfirmOpen}
+          onOpenChange={(open) => {
+            if (!phase.resetting) {
+              setPhase((prev) =>
+                prev.name === "restore-error"
+                  ? { ...prev, resetConfirmOpen: open }
+                  : prev,
+              );
+            }
+          }}
+        >
+          <AlertDialogContent
+            aria-label="重置本地数据并重新连接"
+            onEscapeKeyDown={(event) => {
+              if (phase.resetting) {
+                event.preventDefault();
+              }
+            }}
+          >
+            <AlertDialogHeader>
+              <AlertDialogTitle>重置本地数据并重新连接</AlertDialogTitle>
+              <AlertDialogDescription>
+                重置将彻底清空这台设备上的本地时间线、草稿与重试队列
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {phase.resetError ? (
+              <Alert variant="destructive">
+                <AlertCircle aria-hidden="true" />
+                <AlertDescription>{phase.resetError}</AlertDescription>
+              </Alert>
+            ) : null}
+            <AlertDialogFooter>
+              <AlertDialogCancel className="min-h-11 sm:min-h-9" disabled={phase.resetting}>
+                取消
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className={cn(
+                  buttonVariants({ variant: "destructive" }),
+                  "min-h-11 sm:min-h-9",
+                )}
+                disabled={phase.resetting}
+                onClick={(event) => {
+                  event.preventDefault();
+                  void handleConfirmReset();
+                }}
+              >
+                {phase.resetting ? "正在重置…" : "确认重置"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </main>
     );
   }
