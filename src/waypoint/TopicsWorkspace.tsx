@@ -1643,7 +1643,7 @@ export function TopicsWorkspace({
     }
   }
 
-  const activeTopicReadPositionUnknown = Boolean(activeTopic?.readPositionUnknown);
+  const activeTopicNeedsReadGapBackfill = Boolean(activeTopic?.needsReadGapBackfill);
 
   useEffect(() => {
     if (userScrolledRoomRef.current !== visibleComposerRoomId) {
@@ -1654,7 +1654,7 @@ export function TopicsWorkspace({
         openBackfillStoppedRoomsRef.current.delete(roomId);
       }
     }
-    if (!visibleComposerRoomId || !activeTopicReadPositionUnknown) {
+    if (!visibleComposerRoomId || !activeTopicNeedsReadGapBackfill) {
       return;
     }
     if (
@@ -1747,7 +1747,7 @@ export function TopicsWorkspace({
             };
           }
           setRevision((value) => value + 1);
-          if (outcome.hasReadPosition) {
+          if (outcome.hasReadPosition && !hasLimitedGapAfterReadPosition(client.rooms()[roomId])) {
             break;
           }
           if (!nextBackfillTargetForReadPosition(client.rooms()[roomId])) {
@@ -1768,7 +1768,7 @@ export function TopicsWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [visibleComposerRoomId, activeTopicReadPositionUnknown, backfillTick, client, exiting, reauthRequired]);
+  }, [visibleComposerRoomId, activeTopicNeedsReadGapBackfill, backfillTick, client, exiting, reauthRequired]);
 
   function collapseDescription() {
     setDescriptionExpanded(false);
@@ -2051,7 +2051,7 @@ export function TopicsWorkspace({
     }
     const shouldWaitForBackfill =
       !reauthRequired &&
-      activeTopic.readPositionUnknown &&
+      activeTopic.needsReadGapBackfill &&
       Boolean(nextBackfillTargetForReadPosition(rooms[visibleComposerRoomId])) &&
       !openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId);
 
@@ -2070,9 +2070,16 @@ export function TopicsWorkspace({
       !shouldWaitForBackfill
     ) {
       awaitingReadPosLandingRoomRef.current = null;
+      const pending = pendingScrollPreserveRef.current;
       pendingScrollPreserveRef.current = null;
       if (userScrolledRoomRef.current !== visibleComposerRoomId) {
         landTimelineScroll(container, activeTopic.firstUnreadEventId);
+      } else if (pending?.roomId === visibleComposerRoomId) {
+        const delta = container.scrollHeight - pending.prevScrollHeight;
+        setTimelineScrollTop(container, Math.max(0, pending.prevScrollTop + delta));
+        isAtBottomRef.current =
+          container.scrollHeight - container.scrollTop - container.clientHeight <=
+          AT_BOTTOM_THRESHOLD_PX;
       }
       prevTimelineKeyRef.current = timelineContentKey;
       prevTimelineClientHeightRef.current = container.clientHeight;

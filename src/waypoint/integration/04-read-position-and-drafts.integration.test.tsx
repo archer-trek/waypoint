@@ -1022,6 +1022,7 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncRound = 0;
+  let topicOpened = false;
 
   function makeMessages(start: number, count: number, baseTs: number) {
     return Array.from({ length: count }, (_, idx) => {
@@ -1038,7 +1039,14 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
 
   homeserver.handler = passwordLoginHandler(async (input) => {
     if (input.url.includes("/messages")) {
-      throw new Error(`不应在后台拉取历史消息：${input.url}`);
+      if (!topicOpened) {
+        throw new Error(`不应在后台拉取历史消息：${input.url}`);
+      }
+      return {
+        type: "response",
+        status: 500,
+        body: { errcode: "M_UNKNOWN", error: "temporary messages failure" },
+      };
     }
     if (input.url.includes("/sync")) {
       syncRound += 1;
@@ -1143,7 +1151,9 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncRound).toBe(2));
   await waitFor(() => expect(topicTitles()).toEqual(["话题一", "话题二"]));
+  expect(homeserver.requests.some((r) => r.url.includes("/messages"))).toBe(false);
 
+  topicOpened = true;
   await user.click(screen.getByRole("button", { name: "话题一" }));
   const timeline = screen.getByRole("log", { name: "对话时间线" });
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(21); // 初始 1 条 + 本轮最多 20 条
@@ -1165,9 +1175,12 @@ test("limited 缺口先记着不在后台补完且列表照常更新，每房间
   expect(timeline).toHaveTextContent("消息-26");
   expect(timeline).toHaveTextContent("消息-30");
 
-  // 等待一段时间也不会在后台发 /messages 补齐缺口
+  // 打开后因已读在缺口前触发一次补页；失败止损后等待一段时间也不会重复循环发 /messages
+  await waitFor(() => {
+    expect(homeserver.requests.filter((r) => r.url.includes("/messages"))).toHaveLength(1);
+  });
   await act(async () => { clock.advance(10_000); });
-  expect(homeserver.requests.some((r) => r.url.includes("/messages"))).toBe(false);
+  expect(homeserver.requests.filter((r) => r.url.includes("/messages"))).toHaveLength(1);
 });
 
 test("限流留在重试队列退避后再试，其他 4xx 不进入自动重试", async () => {
@@ -4639,4 +4652,253 @@ test("消息被 Homeserver 永久拒绝（其他 4xx）时转圈换成红叹号�
   expect(restoredRows[2].contains(screen.getByRole("status", { name: "未确认" }))).toBe(true);
 
   second.unmount();
+});
+
+test("已有数据的 Topic 收到超过 20 条连续增量消息（limited: false）后滚到底部并返回，不伪造缺口且清除未读、重进停在底部", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  const makeMsg = (n: number) => ({
+    type: "m.room.message",
+    event_id: `$m${n}`,
+    sender: n % 2 === 0 ? "@bot:example.com" : "@alice:example.com",
+    origin_server_ts: 1000 + n * 1000,
+    content: { msgtype: "m.text", body: `连续消息-${n}` },
+  });
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!contig-21:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.name", state_key: "", content: { name: "超过20条连续增量" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  timeline: { events: [makeMsg(1)], limited: false },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!contig-21:example.com": {
+                  timeline: {
+                    limited: false,
+                    events: Array.from({ length: 21 }, (_, idx) => makeMsg(idx + 2)),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 400, async () => {
+    const { clock } = renderApp(homeserver, "Waypoint Android", {
+      viewportMode: () => "narrow",
+    });
+    await login(user);
+
+    await screen.findByRole("button", { name: "超过20条连续增量" });
+    await advanceWhenTimerScheduled(clock, 1000);
+    await waitFor(() => expect(syncRound).toBe(2));
+
+    const row = await screen.findByRole("button", { name: "超过20条连续增量" });
+    await waitFor(() => expect(row).toHaveAttribute("data-unread", "true"));
+
+    await user.click(row);
+    const timeline = await screen.findByRole("log", { name: "对话时间线" });
+    expect(timeline.querySelectorAll("[data-event-id]")).toHaveLength(22);
+
+    await act(async () => {
+      timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+      fireEvent.scroll(timeline);
+    });
+
+    await waitFor(() => {
+      expect(readMarkerPosts).toContainEqual({
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!contig-21%3Aexample.com/read_markers",
+        body: { "m.fully_read": "$m22", "m.read.private": "$m22" },
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    const rowAfterBack = await screen.findByRole("button", { name: "超过20条连续增量" });
+    expect(rowAfterBack).not.toHaveAttribute("data-unread", "true");
+
+    await user.click(rowAfterBack);
+    const reopenedTimeline = await screen.findByRole("log", { name: "对话时间线" });
+    expect(reopenedTimeline.scrollTop).toBe(
+      reopenedTimeline.scrollHeight - reopenedTimeline.clientHeight,
+    );
+  });
+});
+
+
+test("已有数据的 Topic 收到 limited: true 增量缺口后打开自动补齐中间缺口，滚到底部返回即清除未读且重进停在底部", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+
+  const makeMsg = (n: number) => ({
+    type: "m.room.message",
+    event_id: `$m${n}`,
+    sender: n % 2 === 0 ? "@bot:example.com" : "@alice:example.com",
+    origin_server_ts: 1000 + n * 1000,
+    content: { msgtype: "m.text", body: `缺口消息-${n}` },
+  });
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!gap-20:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                      {
+                        type: "im.waypoint.topic",
+                        state_key: "",
+                        content: { v: 1, agent_user_id: "@bot:example.com" },
+                      },
+                      { type: "m.room.name", state_key: "", content: { name: "增量有限缺口话题" } },
+                    ],
+                  },
+                  account_data: {
+                    events: [{ type: "m.fully_read", content: { event_id: "$m1" } }],
+                  },
+                  timeline: { events: [makeMsg(1)], limited: false },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!gap-20:example.com": {
+                  timeline: {
+                    limited: true,
+                    prev_batch: "pb-gap-mid",
+                    events: Array.from({ length: 20 }, (_, idx) => makeMsg(idx + 11)),
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/messages") && input.url.includes("pb-gap-mid")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          start: "pb-gap-mid",
+          end: "pb-gap-end",
+          chunk: Array.from({ length: 10 }, (_, idx) => makeMsg(idx + 1)).reverse(),
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      readMarkerPosts.push({ url: input.url, body: input.body });
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 400, async () => {
+    const { clock } = renderApp(homeserver, "Waypoint Android", {
+      viewportMode: () => "narrow",
+    });
+    await login(user);
+
+    await screen.findByRole("button", { name: "增量有限缺口话题" });
+    await advanceWhenTimerScheduled(clock, 1000);
+    await waitFor(() => expect(syncRound).toBe(2));
+
+    const row = await screen.findByRole("button", { name: "增量有限缺口话题" });
+    await waitFor(() => expect(row).toHaveAttribute("data-unread", "true"));
+
+    await user.click(row);
+    const timeline = await screen.findByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-event-id]")).toHaveLength(30);
+    });
+
+    await act(async () => {
+      timeline.scrollTop = timeline.scrollHeight - timeline.clientHeight;
+      fireEvent.scroll(timeline);
+    });
+
+    await waitFor(() => {
+      expect(readMarkerPosts).toContainEqual({
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!gap-20%3Aexample.com/read_markers",
+        body: { "m.fully_read": "$m30", "m.read.private": "$m30" },
+      });
+    });
+
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    const rowAfterBack = await screen.findByRole("button", { name: "增量有限缺口话题" });
+    expect(rowAfterBack).not.toHaveAttribute("data-unread", "true");
+
+    await user.click(rowAfterBack);
+    const reopenedTimeline = await screen.findByRole("log", { name: "对话时间线" });
+    expect(reopenedTimeline.scrollTop).toBe(
+      reopenedTimeline.scrollHeight - reopenedTimeline.clientHeight,
+    );
+  });
 });
