@@ -347,6 +347,7 @@ export async function saveDraftInStore(input: {
   draft?: DraftRecord;
   putBlob?: BlobRecord;
   deleteBlobIds?: string[];
+  commit?: boolean;
 }): Promise<void> {
   const stores: string[] = [DRAFTS_STORE];
   if (input.putBlob || (input.deleteBlobIds && input.deleteBlobIds.length > 0)) {
@@ -368,6 +369,13 @@ export async function saveDraftInStore(input: {
       drafts.put(cleanStoredDraft(input.draft), input.roomId);
     } else {
       drafts.delete(input.roomId);
+    }
+    if (input.commit && typeof tx.commit === "function") {
+      try {
+        tx.commit();
+      } catch {
+        // ignore if transaction already finished or commit unsupported
+      }
     }
     await transactionDone(tx);
   });
@@ -937,7 +945,7 @@ function evictDbCache(factory: IDBFactory, db?: IDBDatabase): void {
 
 async function withDb<T>(fn: (db: IDBDatabase) => Promise<T>): Promise<T> {
   const factory = globalThis.indexedDB;
-  const db = await getDb(factory);
+  const db = openDbByFactory.get(factory) ?? (await getDb(factory));
   try {
     return await fn(db);
   } catch (error) {

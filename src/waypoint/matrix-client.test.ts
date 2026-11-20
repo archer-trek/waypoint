@@ -396,4 +396,52 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     expect(snap.timelines).toEqual({});
     expect(snap.drafts).toEqual({});
   });
+
+  test("setDraftText honors isCurrent guard and commit option, and setDraftAttachment atomically merges pending text", async () => {
+    const client = new MatrixClient(noopTransport());
+    await client.versions("https://matrix.example.com");
+    await client.rememberLogin("@alice:example.com", "tok-1", "DEV1");
+
+    const txSpy = vi.spyOn(IDBDatabase.prototype, "transaction");
+    const commitSpy = vi.spyOn(IDBTransaction.prototype, "commit");
+
+    // Stale isCurrent guard skips IndexedDB transaction completely
+    await client.setDraftText("!r1:example.com", "ghost", { isCurrent: () => false });
+    expect(txSpy).not.toHaveBeenCalled();
+    expect(client.draft("!r1:example.com")).toBeUndefined();
+
+    // commit: true forwards to saveDraftInStore
+    await client.setDraftText("!r1:example.com", "saved", {
+      commit: true,
+      isCurrent: () => true,
+    });
+    expect(commitSpy).toHaveBeenCalledTimes(1);
+    expect(client.draft("!r1:example.com")?.text).toBe("saved");
+
+    // setDraftAttachment atomically merges newer unpersisted text in a single transaction
+    txSpy.mockClear();
+    const assigned = await client.setDraftAttachment(
+      "!r1:example.com",
+      { name: "pic.png", mimeType: "image/png", size: 3 },
+      new Uint8Array([1, 2, 3]),
+      { text: "merged text" },
+    );
+    expect(assigned?.attachmentMeta.name).toBe("pic.png");
+    const writeTxs = txSpy.mock.calls.filter((c) => c[1] === "readwrite");
+    expect(writeTxs).toHaveLength(1);
+    expect(client.draft("!r1:example.com")).toEqual({
+      text: "merged text",
+      attachmentId: assigned!.attachmentId,
+      attachmentMeta: assigned!.attachmentMeta,
+    });
+
+    // Removing attachment with text option preserves merged text in one transaction
+    txSpy.mockClear();
+    await client.setDraftAttachment("!r1:example.com", undefined, undefined, {
+      text: "after remove",
+    });
+    const removeWriteTxs = txSpy.mock.calls.filter((c) => c[1] === "readwrite");
+    expect(removeWriteTxs).toHaveLength(1);
+    expect(client.draft("!r1:example.com")).toEqual({ text: "after remove" });
+  });
 });

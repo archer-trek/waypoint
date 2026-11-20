@@ -77,6 +77,7 @@ export class MatrixClient {
   private tagUpdatedAtGeneration = new Map<string, number>();
   private optimisticReadPositions = new Map<string, string>();
   private persistTail: Promise<void> = Promise.resolve();
+  private persistActiveCount = 0;
 
   constructor(private readonly transport: HomeserverTransport) {}
 
@@ -252,9 +253,13 @@ export class MatrixClient {
     });
   }
 
-  async setDraftText(roomId: string, text: string): Promise<void> {
+  async setDraftText(
+    roomId: string,
+    text: string,
+    options?: { commit?: boolean; isCurrent?: () => boolean },
+  ): Promise<void> {
     await this.enqueuePersist(async () => {
-      if (!this.accessToken) {
+      if (!this.accessToken || (options?.isCurrent && !options.isCurrent())) {
         return;
       }
       const existing = this.storedDrafts[roomId];
@@ -294,6 +299,7 @@ export class MatrixClient {
       await saveDraftInStore({
         roomId,
         draft: nextDraft,
+        commit: options?.commit,
       });
       this.storedDrafts = nextDrafts;
     });
@@ -303,6 +309,7 @@ export class MatrixClient {
     roomId: string,
     attachmentMeta: AttachmentMeta | undefined,
     blobData?: Uint8Array,
+    options?: { text?: string; commit?: boolean },
   ): Promise<{ attachmentId: string; attachmentMeta: AttachmentMeta } | undefined> {
     let assigned: { attachmentId: string; attachmentMeta: AttachmentMeta } | undefined;
     await this.enqueuePersist(async () => {
@@ -326,10 +333,17 @@ export class MatrixClient {
         };
       }
 
+      const mergedText =
+        options && "text" in options
+          ? typeof options.text === "string" && options.text.trim() !== ""
+            ? options.text
+            : undefined
+          : existing?.text;
+
       const nextDraft: DraftRecord | undefined =
-        existing?.text !== undefined || (attachmentId && nextMeta)
+        mergedText !== undefined || (attachmentId && nextMeta)
           ? {
-              ...(existing?.text !== undefined ? { text: existing.text } : {}),
+              ...(mergedText !== undefined ? { text: mergedText } : {}),
               ...(attachmentId && nextMeta
                 ? { attachmentId, attachmentMeta: nextMeta }
                 : {}),
@@ -366,6 +380,7 @@ export class MatrixClient {
         draft: nextDraft,
         putBlob,
         deleteBlobIds,
+        commit: options?.commit,
       });
       this.storedDrafts = nextDrafts;
       if (attachmentId && nextMeta) {
@@ -1881,11 +1896,26 @@ export class MatrixClient {
   }
 
   private enqueuePersist(write: () => Promise<void>): Promise<void> {
-    const run = this.persistTail.then(() => write());
-    this.persistTail = run.then(
-      () => undefined,
-      () => undefined,
+    this.persistActiveCount += 1;
+    let run: Promise<void>;
+    if (this.persistActiveCount === 1) {
+      try {
+        run = write();
+      } catch (error) {
+        run = Promise.reject(error);
+      }
+    } else {
+      run = this.persistTail.then(() => write());
+    }
+    const settled = run.then(
+      () => {
+        this.persistActiveCount -= 1;
+      },
+      () => {
+        this.persistActiveCount -= 1;
+      },
     );
+    this.persistTail = settled;
     return run;
   }
 }

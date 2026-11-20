@@ -31,6 +31,7 @@ import {
   isDeviceIdRejected,
   isSyncCursorRejected,
 } from "./matrix-errors";
+import { DraftPersistenceManager } from "./draft-debounce";
 import { RETRY_BACKOFF_MS, RetryQueue } from "./retry-queue";
 import {
   appendDirectRoom,
@@ -147,12 +148,27 @@ export function TopicsWorkspace({
   const pinPendingRef = useRef<Set<string>>(new Set());
   const [toastNotice, setToastNotice] = useState<string | undefined>(undefined);
   const toastNoticeTimerRef = useRef<number | undefined>(undefined);
+  const draftManager = useMemo(
+    () =>
+      new DraftPersistenceManager(clock, (roomId, text, options) =>
+        client.setDraftText(roomId, text, options),
+      ),
+    [client, clock],
+  );
   const [draftsByRoom, setDraftsByRoom] = useState<Record<string, DraftRecord>>(() =>
     client.drafts(),
   );
   const draftsByRoomRef = useRef(draftsByRoom);
   draftsByRoomRef.current = draftsByRoom;
-  const draftMutationSeqRef = useRef<Record<string, number>>({});
+  function commitDraftsState(
+    updater: (prev: Record<string, DraftRecord>) => Record<string, DraftRecord>,
+  ) {
+    const next = updater(draftsByRoomRef.current);
+    if (next !== draftsByRoomRef.current) {
+      draftsByRoomRef.current = next;
+      setDraftsByRoom(next);
+    }
+  }
   const attachmentSeqRef = useRef<Record<string, number>>({});
   const inFlightAttachmentSelectRef = useRef<Record<string, Promise<void>>>({});
   const [composerError, setComposerError] = useState<string | undefined>(undefined);
@@ -663,6 +679,9 @@ export function TopicsWorkspace({
     if (anyFormSubmitting) {
       return;
     }
+    if (activeTopicIdRef.current) {
+      void draftManager.flush(activeTopicIdRef.current);
+    }
     resetCreateForm();
     resetEditForm();
     setDeleteConfirmOpen(false);
@@ -700,6 +719,7 @@ export function TopicsWorkspace({
     if (exiting || agentsSubmitting || !onExitDevice) {
       return;
     }
+    draftManager.cancel();
     setExiting(true);
     pausedRef.current = true;
     syncEpochRef.current += 1;
@@ -864,6 +884,9 @@ export function TopicsWorkspace({
     if (anyFormSubmitting || reauthRequiredRef.current) {
       return;
     }
+    if (activeTopicIdRef.current) {
+      void draftManager.flush(activeTopicIdRef.current);
+    }
     setSettingsOpen(false);
     resetEditForm();
     setDeleteConfirmOpen(false);
@@ -932,6 +955,7 @@ export function TopicsWorkspace({
     if (anyFormSubmitting || !activeTopic) {
       return;
     }
+    void draftManager.flush(activeTopic.roomId);
     setOverflowMenuOpen(false);
     setDeleteConfirmOpen(false);
     setDeleteError(undefined);
@@ -953,6 +977,9 @@ export function TopicsWorkspace({
   function openTopic(roomId: string) {
     if (anyFormSubmitting) {
       return;
+    }
+    if (activeTopicIdRef.current && activeTopicIdRef.current !== roomId) {
+      void draftManager.flush(activeTopicIdRef.current);
     }
     setSettingsOpen(false);
     resetCreateForm();
@@ -1040,6 +1067,9 @@ export function TopicsWorkspace({
       return;
     }
     const targetRoomId = activeTopic.roomId;
+    const prevDraftText = draftsByRoomRef.current[targetRoomId]?.text ?? "";
+    const hadPendingDraft = draftManager.hasPending(targetRoomId);
+    const delSeq = draftManager.cancel(targetRoomId);
     deletingRef.current = true;
     setDeleting(true);
     setDeleteError(undefined);
@@ -1049,13 +1079,17 @@ export function TopicsWorkspace({
         return;
       }
       if (!result.ok) {
+        if (hadPendingDraft && draftManager.currentSeq(targetRoomId) === delSeq) {
+          draftManager.restorePending(targetRoomId, prevDraftText, delSeq);
+          void draftManager.flush(targetRoomId);
+        }
         setDeleteError(result.message);
         return;
       }
       delete lastRequestedReadRef.current[targetRoomId];
       attachmentSeqRef.current[targetRoomId] = (attachmentSeqRef.current[targetRoomId] ?? 0) + 1;
-      bumpDraftSeq(targetRoomId);
-      setDraftsByRoom((prev) => {
+      draftManager.bumpSeq(targetRoomId);
+      commitDraftsState((prev) => {
         if (!(targetRoomId in prev)) {
           return prev;
         }
@@ -1078,6 +1112,7 @@ export function TopicsWorkspace({
   }
 
   function leaveActiveTopic(roomId: string) {
+    void draftManager.flush(roomId);
     evaluateVisibleReadPosition(roomId);
     setActiveTopicId(null);
     setDescriptionExpanded(false);
@@ -1120,12 +1155,14 @@ export function TopicsWorkspace({
     syncEpochRef.current += 1;
     syncRunIdRef.current += 1;
     pausedRef.current = true;
+    reauthRequiredRef.current = true;
     syncInFlightRef.current = false;
     syncWakePendingRef.current = false;
     syncAbortControllerRef.current?.abort();
     syncAbortControllerRef.current = null;
     clearSyncTimer();
     retryQueue.pause();
+    void draftManager.flush(undefined, { commit: true });
     if (mountedRef.current) {
       setReauthRequired(true);
     }
@@ -1361,13 +1398,14 @@ export function TopicsWorkspace({
         delete lastRequestedReadRef.current[roomId];
       }
     }
-    setDraftsByRoom((prev) => {
+    commitDraftsState((prev) => {
       const staleIds = Object.keys(prev).filter((roomId) => !(roomId in currentRooms));
       if (staleIds.length === 0) {
         return prev;
       }
       const next = { ...prev };
       for (const id of staleIds) {
+        draftManager.cancel(id);
         delete next[id];
       }
       return next;
@@ -1419,8 +1457,9 @@ export function TopicsWorkspace({
     const prevRoomId = visibleComposerRoomRef.current;
     visibleComposerRoomRef.current = visibleComposerRoomId;
     if (prevRoomId && prevRoomId !== visibleComposerRoomId) {
+      void draftManager.flush(prevRoomId);
       setComposerError(undefined);
-      setDraftsByRoom((prev) => {
+      commitDraftsState((prev) => {
         const draft = prev[prevRoomId];
         if (!draft) {
           return prev;
@@ -1446,7 +1485,7 @@ export function TopicsWorkspace({
         return next;
       });
     }
-  }, [visibleComposerRoomId]);
+  }, [visibleComposerRoomId, draftManager]);
 
   const onCredentialRejected = useEffectEvent(() => {
     pauseForCredentialRejection();
@@ -1475,6 +1514,9 @@ export function TopicsWorkspace({
   const onVisibilityChange = useEffectEvent((visible: boolean) => {
     if (!mountedRef.current) {
       return;
+    }
+    if (!visible) {
+      void draftManager.flush(undefined, { commit: true });
     }
     if (suspendInBackground) {
       if (!visible) {
@@ -1551,6 +1593,16 @@ export function TopicsWorkspace({
         window?.removeEventListener("pageshow", onShow);
       };
     }
+    const handleDraftVisibilityChange = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        void draftManager.flush(undefined, { commit: true });
+      }
+    };
+    const handleDraftPageHide = () => {
+      void draftManager.flush(undefined, { commit: true });
+    };
+    document?.addEventListener("visibilitychange", handleDraftVisibilityChange);
+    window?.addEventListener("pagehide", handleDraftPageHide);
     let unsubResume: () => void;
     if (platform?.subscribeNetworkResume) {
       unsubResume = platform.subscribeNetworkResume(onNetworkResume);
@@ -1561,6 +1613,9 @@ export function TopicsWorkspace({
     const downloadedMediaCache = downloadedMediaCacheRef.current;
     const localMediaUrlCache = localMediaUrlCacheRef.current;
     return () => {
+      document?.removeEventListener("visibilitychange", handleDraftVisibilityChange);
+      window?.removeEventListener("pagehide", handleDraftPageHide);
+      void draftManager.flush(undefined, { commit: true });
       mountedRef.current = false;
       // StrictMode remounts this effect while the first sync is still in flight.
       // Drop that generation so the restarted effect can sync again; otherwise
@@ -1592,7 +1647,7 @@ export function TopicsWorkspace({
         retryQueue.dispose();
       }
     };
-  }, [client, clock, retryQueue, providedRetryQueue, platform, initialReauthRequired]);
+  }, [client, clock, draftManager, retryQueue, providedRetryQueue, platform, initialReauthRequired]);
 
   function syncHeaderElevation(container: HTMLElement | null) {
     const isScrolled = Boolean(container && container.scrollTop > 4);
@@ -2169,12 +2224,6 @@ export function TopicsWorkspace({
     syncHeaderElevation(container);
     evaluateVisibleReadPosition(visibleComposerRoomId);
   });
-  function bumpDraftSeq(roomId: string): number {
-    const next = (draftMutationSeqRef.current[roomId] ?? 0) + 1;
-    draftMutationSeqRef.current[roomId] = next;
-    return next;
-  }
-
   async function handleSelectAttachment(roomId: string, file: File) {
     if (reauthRequiredRef.current) {
       return;
@@ -2196,10 +2245,21 @@ export function TopicsWorkspace({
         mimeType: file.type || "application/octet-stream",
         size: data.byteLength,
       };
+      const latestText = draftsByRoomRef.current[roomId]?.text ?? "";
+      const hadPending = draftManager.hasPending(roomId);
+      const attSeq = draftManager.cancel(roomId);
       let assigned: { attachmentId: string; attachmentMeta: AttachmentMeta } | undefined;
       try {
-        assigned = await client.setDraftAttachment(roomId, attachmentMeta, data);
+        assigned = await client.setDraftAttachment(roomId, attachmentMeta, data, {
+          text: latestText,
+        });
       } catch {
+        if (
+          (hadPending || latestText.trim() !== "") &&
+          draftManager.currentSeq(roomId) === attSeq
+        ) {
+          draftManager.restorePending(roomId, latestText, attSeq);
+        }
         if (mountedRef.current && attachmentSeqRef.current[roomId] === seq) {
           setComposerError("本地存储空间不足，消息未发送");
         }
@@ -2212,12 +2272,12 @@ export function TopicsWorkspace({
         void client.setDraftAttachment(roomId, undefined).catch(() => undefined);
         return;
       }
-      setDraftsByRoom((prev) => {
-        const latestText = prev[roomId]?.text;
+      commitDraftsState((prev) => {
+        const currentText = prev[roomId]?.text;
         return {
           ...prev,
           [roomId]: {
-            ...(latestText !== undefined && latestText !== "" ? { text: latestText } : {}),
+            ...(currentText !== undefined && currentText !== "" ? { text: currentText } : {}),
             attachmentId: assigned.attachmentId,
             attachmentMeta: assigned.attachmentMeta,
           },
@@ -2240,11 +2300,11 @@ export function TopicsWorkspace({
       return;
     }
     attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
-    bumpDraftSeq(roomId);
-    const existingText = draftsByRoomRef.current[roomId]?.text;
-    const hasText = typeof existingText === "string" && existingText !== "";
+    const existingText = draftsByRoomRef.current[roomId]?.text ?? "";
+    draftManager.cancel(roomId);
+    const hasText = existingText !== "";
     const nextDraft: DraftRecord | undefined = hasText ? { text: existingText } : undefined;
-    setDraftsByRoom((prev) => {
+    commitDraftsState((prev) => {
       const next = { ...prev };
       if (nextDraft) {
         next[roomId] = nextDraft;
@@ -2256,28 +2316,29 @@ export function TopicsWorkspace({
     if (composerError) {
       setComposerError(undefined);
     }
-    void client.setDraftAttachment(roomId, undefined).catch(() => {
-      if (mountedRef.current) {
-        const committed = client.draft(roomId);
-        setDraftsByRoom((prev) => {
-          const next = { ...prev };
-          if (committed) {
-            next[roomId] = committed;
-          } else {
-            delete next[roomId];
-          }
-          return next;
-        });
-      }
-    });
+    void client
+      .setDraftAttachment(roomId, undefined, undefined, { text: existingText })
+      .catch(() => {
+        if (mountedRef.current) {
+          const committed = client.draft(roomId);
+          commitDraftsState((prev) => {
+            const next = { ...prev };
+            if (committed) {
+              next[roomId] = committed;
+            } else {
+              delete next[roomId];
+            }
+            return next;
+          });
+        }
+      });
   }
 
   function updateDraftText(roomId: string, text: string) {
     if (reauthRequiredRef.current) {
       return;
     }
-    bumpDraftSeq(roomId);
-    setDraftsByRoom((prev) => {
+    commitDraftsState((prev) => {
       const existing = prev[roomId];
       const next = { ...prev };
       if (text !== "" || (existing?.attachmentId && existing?.attachmentMeta)) {
@@ -2298,7 +2359,7 @@ export function TopicsWorkspace({
     if (composerError) {
       setComposerError(undefined);
     }
-    void client.setDraftText(roomId, text).catch(() => undefined);
+    draftManager.scheduleText(roomId, text);
   }
 
   async function handleResendFailed(roomId: string, localId: string) {
@@ -2615,6 +2676,16 @@ export function TopicsWorkspace({
     };
   }
 
+  function restorePendingDraftOnSendFailure(roomId: string, text: string, expectedSeq: number) {
+    if (
+      text.trim() !== "" &&
+      draftManager.currentSeq(roomId) === expectedSeq &&
+      client.draft(roomId)?.text !== text
+    ) {
+      draftManager.restorePending(roomId, text, expectedSeq);
+    }
+  }
+
   async function sendComposerAttachmentMessage(
     roomId: string,
     attachmentId: string,
@@ -2630,6 +2701,7 @@ export function TopicsWorkspace({
     persistingSendRef.current = true;
     setPersistingSend(true);
     setComposerError(undefined);
+    const sendSeq = draftManager.cancel(roomId);
     try {
       const content = buildAttachmentEventContent(attachmentMeta, captionText);
       await client.enqueueRoomEvent(roomId, "m.room.message", content, {
@@ -2638,8 +2710,8 @@ export function TopicsWorkspace({
         attachmentMeta,
       });
       attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
-      bumpDraftSeq(roomId);
-      setDraftsByRoom((prev) => {
+      draftManager.bumpSeq(roomId);
+      commitDraftsState((prev) => {
         if (!(roomId in prev)) {
           return prev;
         }
@@ -2650,6 +2722,7 @@ export function TopicsWorkspace({
       setRevision((value) => value + 1);
       void retryQueue.flush();
     } catch {
+      restorePendingDraftOnSendFailure(roomId, captionText, sendSeq);
       setComposerError("本地存储空间不足，消息未发送");
     } finally {
       persistingSendRef.current = false;
@@ -2686,29 +2759,35 @@ export function TopicsWorkspace({
         });
       }
       const initialCaption = draftsByRoomRef.current[roomId]?.text ?? "";
-      for (let i = 0; i < attachments.length; i += 1) {
-        const attachment = attachments[i]!;
-        const captionForItem = i === 0 && initialCaption.trim() !== "" ? initialCaption : "";
-        const content = buildAttachmentEventContent(attachment.attachmentMeta, captionForItem);
-        await client.enqueueRoomEvent(roomId, "m.room.message", content, {
-          clearDraft: i === attachments.length - 1,
-          attachmentId: attachment.attachmentId,
-          attachmentMeta: attachment.attachmentMeta,
-          attachmentData: attachment.data,
-        });
-      }
-      attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
-      bumpDraftSeq(roomId);
-      setDraftsByRoom((prev) => {
-        if (!(roomId in prev)) {
-          return prev;
+      const sendSeq = draftManager.cancel(roomId);
+      try {
+        for (let i = 0; i < attachments.length; i += 1) {
+          const attachment = attachments[i]!;
+          const captionForItem = i === 0 && initialCaption.trim() !== "" ? initialCaption : "";
+          const content = buildAttachmentEventContent(attachment.attachmentMeta, captionForItem);
+          await client.enqueueRoomEvent(roomId, "m.room.message", content, {
+            clearDraft: i === attachments.length - 1,
+            attachmentId: attachment.attachmentId,
+            attachmentMeta: attachment.attachmentMeta,
+            attachmentData: attachment.data,
+          });
         }
-        const next = { ...prev };
-        delete next[roomId];
-        return next;
-      });
-      setRevision((value) => value + 1);
-      void retryQueue.flush();
+        attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
+        draftManager.bumpSeq(roomId);
+        commitDraftsState((prev) => {
+          if (!(roomId in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[roomId];
+          return next;
+        });
+        setRevision((value) => value + 1);
+        void retryQueue.flush();
+      } catch (err) {
+        restorePendingDraftOnSendFailure(roomId, initialCaption, sendSeq);
+        throw err;
+      }
     } catch {
       setRevision((value) => value + 1);
       setComposerError("本地存储空间不足，消息未发送");
@@ -2739,6 +2818,7 @@ export function TopicsWorkspace({
     persistingSendRef.current = true;
     setPersistingSend(true);
     setComposerError(undefined);
+    const sendSeq = draftManager.cancel(roomId);
     try {
       await client.enqueueRoomEvent(
         roomId,
@@ -2750,8 +2830,8 @@ export function TopicsWorkspace({
         { clearDraft: true },
       );
       attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
-      bumpDraftSeq(roomId);
-      setDraftsByRoom((prev) => {
+      draftManager.bumpSeq(roomId);
+      commitDraftsState((prev) => {
         if (!(roomId in prev)) {
           return prev;
         }
@@ -2762,6 +2842,7 @@ export function TopicsWorkspace({
       setRevision((value) => value + 1);
       void retryQueue.flush();
     } catch {
+      restorePendingDraftOnSendFailure(roomId, body, sendSeq);
       setComposerError("本地存储空间不足，消息未发送");
     } finally {
       persistingSendRef.current = false;
@@ -3350,6 +3431,9 @@ export function TopicsWorkspace({
                     resetRootViewportOffset();
                   });
                 }
+              }}
+              onBlurTextarea={() => {
+                void draftManager.flush(roomId);
               }}
               onDraftTextChange={(text) => updateDraftText(roomId, text)}
               extractDataTransferFiles={extractDataTransferFiles}

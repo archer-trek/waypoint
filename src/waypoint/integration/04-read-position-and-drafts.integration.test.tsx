@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 import type { TransportResult } from "../../adapters/types";
+import { DRAFTS_STORE, loadV2Snapshot } from "../session-store";
 import { WaypointApp } from "../WaypointApp";
 import {
   setupIntegrationTestEnv,
@@ -4904,4 +4905,333 @@ test("已有数据的 Topic 收到 limited: true 增量缺口后打开自动补�
       reopenedTimeline.scrollHeight - reopenedTimeline.clientHeight,
     );
   });
+});
+
+
+test("草稿文本输入 400ms 防抖合并写盘，并在切 Topic、blur、visibilitychange(hidden)、pagehide 与卸载时立即强制 Flush (#133)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "防抖话题一" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "防抖话题二" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const txSpy = vi.spyOn(IDBDatabase.prototype, "transaction");
+  const commitSpy = vi.spyOn(IDBTransaction.prototype, "commit");
+
+  const countDraftWrites = () =>
+    txSpy.mock.calls.filter((call) => {
+      const stores = typeof call[0] === "string" ? [call[0]] : Array.from(call[0]);
+      return call[1] === "readwrite" && stores.includes(DRAFTS_STORE);
+    }).length;
+
+  try {
+    const app = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "防抖话题一" }));
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    // 1. 快速连续输入：UI 立即更新，399ms 内 0 次 IndexedDB 写盘，400ms 时合并为 1 次写盘
+    txSpy.mockClear();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "a" } });
+    fireEvent.change(input, { target: { value: "ab" } });
+    fireEvent.change(input, { target: { value: "abcde" } });
+    expect(input).toHaveValue("abcde");
+    expect(countDraftWrites()).toBe(0);
+
+    await act(async () => {
+      app.clock.advance(399);
+    });
+    expect(countDraftWrites()).toBe(0);
+    expect((await loadV2Snapshot()).drafts["!t1:example.com"]).toBeUndefined();
+
+    await act(async () => {
+      app.clock.advance(1);
+    });
+    await waitFor(async () => {
+      expect(countDraftWrites()).toBe(1);
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("abcde");
+    });
+
+    // 2. 切 Topic 时立即 Flush 前一个 Topic 的草稿（不需等 400ms）
+    txSpy.mockClear();
+    fireEvent.change(input, { target: { value: "switch-flush" } });
+    expect(countDraftWrites()).toBe(0);
+    await user.click(screen.getByRole("button", { name: "防抖话题二" }));
+    await waitFor(async () => {
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("switch-flush");
+    });
+    await user.click(screen.getByRole("button", { name: "防抖话题一" }));
+    expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("switch-flush");
+
+    // 3. Textarea blur 时立即 Flush
+    const inputAfterSwitch = screen.getByRole("textbox", { name: "输入消息" });
+    txSpy.mockClear();
+    fireEvent.focus(inputAfterSwitch);
+    fireEvent.change(inputAfterSwitch, { target: { value: "blur-flush" } });
+    expect(countDraftWrites()).toBe(0);
+    fireEvent.blur(inputAfterSwitch);
+    await waitFor(async () => {
+      expect(countDraftWrites()).toBe(1);
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("blur-flush");
+    });
+
+    // 4. visibilitychange(hidden) 立即 Flush 且调用 tx.commit()
+    txSpy.mockClear();
+    commitSpy.mockClear();
+    fireEvent.change(inputAfterSwitch, { target: { value: "vis-flush" } });
+    expect(countDraftWrites()).toBe(0);
+    const origVisDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    try {
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+    } finally {
+      if (origVisDescriptor) {
+        Object.defineProperty(document, "visibilityState", origVisDescriptor);
+      } else {
+        delete (document as unknown as Record<string, unknown>).visibilityState;
+      }
+    }
+    await waitFor(async () => {
+      expect(countDraftWrites()).toBe(1);
+      expect(commitSpy).toHaveBeenCalled();
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("vis-flush");
+    });
+
+    // 5. pagehide 立即 Flush 且调用 tx.commit()
+    txSpy.mockClear();
+    commitSpy.mockClear();
+    fireEvent.change(inputAfterSwitch, { target: { value: "pagehide-flush" } });
+    expect(countDraftWrites()).toBe(0);
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    await waitFor(async () => {
+      expect(countDraftWrites()).toBe(1);
+      expect(commitSpy).toHaveBeenCalled();
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("pagehide-flush");
+    });
+
+    // 6. 组件卸载时立即 Flush
+    txSpy.mockClear();
+    fireEvent.change(inputAfterSwitch, { target: { value: "unmount-flush" } });
+    expect(countDraftWrites()).toBe(0);
+    app.unmount();
+    await waitFor(async () => {
+      expect(countDraftWrites()).toBe(1);
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("unmount-flush");
+    });
+  } finally {
+    txSpy.mockRestore();
+    commitSpy.mockRestore();
+  }
+});
+
+test("附件增删绕过文本防抖并原子合并未落盘文本；发送、删 Topic、退出设备取消防抖且不复活幽灵草稿，M_UNKNOWN_TOKEN 立即 Flush 并禁用输入 (#133)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+  let forceUnknownToken = false;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      if (forceUnknownToken) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token revoked" },
+        };
+      }
+      syncCalls += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: `batch-${syncCalls}`,
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t1:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "原子合并话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!t2:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "待删取消话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      return { type: "response", status: 200, body: { event_id: "$sent-1" } };
+    }
+    if (input.method === "POST" && input.url.includes("/leave")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.includes("/forget")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  const txSpy = vi.spyOn(IDBDatabase.prototype, "transaction");
+  const countDraftWrites = () =>
+    txSpy.mock.calls.filter((call) => {
+      const stores = typeof call[0] === "string" ? [call[0]] : Array.from(call[0]);
+      return call[1] === "readwrite" && stores.includes(DRAFTS_STORE);
+    }).length;
+
+  try {
+    const app = renderApp(homeserver);
+    await login(user);
+    await user.click(await screen.findByRole("button", { name: "原子合并话题" }));
+
+    const input = screen.getByRole("textbox", { name: "输入消息" });
+
+    // 1. 添加附件绕过 400ms 防抖并单事务原子合并最新未落盘文本
+    txSpy.mockClear();
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "atomic-caption" } });
+    expect(countDraftWrites()).toBe(0);
+
+    fireEvent.change(screen.getByLabelText("选择附件"), {
+      target: { files: [new File(["img"], "pic.png", { type: "image/png" })] },
+    });
+    expect(await screen.findByRole("region", { name: "已选附件" })).toHaveTextContent("pic.png");
+    await waitFor(async () => {
+      const snap = await loadV2Snapshot();
+      expect(snap.drafts["!t1:example.com"]?.text).toBe("atomic-caption");
+      expect(snap.drafts["!t1:example.com"]?.attachmentMeta?.name).toBe("pic.png");
+    });
+    expect(countDraftWrites()).toBe(1);
+
+    // 2. 移除附件同样绕过 400ms 防抖并原子保留最新未落盘文本
+    txSpy.mockClear();
+    fireEvent.change(input, { target: { value: "kept-after-remove" } });
+    expect(countDraftWrites()).toBe(0);
+    await user.click(screen.getByRole("button", { name: "移除附件" }));
+    await waitFor(async () => {
+      const snap = await loadV2Snapshot();
+      expect(snap.drafts["!t1:example.com"]).toEqual({ text: "kept-after-remove" });
+    });
+
+    // 3. Enter 发送（不触发 blur）立即取消待发送草稿的防抖定时器，400ms 后不复活幽灵草稿
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "send-no-ghost" } });
+    txSpy.mockClear();
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(input).toHaveValue("");
+    });
+    expect((await loadV2Snapshot()).drafts["!t1:example.com"]).toBeUndefined();
+
+    txSpy.mockClear();
+    await act(async () => {
+      app.clock.advance(500);
+    });
+    expect(countDraftWrites()).toBe(0);
+    expect((await loadV2Snapshot()).drafts["!t1:example.com"]).toBeUndefined();
+
+    // 4. 删除 Topic 立即取消防抖且清理草稿与附件，之后不复活
+    await user.click(screen.getByRole("button", { name: "待删取消话题" }));
+    const input2 = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.change(input2, { target: { value: "delete-no-ghost" } });
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "待删取消话题" })).not.toBeInTheDocument();
+    });
+    txSpy.mockClear();
+    await act(async () => {
+      app.clock.advance(500);
+    });
+    expect(countDraftWrites()).toBe(0);
+    expect((await loadV2Snapshot()).drafts["!t2:example.com"]).toBeUndefined();
+
+    // 5. M_UNKNOWN_TOKEN 触发时立即 Flush 未落盘草稿并禁用输入
+    await user.click(screen.getByRole("button", { name: "原子合并话题" }));
+    const inputReauth = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.focus(inputReauth);
+    fireEvent.change(inputReauth, { target: { value: "reauth-flush" } });
+    forceUnknownToken = true;
+    await advanceWhenTimerScheduled(app.clock, 1000);
+    expect(await screen.findByRole("status", { name: "重新验证提示" })).toBeInTheDocument();
+    expect(inputReauth).toBeDisabled();
+    await waitFor(async () => {
+      expect((await loadV2Snapshot()).drafts["!t1:example.com"]?.text).toBe("reauth-flush");
+    });
+
+    // 6. 退出设备取消所有活跃防抖定时器并清空草稿
+    const banner = screen.getByRole("status", { name: "重新验证提示" });
+    await user.click(within(banner).getByRole("button", { name: "退出这台设备" }));
+    await user.click(screen.getByRole("button", { name: "确认退出" }));
+    expect(await screen.findByLabelText("密码")).toHaveValue("");
+    await act(async () => {
+      app.clock.advance(500);
+    });
+    expect((await loadV2Snapshot()).drafts).toEqual({});
+
+    app.unmount();
+  } finally {
+    txSpy.mockRestore();
+  }
 });
