@@ -35,6 +35,7 @@ export type ComposerViewProps = {
   ) => void;
   onPickedFiles: (files: File[]) => void;
   onFocusTextarea: () => void;
+  onBlurTextarea?: () => void;
   onDraftTextChange: (text: string) => void;
   extractDataTransferFiles: (transfer: DataTransfer | null | undefined) => File[];
 };
@@ -62,6 +63,7 @@ export function ComposerView({
   onSendMessage,
   onPickedFiles,
   onFocusTextarea,
+  onBlurTextarea,
   onDraftTextChange,
   extractDataTransferFiles,
 }: ComposerViewProps) {
@@ -228,6 +230,7 @@ export function ComposerView({
             composerTextareaScrollable ? "touch-pan-y" : "touch-none",
           )}
           onFocus={onFocusTextarea}
+          onBlur={() => onBlurTextarea?.()}
           onChange={(event) => onDraftTextChange(event.target.value)}
           onKeyDown={(event) => {
             if (

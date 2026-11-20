@@ -795,6 +795,39 @@ describe("ComposerView (#89)", () => {
     expect(compLocked.container.querySelector("form.waypoint-composer")).toHaveClass("touch-pan-y");
     expect(compLocked.getByRole("textbox", { name: "输入消息" })).toHaveClass("touch-pan-y", "overscroll-contain");
   });
+
+  test("calls onBlurTextarea when composer textarea blurs (#133)", () => {
+    const onBlurTextarea = vi.fn();
+    render(
+      <ComposerView
+        safeInset={0}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        hasDraftAttachment={false}
+        draftText="draft"
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="wide"
+        supportsFileDropAndPaste={true}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={vi.fn()}
+        onFocusTextarea={vi.fn()}
+        onBlurTextarea={onBlurTextarea}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+
+    const textarea = screen.getByRole("textbox", { name: "输入消息" });
+    fireEvent.blur(textarea);
+    expect(onBlurTextarea).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Theme hygiene (#89)", () => {

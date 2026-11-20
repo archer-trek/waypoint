@@ -18,6 +18,7 @@ import {
   loadSession,
   loadV2Snapshot,
   pruneOrphanBlobs,
+  saveDraftInStore,
   saveMeta,
   saveRoomMeta,
   saveRoomMetaAndReadMarker,
@@ -463,5 +464,31 @@ describe("session-store v2", () => {
     const assertion = expect(pendingDelete).rejects.toThrow("重置本地数据超时");
     await vi.advanceTimersByTimeAsync(5000);
     await assertion;
+  });
+
+  test("saveDraftInStore calls tx.commit() when commit option is true", async () => {
+    await saveMeta({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+    });
+
+    const commitSpy = vi.spyOn(IDBTransaction.prototype, "commit");
+
+    await saveDraftInStore({
+      roomId: "!r1:example.com",
+      draft: { text: "debounced" },
+    });
+    expect(commitSpy).not.toHaveBeenCalled();
+
+    await saveDraftInStore({
+      roomId: "!r1:example.com",
+      draft: { text: "flushed" },
+      commit: true,
+    });
+    expect(commitSpy).toHaveBeenCalledTimes(1);
+
+    const snap = await loadV2Snapshot();
+    expect(snap.drafts["!r1:example.com"]?.text).toBe("flushed");
   });
 });
