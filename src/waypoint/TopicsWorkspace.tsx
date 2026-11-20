@@ -19,6 +19,7 @@ import {
   BACKFILL_PAGE_LIMIT,
   nextBackfillTargetForReadPosition,
   nextBackfillTargetForScrollUp,
+  timelineIndexOf,
   type MatrixClient,
 } from "./matrix-client";
 import type { DraftAttachment, DraftRecord } from "./session-store";
@@ -500,10 +501,7 @@ export function TopicsWorkspace({
         syncNavigationDepth(targetDepth);
         return true;
       }
-      setActiveTopicId(null);
-      setDescriptionExpanded(false);
-      setDeleteConfirmOpen(false);
-      setDeleteError(undefined);
+      leaveActiveTopic(activeTopic.roomId);
       return true;
     }
     return false;
@@ -1072,6 +1070,14 @@ export function TopicsWorkspace({
     }
   }
 
+  function leaveActiveTopic(roomId: string) {
+    evaluateVisibleReadPosition(roomId);
+    setActiveTopicId(null);
+    setDescriptionExpanded(false);
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
+  }
+
   function goBack() {
     if (settingsOpen) {
       if (agentsSubmitting || exiting) return;
@@ -1092,10 +1098,7 @@ export function TopicsWorkspace({
       if (deleting) {
         return;
       }
-      setActiveTopicId(null);
-      setDescriptionExpanded(false);
-      setDeleteConfirmOpen(false);
-      setDeleteError(undefined);
+      leaveActiveTopic(activeTopic.roomId);
     }
   }
 
@@ -1785,6 +1788,9 @@ export function TopicsWorkspace({
       const same = Math.abs(el.scrollTop - programmaticScrollRef.current.top) < 1;
       programmaticScrollRef.current.active = false;
       if (same) {
+        if (visibleComposerRoomId) {
+          evaluateVisibleReadPosition(visibleComposerRoomId);
+        }
         return;
       }
     }
@@ -1807,12 +1813,32 @@ export function TopicsWorkspace({
     }
   }
 
+  function classifyRowVisibility(
+    rowTop: number,
+    rowBottom: number,
+    viewTop: number,
+    viewBottom: number,
+    atPhysicalBottom: boolean,
+  ): BubbleVisibility {
+    if (rowBottom <= viewTop) {
+      return "above";
+    }
+    if (!atPhysicalBottom && rowTop >= viewBottom) {
+      return "below";
+    }
+    return "visible";
+  }
+
   function measureRowVisibility(container: HTMLElement): Map<string, BubbleVisibility> {
     const map = new Map<string, BubbleVisibility>();
     const rowEls = Array.from(container.querySelectorAll<HTMLElement>("[data-event-id]"));
     if (rowEls.length === 0) {
       return map;
     }
+    const atPhysicalBottom =
+      container.clientHeight > 0 &&
+      container.scrollHeight > 0 &&
+      container.scrollHeight - container.scrollTop - container.clientHeight <= 1;
     const containerRect = container.getBoundingClientRect();
     const useRects =
       containerRect.height > 0 &&
@@ -1822,13 +1848,16 @@ export function TopicsWorkspace({
         const eventId = el.dataset.eventId;
         if (!eventId) continue;
         const rect = el.getBoundingClientRect();
-        if (rect.bottom <= containerRect.top) {
-          map.set(eventId, "above");
-        } else if (rect.top >= containerRect.bottom) {
-          map.set(eventId, "below");
-        } else {
-          map.set(eventId, "visible");
-        }
+        map.set(
+          eventId,
+          classifyRowVisibility(
+            rect.top,
+            rect.bottom,
+            containerRect.top,
+            containerRect.bottom,
+            atPhysicalBottom,
+          ),
+        );
       }
       return map;
     }
@@ -1842,14 +1871,16 @@ export function TopicsWorkspace({
         const eventId = el.dataset.eventId;
         if (!eventId) continue;
         const elTop = el.offsetTop;
-        const elBottom = elTop + el.offsetHeight;
-        if (elBottom <= top) {
-          map.set(eventId, "above");
-        } else if (elTop >= bottom) {
-          map.set(eventId, "below");
-        } else {
-          map.set(eventId, "visible");
-        }
+        map.set(
+          eventId,
+          classifyRowVisibility(
+            elTop,
+            elTop + el.offsetHeight,
+            top,
+            bottom,
+            atPhysicalBottom,
+          ),
+        );
       }
       return map;
     }
@@ -1860,6 +1891,12 @@ export function TopicsWorkspace({
       }
     }
     return map;
+  }
+
+  function clearPendingReadRequest(roomId: string, eventId: string) {
+    if (lastRequestedReadRef.current[roomId] === eventId) {
+      delete lastRequestedReadRef.current[roomId];
+    }
   }
 
   function evaluateVisibleReadPosition(roomId: string) {
@@ -1890,16 +1927,16 @@ export function TopicsWorkspace({
     }
     const prevRequested = lastRequestedReadRef.current[roomId];
     if (prevRequested) {
-      const prevIdx = room.timelineEvents.findIndex((ev) => ev.event_id === prevRequested);
-      const targetIdx = room.timelineEvents.findIndex((ev) => ev.event_id === targetEventId);
+      const prevIdx = timelineIndexOf(room.timelineEvents, prevRequested);
+      const targetIdx = timelineIndexOf(room.timelineEvents, targetEventId);
       if (prevIdx !== -1 && targetIdx !== -1 && prevIdx >= targetIdx) {
         return;
       }
     }
     lastRequestedReadRef.current[roomId] = targetEventId;
-    void client
-      .advanceReadPosition(roomId, targetEventId)
-      .then((changed) => {
+    void client.advanceReadPosition(roomId, targetEventId).then(
+      (changed) => {
+        clearPendingReadRequest(roomId, targetEventId);
         if (!changed || !mountedRef.current) {
           return;
         }
@@ -1907,12 +1944,14 @@ export function TopicsWorkspace({
         if (!isSyncPaused()) {
           retryQueue.wakeReadMarkers();
         }
-      })
-      .catch(() => {
-        if (lastRequestedReadRef.current[roomId] === targetEventId) {
-          delete lastRequestedReadRef.current[roomId];
+      },
+      () => {
+        clearPendingReadRequest(roomId, targetEventId);
+        if (mountedRef.current && activeVisibleRoomRef.current !== roomId) {
+          setRevision((value) => value + 1);
         }
-      });
+      },
+    );
   }
 
   function landTimelineScroll(container: HTMLElement, firstUnreadEventId: string | undefined) {

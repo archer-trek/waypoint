@@ -52,6 +52,7 @@ export class MatrixClient {
   private leftAtGeneration = new Map<string, number>();
   private tagGeneration = 0;
   private tagUpdatedAtGeneration = new Map<string, number>();
+  private optimisticReadPositions = new Map<string, string>();
   private persistTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly transport: HomeserverTransport) {}
@@ -85,7 +86,24 @@ export class MatrixClient {
   }
 
   rooms(): Record<string, StoredRoomEvents> {
-    return this.storedRooms;
+    if (this.optimisticReadPositions.size === 0) {
+      return this.storedRooms;
+    }
+    let next: Record<string, StoredRoomEvents> | undefined;
+    for (const [roomId, eventId] of this.optimisticReadPositions.entries()) {
+      const room = this.storedRooms[roomId];
+      if (!room || !canAdvanceReadPosition(room, eventId, room.readPositionEventId)) {
+        continue;
+      }
+      if (!next) {
+        next = { ...this.storedRooms };
+      }
+      next[roomId] = {
+        ...room,
+        readPositionEventId: eventId,
+      };
+    }
+    return next ?? this.storedRooms;
   }
 
   draft(roomId: string): DraftRecord | undefined {
@@ -209,6 +227,7 @@ export class MatrixClient {
 
   async rememberLogin(userId: string, accessToken: string, deviceId: string): Promise<void> {
     this.tokenGeneration += 1;
+    this.optimisticReadPositions.clear();
     await this.enqueuePersist(() => {
       this.userId = userId;
       this.accessToken = accessToken;
@@ -359,6 +378,11 @@ export class MatrixClient {
         attempt.tagGeneration,
         this.tagUpdatedAtGeneration,
       );
+      for (const roomId of Array.from(this.optimisticReadPositions.keys())) {
+        if (!(roomId in this.storedRooms)) {
+          this.optimisticReadPositions.delete(roomId);
+        }
+      }
       this.storedPendingEvents = reconcilePendingWithSync(this.storedPendingEvents, body);
       this.storedPendingReadMarkers = reconcilePendingReadMarkersWithSync(
         this.storedPendingReadMarkers,
@@ -599,6 +623,7 @@ export class MatrixClient {
   async removeLeftRoom(roomId: string): Promise<void> {
     this.leaveGeneration += 1;
     this.leftAtGeneration.set(roomId, this.leaveGeneration);
+    this.optimisticReadPositions.delete(roomId);
     await this.enqueuePersist(async () => {
       if (!this.accessToken) {
         return;
@@ -846,44 +871,45 @@ export class MatrixClient {
     if (!this.accessToken || !this.userId || !eventId) {
       return false;
     }
+    const currentRoom = this.storedRooms[roomId];
+    const effectiveCurrent =
+      this.optimisticReadPositions.get(roomId) ?? currentRoom?.readPositionEventId;
+    let setOptimistic = false;
+    if (currentRoom && canAdvanceReadPosition(currentRoom, eventId, effectiveCurrent)) {
+      this.optimisticReadPositions.set(roomId, eventId);
+      setOptimistic = true;
+    }
     let changed = false;
-    await this.enqueuePersist(async () => {
-      if (!this.accessToken || !this.userId) {
-        return;
-      }
-      const room = this.storedRooms[roomId];
-      if (!room) {
-        return;
-      }
-      const targetIdx = timelineIndexOf(room.timelineEvents, eventId);
-      if (targetIdx === -1) {
-        return;
-      }
-      if (room.readPositionEventId !== undefined) {
-        if (room.readPositionEventId === eventId) {
+    try {
+      await this.enqueuePersist(async () => {
+        if (!this.accessToken || !this.userId) {
           return;
         }
-        const currentIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
-        if (currentIdx === -1 || targetIdx <= currentIdx) {
+        const room = this.storedRooms[roomId];
+        if (!room || !canAdvanceReadPosition(room, eventId, room.readPositionEventId)) {
           return;
         }
+        const nextRooms = cloneStoredRooms(this.storedRooms);
+        nextRooms[roomId] = {
+          ...nextRooms[roomId],
+          readPositionEventId: eventId,
+        };
+        const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
+          (item) => item.roomId !== roomId,
+        );
+        nextPendingReadMarkers.push({ roomId, eventId });
+        await saveSession(
+          this.sessionRecord({ rooms: nextRooms, pendingReadMarkers: nextPendingReadMarkers }),
+        );
+        this.storedRooms = nextRooms;
+        this.storedPendingReadMarkers = nextPendingReadMarkers;
+        changed = true;
+      });
+    } finally {
+      if (setOptimistic && this.optimisticReadPositions.get(roomId) === eventId) {
+        this.optimisticReadPositions.delete(roomId);
       }
-      const nextRooms = cloneStoredRooms(this.storedRooms);
-      nextRooms[roomId] = {
-        ...nextRooms[roomId],
-        readPositionEventId: eventId,
-      };
-      const nextPendingReadMarkers = this.storedPendingReadMarkers.filter(
-        (item) => item.roomId !== roomId,
-      );
-      nextPendingReadMarkers.push({ roomId, eventId });
-      await saveSession(
-        this.sessionRecord({ rooms: nextRooms, pendingReadMarkers: nextPendingReadMarkers }),
-      );
-      this.storedRooms = nextRooms;
-      this.storedPendingReadMarkers = nextPendingReadMarkers;
-      changed = true;
-    });
+    }
     return changed;
   }
 
@@ -1216,6 +1242,7 @@ export class MatrixClient {
         // best-effort logout
       }
     }
+    this.optimisticReadPositions.clear();
     await this.enqueuePersist(() => {
       this.accessToken = undefined;
       this.deviceId = undefined;
@@ -1235,6 +1262,7 @@ export class MatrixClient {
 
   async forgetCredential(): Promise<void> {
     this.tokenGeneration += 1;
+    this.optimisticReadPositions.clear();
     await this.enqueuePersist(() => {
       this.accessToken = undefined;
       this.deviceId = undefined;
@@ -2099,11 +2127,32 @@ function extractPrivateReadEventIds(
   return ids;
 }
 
-function timelineIndexOf(timeline: RawMatrixEvent[], eventId: string | undefined): number {
+export function timelineIndexOf(timeline: RawMatrixEvent[], eventId: string | undefined): number {
   if (!eventId) {
     return -1;
   }
   return timeline.findIndex((event) => eventIdOf(event) === eventId);
+}
+
+function canAdvanceReadPosition(
+  room: StoredRoomEvents,
+  eventId: string,
+  currentReadPos: string | undefined,
+): boolean {
+  const targetIdx = timelineIndexOf(room.timelineEvents, eventId);
+  if (targetIdx === -1) {
+    return false;
+  }
+  if (currentReadPos !== undefined) {
+    if (currentReadPos === eventId) {
+      return false;
+    }
+    const currentIdx = timelineIndexOf(room.timelineEvents, currentReadPos);
+    if (currentIdx === -1 || targetIdx <= currentIdx) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function resolveFurthestInTimeline(
