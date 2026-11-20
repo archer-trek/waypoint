@@ -17,6 +17,7 @@ import { normalizeInset } from "../adapters/inset";
 import type { Clock, PlatformAdapter, TransportResult, ViewportMode } from "../adapters/types";
 import {
   BACKFILL_PAGE_LIMIT,
+  localPlaceholderOf,
   nextBackfillTargetForReadPosition,
   nextBackfillTargetForScrollUp,
   type MatrixClient,
@@ -500,10 +501,7 @@ export function TopicsWorkspace({
         syncNavigationDepth(targetDepth);
         return true;
       }
-      setActiveTopicId(null);
-      setDescriptionExpanded(false);
-      setDeleteConfirmOpen(false);
-      setDeleteError(undefined);
+      leaveActiveTopic(activeTopic.roomId);
       return true;
     }
     return false;
@@ -1072,6 +1070,14 @@ export function TopicsWorkspace({
     }
   }
 
+  function leaveActiveTopic(roomId: string) {
+    evaluateVisibleReadPosition(roomId);
+    setActiveTopicId(null);
+    setDescriptionExpanded(false);
+    setDeleteConfirmOpen(false);
+    setDeleteError(undefined);
+  }
+
   function goBack() {
     if (settingsOpen) {
       if (agentsSubmitting || exiting) return;
@@ -1092,10 +1098,7 @@ export function TopicsWorkspace({
       if (deleting) {
         return;
       }
-      setActiveTopicId(null);
-      setDescriptionExpanded(false);
-      setDeleteConfirmOpen(false);
-      setDeleteError(undefined);
+      leaveActiveTopic(activeTopic.roomId);
     }
   }
 
@@ -1785,6 +1788,9 @@ export function TopicsWorkspace({
       const same = Math.abs(el.scrollTop - programmaticScrollRef.current.top) < 1;
       programmaticScrollRef.current.active = false;
       if (same) {
+        if (visibleComposerRoomId) {
+          evaluateVisibleReadPosition(visibleComposerRoomId);
+        }
         return;
       }
     }
@@ -1813,6 +1819,10 @@ export function TopicsWorkspace({
     if (rowEls.length === 0) {
       return map;
     }
+    const atPhysicalBottom =
+      container.clientHeight > 0 &&
+      container.scrollHeight > 0 &&
+      container.scrollHeight - container.scrollTop - container.clientHeight <= 2;
     const containerRect = container.getBoundingClientRect();
     const useRects =
       containerRect.height > 0 &&
@@ -1824,7 +1834,7 @@ export function TopicsWorkspace({
         const rect = el.getBoundingClientRect();
         if (rect.bottom <= containerRect.top) {
           map.set(eventId, "above");
-        } else if (rect.top >= containerRect.bottom) {
+        } else if (!atPhysicalBottom && rect.top >= containerRect.bottom) {
           map.set(eventId, "below");
         } else {
           map.set(eventId, "visible");
@@ -1845,7 +1855,7 @@ export function TopicsWorkspace({
         const elBottom = elTop + el.offsetHeight;
         if (elBottom <= top) {
           map.set(eventId, "above");
-        } else if (elTop >= bottom) {
+        } else if (!atPhysicalBottom && elTop >= bottom) {
           map.set(eventId, "below");
         } else {
           map.set(eventId, "visible");
@@ -1890,8 +1900,12 @@ export function TopicsWorkspace({
     }
     const prevRequested = lastRequestedReadRef.current[roomId];
     if (prevRequested) {
-      const prevIdx = room.timelineEvents.findIndex((ev) => ev.event_id === prevRequested);
-      const targetIdx = room.timelineEvents.findIndex((ev) => ev.event_id === targetEventId);
+      const prevIdx = room.timelineEvents.findIndex(
+        (ev) => !localPlaceholderOf(ev) && ev.event_id === prevRequested,
+      );
+      const targetIdx = room.timelineEvents.findIndex(
+        (ev) => !localPlaceholderOf(ev) && ev.event_id === targetEventId,
+      );
       if (prevIdx !== -1 && targetIdx !== -1 && prevIdx >= targetIdx) {
         return;
       }
@@ -1900,6 +1914,9 @@ export function TopicsWorkspace({
     void client
       .advanceReadPosition(roomId, targetEventId)
       .then((changed) => {
+        if (lastRequestedReadRef.current[roomId] === targetEventId) {
+          delete lastRequestedReadRef.current[roomId];
+        }
         if (!changed || !mountedRef.current) {
           return;
         }

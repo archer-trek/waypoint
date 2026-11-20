@@ -1917,4 +1917,348 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
       if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
     }
   });
+
+  test("narrow viewport: viewing unread topics to the bottom clears unread indicator immediately upon header back, edge swipe, and system back (#122)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-next" } };
+      }
+      if (input.method === "POST" && input.url.includes("/read_markers")) {
+        readMarkerPosts.push({ url: input.url, body: input.body });
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!general:example.com": makeStoredRoom({
+          name: "general",
+          readPositionEventId: "$g1",
+          messages: [
+            makeTextEvent("$g1", "@bot:example.com", "已读消息", clock.now - 40_000),
+            makeTextEvent("$g2", "@bot:example.com", "第一条未读", clock.now - 30_000),
+            makeTextEvent("$g3", "@bot:example.com", "第二条未读", clock.now - 20_000),
+            makeTextEvent("$g4", "@bot:example.com", "最后一条未读", clock.now - 10_000),
+          ],
+        }),
+        "!stock:example.com": makeStoredRoom({
+          name: "stock",
+          readPositionEventId: "$s1",
+          messages: [
+            makeTextEvent("$s1", "@bot:example.com", "stock 已读", clock.now - 30_000),
+            makeTextEvent("$s2", "@bot:example.com", "stock 未读 1", clock.now - 20_000),
+            makeTextEvent("$s3", "@bot:example.com", "stock 未读 2", clock.now - 10_000),
+          ],
+        }),
+        "!sys:example.com": makeStoredRoom({
+          name: "sys",
+          readPositionEventId: "$y1",
+          messages: [
+            makeTextEvent("$y1", "@bot:example.com", "sys 已读", clock.now - 20_000),
+            makeTextEvent("$y2", "@bot:example.com", "sys 未读", clock.now - 10_000),
+          ],
+        }),
+      },
+    });
+
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const offsetHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+    const offsetTopDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop");
+
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 200;
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          return this.querySelectorAll("[data-event-id]").length * 100;
+        }
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get() {
+        if (this.dataset?.eventId) return 100;
+        return offsetHeightDesc?.get ? offsetHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetTop", {
+      configurable: true,
+      get() {
+        if (this.dataset?.eventId && this.parentElement) {
+          const rows = Array.from(this.parentElement.querySelectorAll("[data-event-id]"));
+          const idx = rows.indexOf(this);
+          if (idx >= 0) return idx * 100;
+        }
+        return offsetTopDesc?.get ? offsetTopDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+        />,
+      );
+
+      const generalRow = screen.getByRole("button", { name: /general/ });
+      expect(generalRow).toHaveAttribute("data-unread", "true");
+      expect(generalRow.querySelector(".waypoint-unread-dot")).not.toBeNull();
+      expect(generalRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "700" });
+
+      // 1. Open general, scroll to bottom, then tap header back button
+      await user.click(generalRow);
+      const timeline = screen.getByRole("log", { name: "对话时间线" });
+      await act(async () => {
+        timeline.scrollTop = 200;
+        fireEvent.scroll(timeline);
+      });
+      await user.click(screen.getByRole("button", { name: "返回" }));
+
+      const generalAfterBack = await screen.findByRole("button", { name: /general/ });
+      expect(generalAfterBack).not.toHaveAttribute("data-unread", "true");
+      expect(generalAfterBack.querySelector(".waypoint-unread-dot")).toBeNull();
+      expect(generalAfterBack.querySelector(".waypoint-topic-name")).not.toHaveClass("unread");
+      expect(generalAfterBack.querySelector(".waypoint-topic-name")).toHaveStyle({
+        fontWeight: "500",
+      });
+
+      // 2. Open stock, scroll to bottom, then exit via left-edge swipe back
+      await user.click(screen.getByRole("button", { name: /stock/ }));
+      const stockTimeline = screen.getByRole("log", { name: "对话时间线" });
+      await act(async () => {
+        stockTimeline.scrollTop = 100;
+        fireEvent.scroll(stockTimeline);
+      });
+      const detail = document.querySelector(".waypoint-detail") as HTMLElement;
+      fireEvent.touchStart(detail, { touches: [{ clientX: 10, clientY: 200 }] });
+      fireEvent.touchMove(detail, { touches: [{ clientX: 120, clientY: 202 }] });
+      fireEvent.touchEnd(detail);
+
+      const stockAfterSwipe = await screen.findByRole("button", { name: /stock/ });
+      expect(stockAfterSwipe).not.toHaveAttribute("data-unread", "true");
+      expect(stockAfterSwipe.querySelector(".waypoint-unread-dot")).toBeNull();
+
+      // 3. Open sys, view messages, then exit via Android system back
+      await user.click(screen.getByRole("button", { name: /sys/ }));
+      await act(async () => {
+        harness.triggerSystemBack();
+      });
+
+      const sysAfterSystemBack = await screen.findByRole("button", { name: /sys/ });
+      expect(sysAfterSystemBack).not.toHaveAttribute("data-unread", "true");
+      expect(sysAfterSystemBack.querySelector(".waypoint-unread-dot")).toBeNull();
+
+      // Verify read markers reached the server and sync keeps read state
+      await waitFor(() => {
+        expect(readMarkerPosts).toContainEqual({
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!general%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$g4", "m.read.private": "$g4" },
+        });
+        expect(readMarkerPosts).toContainEqual({
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!stock%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$s3", "m.read.private": "$s3" },
+        });
+        expect(readMarkerPosts).toContainEqual({
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!sys%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$y2", "m.read.private": "$y2" },
+        });
+      });
+
+      await advanceWhenTimerScheduled(clock, 1000);
+      expect(screen.getByRole("button", { name: /general/ })).not.toHaveAttribute(
+        "data-unread",
+        "true",
+      );
+      view.unmount();
+    } finally {
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+      if (offsetHeightDesc) Object.defineProperty(HTMLElement.prototype, "offsetHeight", offsetHeightDesc);
+      if (offsetTopDesc) Object.defineProperty(HTMLElement.prototype, "offsetTop", offsetTopDesc);
+    }
+  });
+
+  test("narrow viewport: rapid back before async advanceReadPosition finishes and retry after false/rejected result do not leave topic unread (#122)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-retry" } };
+      }
+      if (input.method === "POST" && input.url.includes("/read_markers")) {
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!race:example.com": makeStoredRoom({
+          name: "竞态话题",
+          readPositionEventId: "$r1",
+          messages: [
+            makeTextEvent("$r1", "@bot:example.com", "已读", clock.now - 30_000),
+            makeTextEvent("$r2", "@bot:example.com", "未读一", clock.now - 20_000),
+            makeTextEvent("$r3", "@bot:example.com", "未读二", clock.now - 10_000),
+          ],
+        }),
+      },
+    });
+
+    const origAdvance = client.advanceReadPosition.bind(client);
+    const firstGate = deferred<boolean>();
+    let callCount = 0;
+    const advanceSpy = vi
+      .spyOn(client, "advanceReadPosition")
+      .mockImplementation(async (roomId, eventId) => {
+        callCount += 1;
+        if (callCount === 1) {
+          // Simulate initial transient false return without committing read position
+          return await firstGate.promise;
+        }
+        return await origAdvance(roomId, eventId);
+      });
+
+    const harness = makePlatformHarness("narrow");
+    const view = render(
+      <TopicsWorkspace
+        client={client}
+        clock={clock}
+        platform={harness.platform}
+        viewportMode="narrow"
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /竞态话题/ });
+    expect(row).toHaveAttribute("data-unread", "true");
+
+    // Enter topic: first advanceReadPosition is pending and will resolve false
+    await user.click(row);
+    await act(async () => {
+      firstGate.resolve(false);
+    });
+
+    // Go back: lastRequestedReadRef must NOT be poisoned by false; leaveActiveTopic retries and updates in-memory read position before SidebarView mounts
+    await user.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(advanceSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const rowAfterBack = await screen.findByRole("button", { name: /竞态话题/ });
+    expect(rowAfterBack).not.toHaveAttribute("data-unread", "true");
+    expect(rowAfterBack.querySelector(".waypoint-unread-dot")).toBeNull();
+
+    view.unmount();
+  });
+
+  test("bottom-most message is marked visible and read when timeline is scrolled to physical bottom despite subpixel rect boundary (#122)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    const readMarkerPosts: Array<{ url: string; body: unknown }> = [];
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-subpixel" } };
+      }
+      if (input.method === "POST" && input.url.includes("/read_markers")) {
+        readMarkerPosts.push({ url: input.url, body: input.body });
+        return { type: "response", status: 200, body: {} };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!subpixel:example.com": makeStoredRoom({
+          name: "底部边界话题",
+          readPositionEventId: "$b1",
+          messages: [
+            makeTextEvent("$b1", "@bot:example.com", "旧消息", clock.now - 20_000),
+            makeTextEvent("$b2", "@bot:example.com", "最新消息", clock.now - 10_000),
+          ],
+        }),
+      },
+    });
+
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    const getBcrSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      if (this.classList?.contains("waypoint-timeline")) {
+        return { top: 100, bottom: 300, left: 0, right: 360, width: 360, height: 200, x: 0, y: 100, toJSON: () => ({}) } as DOMRect;
+      }
+      if (this.dataset?.eventId === "$b1") {
+        return { top: 120, bottom: 220, left: 0, right: 360, width: 360, height: 100, x: 0, y: 120, toJSON: () => ({}) } as DOMRect;
+      }
+      if (this.dataset?.eventId === "$b2") {
+        // Simulate subpixel boundary where rect.top equals containerRect.bottom at physical bottom
+        return { top: 300, bottom: 301, left: 0, right: 360, width: 360, height: 1, x: 0, y: 300, toJSON: () => ({}) } as DOMRect;
+      }
+      return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    });
+
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 200;
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 201;
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const harness = makePlatformHarness("narrow");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="narrow"
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: /底部边界话题/ }));
+      await user.click(screen.getByRole("button", { name: "返回" }));
+
+      const rowAfterBack = await screen.findByRole("button", { name: /底部边界话题/ });
+      expect(rowAfterBack).not.toHaveAttribute("data-unread", "true");
+      await waitFor(() => {
+        expect(readMarkerPosts).toContainEqual({
+          url: "https://matrix.example.com/_matrix/client/v3/rooms/!subpixel%3Aexample.com/read_markers",
+          body: { "m.fully_read": "$b2", "m.read.private": "$b2" },
+        });
+      });
+      view.unmount();
+    } finally {
+      getBcrSpy.mockRestore();
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    }
+  });
 });
