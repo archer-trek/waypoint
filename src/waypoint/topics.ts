@@ -24,6 +24,7 @@ export type TopicSummary = {
   unread: boolean;
   firstUnreadEventId?: string;
   readPositionUnknown: boolean;
+  needsReadGapBackfill?: boolean;
   responding: boolean;
   sendStatus?: "unconfirmed" | "failed";
   unavailable: boolean;
@@ -487,6 +488,7 @@ export function deriveTopics(
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
+      needsReadGapBackfill: unreadState.readPositionUnknown || hasLimitedGapAfterReadPosition(room),
       responding,
       ...(sendStatus ? { sendStatus } : {}),
       unavailable: availability.unavailable,

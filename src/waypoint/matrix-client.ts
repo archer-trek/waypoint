@@ -1391,10 +1391,26 @@ export function nextBackfillTargetForReadPosition(
   if (!room || !room.readPositionEventId) {
     return undefined;
   }
-  if (timelineIndexOf(room.timelineEvents, room.readPositionEventId) !== -1) {
+  const gaps = roomTimelineGaps(room);
+  const readIdx = timelineIndexOf(room.timelineEvents, room.readPositionEventId);
+  if (readIdx !== -1) {
+    for (let i = gaps.length - 1; i >= 0; i -= 1) {
+      const gap = gaps[i];
+      if (!gap.limited || !gap.prevBatch) {
+        continue;
+      }
+      if (gap.pendingGapAtEnd) {
+        return { fromToken: gap.prevBatch, gapIndex: i };
+      }
+      if (gap.gapBeforeEventId) {
+        const gapIdx = timelineIndexOf(room.timelineEvents, gap.gapBeforeEventId);
+        if (gapIdx > readIdx) {
+          return { fromToken: gap.prevBatch, gapIndex: i };
+        }
+      }
+    }
     return undefined;
   }
-  const gaps = roomTimelineGaps(room);
   for (let i = gaps.length - 1; i >= 0; i -= 1) {
     const gap = gaps[i];
     if (gap.prevBatch) {
@@ -1631,10 +1647,12 @@ function mergeSyncRooms(
         isPlainObject(roomSync.timeline) && Array.isArray(roomSync.timeline.events)
           ? roomSync.timeline.events.filter(isPlainObject)
           : [];
-      const rawTimeline = rawTimelineAll.slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM);
-      const isLimited =
-        (isPlainObject(roomSync.timeline) && roomSync.timeline.limited === true) ||
-        rawTimelineAll.length > MAX_SYNC_TIMELINE_EVENTS_PER_ROOM;
+      const serverLimited =
+        isPlainObject(roomSync.timeline) && roomSync.timeline.limited === true;
+      const rawTimeline = serverLimited
+        ? rawTimelineAll.slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM)
+        : rawTimelineAll;
+      const isLimited = serverLimited;
       const prevBatch =
         isPlainObject(roomSync.timeline) &&
         typeof roomSync.timeline.prev_batch === "string" &&
@@ -2553,9 +2571,11 @@ function reconcilePendingWithSync(
         Array.isArray(roomSync.timeline.events)
       ) {
         const txnIds = new Set<string>();
-        const events = roomSync.timeline.events
-          .filter(isPlainObject)
-          .slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM);
+        const serverLimited = roomSync.timeline.limited === true;
+        const rawEvents = roomSync.timeline.events.filter(isPlainObject);
+        const events = serverLimited
+          ? rawEvents.slice(-MAX_SYNC_TIMELINE_EVENTS_PER_ROOM)
+          : rawEvents;
         for (const event of events) {
           const txnId = transactionIdOf(event);
           if (txnId) {

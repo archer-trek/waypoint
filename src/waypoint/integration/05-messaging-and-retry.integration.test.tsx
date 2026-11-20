@@ -3197,6 +3197,13 @@ test("多个中间limited缺口均不在后台补完且绝不越过缺口标为�
           },
         };
       }
+      if (from === "pb-g-mid-2") {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "temporary gap fetch failure" },
+        };
+      }
       throw new Error(`不应请求：${input.url}`);
     }
     if (input.method === "POST" && input.url.includes("/read_markers")) {
@@ -3221,10 +3228,15 @@ test("多个中间limited缺口均不在后台补完且绝不越过缺口标为�
     // 同步里记下的 limited 缺口不在后台补完
     expect(messagesRequests).toEqual([]);
 
-    // 1. 打开多缺口话题：$g1 在本地 -> 不请求 /messages；滚动到底部时也只能推进到 $g2，不能越过第一处缺口到 $g11 或 $g21
+    // 1. 打开多缺口话题：$g1 在本地且后续有未补缺口 -> 触发补页尝试，补页失败时绝不越过缺口（只能推进到 $g2）
 
     await user.click(multiGapRow);
-    expect(messagesRequests).toEqual([]);
+    await waitFor(() => {
+      expect(messagesRequests).toEqual([
+        "https://matrix.example.com/_matrix/client/v3/rooms/!multi-gap%3Aexample.com/messages?dir=b&limit=50&from=pb-g-mid-2",
+      ]);
+    });
+    messagesRequests.length = 0;
     const tl1 = screen.getByRole("log", { name: "对话时间线" });
     await act(async () => {
       tl1.scrollTop = 400;
