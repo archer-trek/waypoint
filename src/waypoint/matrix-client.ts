@@ -2127,7 +2127,7 @@ function extractPrivateReadEventIds(
   return ids;
 }
 
-function timelineIndexOf(timeline: RawMatrixEvent[], eventId: string | undefined): number {
+export function timelineIndexOf(timeline: RawMatrixEvent[], eventId: string | undefined): number {
   if (!eventId) {
     return -1;
   }
