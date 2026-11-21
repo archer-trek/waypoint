@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">"Waypoint"</string>
-    <string name="main_activity_title">"Waypoint"</string>
+    <string name="app_name">Waypoint</string>
+    <string name="main_activity_title">Waypoint</string>
 </resources>

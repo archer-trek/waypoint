@@ -1,52 +1,204 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+mod media;
+
+use media::{MEDIA_CACHE_TTL, normalize_media_mime_type, prepare_media_cache_file};
+#[cfg(not(target_os = "android"))]
+use media::media_cache_dir;
+use std::time::SystemTime;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_opener::OpenerExt;
 
-static NEXT_MEDIA_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+#[cfg(target_os = "android")]
+mod android_bridge {
+    use jni::objects::{JObject, JString, JValue};
+    use std::path::PathBuf;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
-fn sanitize_media_filename(raw: &str) -> String {
-    let tail = raw.rsplit(['/', '\\']).next().unwrap_or("");
-    let cleaned: String = tail
-        .chars()
-        .map(|ch| {
-            if ch == '\0' || ch == ':' || ch.is_control() {
-                '_'
-            } else {
-                ch
-            }
-        })
-        .collect();
-    let without_traversal = cleaned.replace("..", "_");
-    let trimmed = without_traversal.trim_matches(|ch: char| ch == '.' || ch.is_whitespace());
-    if trimmed.is_empty() {
-        "attachment".to_string()
-    } else {
-        trimmed.to_string()
+    const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    fn take_jni_error(env: &mut jni::JNIEnv<'_>, fallback: &str) -> String {
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
+        fallback.to_string()
+    }
+
+    pub fn query_media_cache_dir(window: &tauri::WebviewWindow) -> Result<PathBuf, String> {
+        let (tx, rx) = mpsc::channel();
+        window
+            .with_webview(move |webview| {
+                webview.jni_handle().exec(move |env, activity, _webview| {
+                    let result = (|| -> Result<PathBuf, String> {
+                        let value = env
+                            .call_method(
+                                activity,
+                                "getMediaCacheDirPath",
+                                "()Ljava/lang/String;",
+                                &[],
+                            )
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        let obj: JObject<'_> = value
+                            .l()
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        if obj.is_null() {
+                            return Err("Android cache directory is unavailable".to_string());
+                        }
+                        let jstr = JString::from(obj);
+                        let raw: String = env
+                            .get_string(&jstr)
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?
+                            .into();
+                        Ok(PathBuf::from(raw))
+                    })();
+                    let _ = tx.send(result);
+                });
+            })
+            .map_err(|err| err.to_string())?;
+        rx.recv_timeout(BRIDGE_TIMEOUT)
+            .map_err(|_| "Timed out resolving Android cache directory".to_string())?
+    }
+
+    pub fn open_media_file(
+        window: &tauri::WebviewWindow,
+        file_path: &str,
+        mime_type: &str,
+    ) -> Result<(), String> {
+        let path_owned = file_path.to_string();
+        let mime_owned = mime_type.to_string();
+        let (tx, rx) = mpsc::channel();
+        window
+            .with_webview(move |webview| {
+                webview.jni_handle().exec(move |env, activity, _webview| {
+                    let result = (|| -> Result<(), String> {
+                        let jpath = env
+                            .new_string(&path_owned)
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        let jmime = env
+                            .new_string(&mime_owned)
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        let value = env
+                            .call_method(
+                                activity,
+                                "openMediaFile",
+                                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                                &[JValue::Object(&jpath), JValue::Object(&jmime)],
+                            )
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        let obj: JObject<'_> = value
+                            .l()
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                        if obj.is_null() {
+                            return Ok(());
+                        }
+                        let jstr = JString::from(obj);
+                        let error_msg: String = env
+                            .get_string(&jstr)
+                            .map_err(|err| take_jni_error(env, &err.to_string()))?
+                            .into();
+                        if error_msg.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(error_msg)
+                        }
+                    })();
+                    let _ = tx.send(result);
+                });
+            })
+            .map_err(|err| err.to_string())?;
+        rx.recv_timeout(BRIDGE_TIMEOUT)
+            .map_err(|_| "Timed out opening media file on Android".to_string())?
+    }
+
+    pub fn set_system_appearance(
+        window: &tauri::WebviewWindow,
+        appearance: &str,
+    ) -> Result<(), String> {
+        let appearance_owned = appearance.to_string();
+        window
+            .with_webview(move |webview| {
+                webview.jni_handle().exec(move |env, activity, _webview| {
+                    if let Ok(jappearance) = env.new_string(&appearance_owned) {
+                        let _ = env.call_method(
+                            activity,
+                            "setSystemAppearance",
+                            "(Ljava/lang/String;)V",
+                            &[JValue::Object(&jappearance)],
+                        );
+                    }
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_clear();
+                    }
+                });
+            })
+            .map_err(|err| err.to_string())
     }
 }
 
 #[tauri::command]
-fn open_media_file(app: tauri::AppHandle, bytes: Vec<u8>, filename: String) -> Result<(), String> {
-    let safe_name = sanitize_media_filename(&filename);
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let seq = NEXT_MEDIA_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("waypoint-{ts}-{seq}-{safe_name}"));
-    std::fs::write(&path, &bytes).map_err(|err| err.to_string())?;
-    app.opener()
-        .open_path(path.to_string_lossy().to_string(), None::<&str>)
-        .map_err(|err| err.to_string())
+fn open_media_file(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    bytes: Vec<u8>,
+    filename: String,
+    mime_type: Option<String>,
+) -> Result<(), String> {
+    let normalized_mime = normalize_media_mime_type(mime_type.as_deref(), &filename);
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
+        let cache_dir = android_bridge::query_media_cache_dir(&window)?;
+        let path = prepare_media_cache_file(
+            &cache_dir,
+            &filename,
+            &bytes,
+            SystemTime::now(),
+            MEDIA_CACHE_TTL,
+        )?;
+        let path_str = path.to_string_lossy().to_string();
+        android_bridge::open_media_file(&window, &path_str, &normalized_mime)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (window, normalized_mime);
+        let cache_dir = media_cache_dir(&std::env::temp_dir());
+        let path = prepare_media_cache_file(
+            &cache_dir,
+            &filename,
+            &bytes,
+            SystemTime::now(),
+            MEDIA_CACHE_TTL,
+        )?;
+        app.opener()
+            .open_path(path.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[tauri::command]
+fn sync_system_appearance(window: tauri::WebviewWindow, appearance: String) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        android_bridge::set_system_appearance(&window, &appearance)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (window, appearance);
+        Ok(())
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![open_media_file])
+        .invoke_handler(tauri::generate_handler![
+            open_media_file,
+            sync_system_appearance
+        ])
         .on_window_event(|window, event| {
             #[cfg(target_os = "macos")]
             if window.label() == "main" {

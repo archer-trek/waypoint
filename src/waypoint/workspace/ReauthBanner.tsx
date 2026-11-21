@@ -166,6 +166,7 @@ export function ReauthBanner({
             <Input
               id="reauth-address"
               name="reauth-address"
+              autoComplete="url"
               value={address}
               readOnly
               disabled
@@ -177,6 +178,7 @@ export function ReauthBanner({
             <Input
               id="reauth-user-id"
               name="reauth-user-id"
+              autoComplete="username"
               value={ownerId}
               readOnly
               disabled
@@ -189,6 +191,7 @@ export function ReauthBanner({
               id="reauth-password"
               name="reauth-password"
               type="password"
+              autoComplete="current-password"
               value={reauthPassword}
               disabled={busy}
               onChange={(event) => onReauthPasswordChange(event.target.value)}

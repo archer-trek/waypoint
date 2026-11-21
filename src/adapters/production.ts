@@ -10,6 +10,23 @@ type VirtualKeyboardLike = EventTarget & {
   boundingRect?: { height?: number };
 };
 
+export type WaypointAndroidBridge = {
+  setSystemBackEnabled?: (enabled: boolean) => void;
+  setSystemAppearance?: (appearance: string) => void;
+};
+
+type WaypointWindow = Window & {
+  WaypointAndroid?: WaypointAndroidBridge;
+  __waypointHandleSystemBack?: () => boolean;
+};
+
+function getAndroidBridge(): WaypointAndroidBridge | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  return (window as WaypointWindow).WaypointAndroid;
+}
+
 export const systemClock: Clock = {
   setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
   clearTimeout: (id) => window.clearTimeout(id),
@@ -262,6 +279,9 @@ export function detectPlatform(): PlatformAdapter {
     subscribeKeyboardInsetBottom,
     pushNavigationEntry() {
       navDepth += 1;
+      if (typeof getAndroidBridge()?.setSystemBackEnabled === "function") {
+        return;
+      }
       if (hasSystemBackListener && queuedBacks > 0) {
         queuedBacks -= 1;
         suppressedPopCount = Math.max(0, suppressedPopCount - 1);
@@ -280,6 +300,9 @@ export function detectPlatform(): PlatformAdapter {
         return;
       }
       navDepth -= 1;
+      if (typeof getAndroidBridge()?.setSystemBackEnabled === "function") {
+        return;
+      }
       if (hasSystemBackListener && queuedPushes > 0) {
         queuedPushes -= 1;
         return;
@@ -296,11 +319,21 @@ export function detectPlatform(): PlatformAdapter {
         window.history.back();
       }
     },
+    setSystemBackEnabled(enabled: boolean) {
+      try {
+        getAndroidBridge()?.setSystemBackEnabled?.(enabled);
+      } catch {
+        /* ignore */
+      }
+    },
     onSystemBack(handler) {
       if (typeof window === "undefined") {
         return () => undefined;
       }
       hasSystemBackListener = true;
+      const win = window as WaypointWindow;
+      const nativeHandler = () => handler();
+      win.__waypointHandleSystemBack = nativeHandler;
       const handlePopState = () => {
         backInFlight = false;
         if (suppressedPopCount > 0) {
@@ -330,6 +363,9 @@ export function detectPlatform(): PlatformAdapter {
       window.addEventListener("popstate", handlePopState);
       return () => {
         window.removeEventListener("popstate", handlePopState);
+        if (win.__waypointHandleSystemBack === nativeHandler) {
+          delete win.__waypointHandleSystemBack;
+        }
         hasSystemBackListener = false;
         backInFlight = false;
         queuedBacks = 0;
@@ -369,6 +405,7 @@ export function detectPlatform(): PlatformAdapter {
         await invoke("open_media_file", {
           bytes: Array.from(bytes),
           filename,
+          mimeType,
         });
         return;
       }

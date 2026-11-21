@@ -2135,12 +2135,15 @@ test("点击重新验证仅输入密码并携带原 device id，成功后保留�
   const addressInput = within(reauthForm).getByLabelText("Homeserver 地址");
   const userIdInput = within(reauthForm).getByLabelText("用户 ID");
   expect(addressInput).toHaveValue("https://matrix.example.com");
+  expect(addressInput).toHaveAttribute("autocomplete", "url");
   expect(addressInput).toBeDisabled();
   expect(userIdInput).toHaveValue("@alice:example.com");
+  expect(userIdInput).toHaveAttribute("autocomplete", "username");
   expect(userIdInput).toBeDisabled();
   expect(within(reauthForm).queryByRole("button", { name: "更改地址" })).not.toBeInTheDocument();
 
   const passwordInput = within(reauthForm).getByLabelText("密码");
+  expect(passwordInput).toHaveAttribute("autocomplete", "current-password");
   expect(passwordInput).toHaveValue("");
   await user.type(passwordInput, "secret");
   await user.click(within(reauthForm).getByRole("button", { name: "确认验证" }));

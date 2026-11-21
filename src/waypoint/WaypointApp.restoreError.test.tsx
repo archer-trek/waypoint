@@ -153,4 +153,49 @@ describe("WaypointApp startup restore() error recovery UI", () => {
     });
     view.unmount();
   });
+
+  test("system back dismisses reset confirmation dialog on restore-error and yields to OS when closed (#139)", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(MatrixClient.prototype, "restore").mockRejectedValue(
+      new DOMException("Corrupt store", "DataError"),
+    );
+
+    let backHandler: (() => boolean) | undefined;
+    const setSystemBackEnabled = vi.fn();
+    const view = render(
+      <WaypointApp
+        homeserver={makeTransport()}
+        platform={{
+          ...makePlatform(),
+          viewportMode: () => "narrow",
+          onSystemBack: (handler) => {
+            backHandler = handler;
+            return () => {
+              backHandler = undefined;
+            };
+          },
+          setSystemBackEnabled,
+        }}
+        clock={new ManualClock()}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "本地数据读取异常" })).toBeInTheDocument();
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(false);
+    expect(backHandler?.()).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "重置本地数据并重新连接" }));
+    expect(await screen.findByRole("alertdialog", { name: "重置本地数据并重新连接" })).toBeInTheDocument();
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(true);
+
+    act(() => {
+      expect(backHandler?.()).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("alertdialog", { name: "重置本地数据并重新连接" })).not.toBeInTheDocument();
+    });
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(false);
+    expect(backHandler?.()).toBe(false);
+    view.unmount();
+  });
 });

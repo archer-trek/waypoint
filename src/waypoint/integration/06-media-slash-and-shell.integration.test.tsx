@@ -3133,6 +3133,12 @@ test("图片缩在气泡宽度内认证下载、音视频当文件、http(s)不�
     filename: "demo.mp4",
   });
 
+  openMediaFile.mockRejectedValueOnce(new Error("NO_VIEWER_APP"));
+  await user.click(within(timeline).getByRole("button", { name: "spec.pdf" }));
+  expect(
+    await screen.findByText("未找到可打开该附件的应用，请先安装对应的查看器后再试。"),
+  ).toBeInTheDocument();
+
   // 5. 下载下来的媒体文件不写入 IndexedDB；重启后需要重新认证下载
   app1.unmount();
   const countBeforeRestart = downloadReqs.length;
@@ -3837,6 +3843,7 @@ test("Tauri 环境下外链打开失败绝不静默回退到 window.open，且�
     expect(invokeSpy).toHaveBeenLastCalledWith("open_media_file", {
       bytes: [1, 2, 3],
       filename: "report.pdf",
+      mimeType: "application/pdf",
     });
     expect(openSpy).not.toHaveBeenCalled();
 
