@@ -7,6 +7,12 @@ export type StoredTimelineGap = {
   pendingGapAtEnd?: true;
 };
 
+export type ColdUnreadState = {
+  unread: boolean;
+  firstUnreadEventId?: string;
+  readPositionUnknown: boolean;
+};
+
 export type StoredRoomMeta = {
   stateEvents: RawMatrixEvent[];
   timelineGap?: StoredTimelineGap;
@@ -19,10 +25,44 @@ export type StoredRoomMeta = {
   tags?: Record<string, unknown>;
   encryptedIrreversible?: true;
   inviteFailed?: true;
+  lastActivityTs?: number;
+  chunkMinSeq?: number;
+  chunkMaxSeq?: number;
+  placeholderChunkSeqs?: number[];
+  readPositionInLocal?: boolean;
 };
 
 export type StoredRoomEvents = StoredRoomMeta & {
   timelineEvents: RawMatrixEvent[];
+  hasOlderLocalChunks?: boolean;
+  coldUnreadState?: ColdUnreadState;
+};
+
+export type TimelineChunkRecord = {
+  roomId: string;
+  seq: number;
+  events: RawMatrixEvent[];
+};
+
+export type ChunkWriteOp = {
+  roomId: string;
+  putChunks?: TimelineChunkRecord[];
+  deleteChunkSeqs?: number[];
+};
+
+export type StartupRoomTimeline = {
+  hotChunks: TimelineChunkRecord[];
+  coldPlaceholders: Array<{ seq: number; event: RawMatrixEvent }>;
+  hasOlderLocalChunks: boolean;
+};
+
+export type StartupSnapshot = {
+  meta?: SessionMeta;
+  rooms: Record<string, StoredRoomMeta>;
+  roomTimelines: Record<string, StartupRoomTimeline>;
+  drafts: Record<string, DraftRecord>;
+  pendingEvents: PendingRoomEvent[];
+  pendingReadMarkers: PendingReadMarker[];
 };
 
 export type AttachmentMeta = {
@@ -96,11 +136,13 @@ export type V2Snapshot = {
 };
 
 export const DB_NAME = "waypoint";
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const LEGACY_STORE = "records";
+export const LEGACY_TIMELINES_STORE = "timelines";
 export const META_STORE = "meta";
 export const ROOMS_STORE = "rooms";
-export const TIMELINES_STORE = "timelines";
+export const TIMELINE_CHUNKS_STORE = "timeline_chunks";
+export const TIMELINE_CHUNK_SIZE = 50;
 export const DRAFTS_STORE = "drafts";
 export const PENDING_EVENTS_STORE = "pending_events";
 export const PENDING_READ_MARKERS_STORE = "pending_read_markers";
@@ -110,14 +152,14 @@ const SESSION_KEY = "session";
 
 const ALL_DOMAIN_STORES = [
   ROOMS_STORE,
-  TIMELINES_STORE,
+  TIMELINE_CHUNKS_STORE,
   DRAFTS_STORE,
   PENDING_EVENTS_STORE,
   PENDING_READ_MARKERS_STORE,
   BLOBS_STORE,
 ] as const;
 
-const ALL_V2_STORES = [META_STORE, ...ALL_DOMAIN_STORES] as const;
+const ALL_V3_STORES = [META_STORE, ...ALL_DOMAIN_STORES] as const;
 
 const dbPromiseByFactory = new WeakMap<IDBFactory, Promise<IDBDatabase>>();
 const openDbByFactory = new WeakMap<IDBFactory, IDBDatabase>();
@@ -150,13 +192,84 @@ export function isQuotaExceededError(error: unknown): boolean {
   return false;
 }
 
-export async function loadV2Snapshot(): Promise<V2Snapshot> {
+export function splitTimelineEventsIntoChunks(
+  roomId: string,
+  events: RawMatrixEvent[],
+  chunkSize = TIMELINE_CHUNK_SIZE,
+): TimelineChunkRecord[] {
+  if (events.length === 0) {
+    return [];
+  }
+  const slices: RawMatrixEvent[][] = [];
+  for (let end = events.length; end > 0; end -= chunkSize) {
+    const start = Math.max(0, end - chunkSize);
+    slices.push(events.slice(start, end));
+  }
+  slices.reverse();
+  return slices.map((chunkEvents, seq) => ({
+    roomId,
+    seq,
+    events: chunkEvents,
+  }));
+}
+
+export function computeLastActivityTs(events: RawMatrixEvent[]): number | undefined {
+  const redactedIds = new Set<string>();
+  for (const event of events) {
+    if (event.type === "m.room.redaction") {
+      const target =
+        typeof event.redacts === "string" && event.redacts !== ""
+          ? event.redacts
+          : isPlainObject(event.content) &&
+              typeof event.content.redacts === "string" &&
+              event.content.redacts !== ""
+            ? event.content.redacts
+            : undefined;
+      if (target) {
+        redactedIds.add(target);
+      }
+    }
+    if (isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because)) {
+      if (typeof event.event_id === "string" && event.event_id !== "") {
+        redactedIds.add(event.event_id);
+      }
+    }
+  }
+  let maxTs: number | undefined;
+  for (const event of events) {
+    if (typeof event.state_key === "string" || isPlainObject(event.waypoint_local)) {
+      continue;
+    }
+    if (
+      (typeof event.event_id === "string" && redactedIds.has(event.event_id)) ||
+      (isPlainObject(event.unsigned) && isPlainObject(event.unsigned.redacted_because))
+    ) {
+      continue;
+    }
+    if (event.type !== "m.room.message") {
+      continue;
+    }
+    if (isPlainObject(event.content)) {
+      const rel = event.content["m.relates_to"];
+      if (isPlainObject(rel) && rel.rel_type === "m.replace") {
+        continue;
+      }
+    }
+    const ts = event.origin_server_ts;
+    if (typeof ts === "number" && Number.isFinite(ts)) {
+      maxTs = maxTs !== undefined ? Math.max(maxTs, ts) : ts;
+    }
+  }
+  return maxTs;
+}
+
+export async function loadStartupSnapshot(): Promise<StartupSnapshot> {
   return withDb(async (db) => {
     const tx = db.transaction(
       [
         META_STORE,
         ROOMS_STORE,
-        TIMELINES_STORE,
+        TIMELINE_CHUNKS_STORE,
         DRAFTS_STORE,
         PENDING_EVENTS_STORE,
         PENDING_READ_MARKERS_STORE,
@@ -165,17 +278,13 @@ export async function loadV2Snapshot(): Promise<V2Snapshot> {
     );
     const metaReq = tx.objectStore(META_STORE).get(SESSION_KEY);
     const roomsPromise = readAllKeyedEntries<StoredRoomMeta>(tx.objectStore(ROOMS_STORE));
-    const timelinesPromise = readAllKeyedEntries<{ timelineEvents?: RawMatrixEvent[] } | RawMatrixEvent[]>(
-      tx.objectStore(TIMELINES_STORE),
-    );
     const draftsPromise = readAllKeyedEntries<DraftRecord>(tx.objectStore(DRAFTS_STORE));
     const pendingReq = tx.objectStore(PENDING_EVENTS_STORE).getAll();
     const markersReq = tx.objectStore(PENDING_READ_MARKERS_STORE).getAll();
 
-    const [rawMeta, rawRooms, rawTimelines, rawDrafts, rawPending, rawMarkers] = await Promise.all([
+    const [rawMeta, rawRooms, rawDrafts, rawPending, rawMarkers] = await Promise.all([
       requestToPromise(metaReq),
       roomsPromise,
-      timelinesPromise,
       draftsPromise,
       requestToPromise(pendingReq),
       requestToPromise(markersReq),
@@ -188,16 +297,229 @@ export async function loadV2Snapshot(): Promise<V2Snapshot> {
         rooms[roomId] = normalizeStoredRoomMeta(value);
       }
     }
-    const timelines: Record<string, RawMatrixEvent[]> = {};
-    for (const [roomId, value] of rawTimelines) {
-      if (!roomId) {
+
+    const chunksStore = tx.objectStore(TIMELINE_CHUNKS_STORE);
+    const roomTimelines: Record<string, StartupRoomTimeline> = {};
+
+    await Promise.all(
+      Object.entries(rooms).map(async ([roomId, roomMeta]) => {
+        if (roomMeta.chunkMaxSeq === undefined && roomMeta.chunkMinSeq === undefined) {
+          // Check if any chunks exist even if chunk bounds weren't persisted
+          const hot = await readHotChunksForRoom(chunksStore, roomId, roomMeta);
+          if (hot.hotChunks.length > 0 || hot.coldPlaceholders.length > 0) {
+            roomTimelines[roomId] = hot;
+          } else {
+            roomTimelines[roomId] = {
+              hotChunks: [],
+              coldPlaceholders: [],
+              hasOlderLocalChunks: false,
+            };
+          }
+          return;
+        }
+        roomTimelines[roomId] = await readHotChunksForRoom(chunksStore, roomId, roomMeta);
+      }),
+    );
+
+    const drafts: Record<string, DraftRecord> = {};
+    for (const [roomId, value] of rawDrafts) {
+      if (!roomId || !isPlainObject(value)) {
         continue;
       }
-      if (Array.isArray(value)) {
-        timelines[roomId] = value.filter(isPlainObject);
-      } else if (isPlainObject(value) && Array.isArray(value.timelineEvents)) {
-        timelines[roomId] = value.timelineEvents.filter(isPlainObject);
+      const normalized = normalizeStoredDraft(value);
+      if (normalized) {
+        drafts[roomId] = normalized;
       }
+    }
+    const pendingEvents = sortPendingEvents(
+      Array.isArray(rawPending)
+        ? rawPending
+            .map((item) => normalizeStoredPendingEvent(item))
+            .filter((item): item is PendingRoomEvent => item !== undefined)
+        : [],
+    );
+    const pendingReadMarkers = Array.isArray(rawMarkers)
+      ? rawMarkers
+          .filter(
+            (item): item is PendingReadMarker =>
+              isPlainObject(item) &&
+              typeof item.roomId === "string" &&
+              item.roomId !== "" &&
+              typeof item.eventId === "string" &&
+              item.eventId !== "",
+          )
+          .map((item) => ({ roomId: item.roomId, eventId: item.eventId }))
+      : [];
+
+    return {
+      ...(meta ? { meta } : {}),
+      rooms,
+      roomTimelines,
+      drafts,
+      pendingEvents,
+      pendingReadMarkers,
+    };
+  });
+}
+
+export async function loadTimelineChunk(
+  roomId: string,
+  seq: number,
+): Promise<TimelineChunkRecord | undefined> {
+  return withDb(async (db) => {
+    const tx = db.transaction(TIMELINE_CHUNKS_STORE, "readonly");
+    const raw = await requestToPromise(tx.objectStore(TIMELINE_CHUNKS_STORE).get([roomId, seq]));
+    return normalizeTimelineChunkRecord(raw);
+  });
+}
+
+export async function loadTimelineChunksBefore(
+  roomId: string,
+  beforeSeq: number,
+  limitChunks = 1,
+): Promise<TimelineChunkRecord[]> {
+  if (limitChunks <= 0) {
+    return [];
+  }
+  return withDb(async (db) => {
+    const tx = db.transaction(TIMELINE_CHUNKS_STORE, "readonly");
+    const store = tx.objectStore(TIMELINE_CHUNKS_STORE);
+    const range = globalThis.IDBKeyRange.bound(
+      [roomId, -Infinity],
+      [roomId, beforeSeq],
+      false,
+      true,
+    );
+    return new Promise<TimelineChunkRecord[]>((resolve, reject) => {
+      const collected: TimelineChunkRecord[] = [];
+      const req = store.openCursor(range, "prev");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve(collected.reverse());
+          return;
+        }
+        const parsed = normalizeTimelineChunkRecord(cursor.value);
+        if (parsed) {
+          collected.push(parsed);
+        }
+        if (collected.length >= limitChunks) {
+          resolve(collected.reverse());
+          return;
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error ?? new Error("IndexedDB chunk cursor failed"));
+    });
+  });
+}
+
+export async function loadAllRoomTimelineChunks(roomId: string): Promise<TimelineChunkRecord[]> {
+  return withDb(async (db) => {
+    const tx = db.transaction(TIMELINE_CHUNKS_STORE, "readonly");
+    const store = tx.objectStore(TIMELINE_CHUNKS_STORE);
+    const range = globalThis.IDBKeyRange.bound([roomId, -Infinity], [roomId, Infinity]);
+    const raw = await requestToPromise(store.getAll(range));
+    const chunks: TimelineChunkRecord[] = [];
+    if (Array.isArray(raw)) {
+      for (const item of raw) {
+        const parsed = normalizeTimelineChunkRecord(item);
+        if (parsed) {
+          chunks.push(parsed);
+        }
+      }
+    }
+    chunks.sort((a, b) => a.seq - b.seq);
+    return chunks;
+  });
+}
+
+export async function scanRoomChunksBackward(
+  roomId: string,
+  beforeSeq: number | undefined,
+  visitor: (chunk: TimelineChunkRecord) => "continue" | "stop",
+): Promise<void> {
+  await withDb(async (db) => {
+    const tx = db.transaction(TIMELINE_CHUNKS_STORE, "readonly");
+    const store = tx.objectStore(TIMELINE_CHUNKS_STORE);
+    const range =
+      beforeSeq !== undefined
+        ? globalThis.IDBKeyRange.bound([roomId, -Infinity], [roomId, beforeSeq], false, true)
+        : globalThis.IDBKeyRange.bound([roomId, -Infinity], [roomId, Infinity]);
+    await new Promise<void>((resolve, reject) => {
+      const req = store.openCursor(range, "prev");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) {
+          resolve();
+          return;
+        }
+        const parsed = normalizeTimelineChunkRecord(cursor.value);
+        if (parsed) {
+          const decision = visitor(parsed);
+          if (decision === "stop") {
+            resolve();
+            return;
+          }
+        }
+        cursor.continue();
+      };
+      req.onerror = () => reject(req.error ?? new Error("IndexedDB scan cursor failed"));
+    });
+  });
+}
+
+export async function loadV2Snapshot(): Promise<V2Snapshot> {
+  return withDb(async (db) => {
+    const tx = db.transaction(
+      [
+        META_STORE,
+        ROOMS_STORE,
+        TIMELINE_CHUNKS_STORE,
+        DRAFTS_STORE,
+        PENDING_EVENTS_STORE,
+        PENDING_READ_MARKERS_STORE,
+      ],
+      "readonly",
+    );
+    const metaReq = tx.objectStore(META_STORE).get(SESSION_KEY);
+    const roomsPromise = readAllKeyedEntries<StoredRoomMeta>(tx.objectStore(ROOMS_STORE));
+    const chunksReq = tx.objectStore(TIMELINE_CHUNKS_STORE).getAll();
+    const draftsPromise = readAllKeyedEntries<DraftRecord>(tx.objectStore(DRAFTS_STORE));
+    const pendingReq = tx.objectStore(PENDING_EVENTS_STORE).getAll();
+    const markersReq = tx.objectStore(PENDING_READ_MARKERS_STORE).getAll();
+
+    const [rawMeta, rawRooms, rawChunks, rawDrafts, rawPending, rawMarkers] = await Promise.all([
+      requestToPromise(metaReq),
+      roomsPromise,
+      requestToPromise(chunksReq),
+      draftsPromise,
+      requestToPromise(pendingReq),
+      requestToPromise(markersReq),
+    ]);
+
+    const meta = normalizeSessionMeta(rawMeta);
+    const rooms: Record<string, StoredRoomMeta> = {};
+    for (const [roomId, value] of rawRooms) {
+      if (roomId && isPlainObject(value)) {
+        rooms[roomId] = normalizeStoredRoomMeta(value);
+      }
+    }
+    const chunksByRoom = new Map<string, TimelineChunkRecord[]>();
+    if (Array.isArray(rawChunks)) {
+      for (const rawChunk of rawChunks) {
+        const chunk = normalizeTimelineChunkRecord(rawChunk);
+        if (chunk) {
+          const list = chunksByRoom.get(chunk.roomId) ?? [];
+          list.push(chunk);
+          chunksByRoom.set(chunk.roomId, list);
+        }
+      }
+    }
+    const timelines: Record<string, RawMatrixEvent[]> = {};
+    for (const [roomId, chunks] of chunksByRoom.entries()) {
+      chunks.sort((a, b) => a.seq - b.seq);
+      timelines[roomId] = chunks.flatMap((c) => c.events);
     }
     const drafts: Record<string, DraftRecord> = {};
     for (const [roomId, value] of rawDrafts) {
@@ -281,7 +603,7 @@ export async function saveMeta(meta: SessionMeta): Promise<void> {
 export async function saveRoomMeta(roomId: string, roomMeta: StoredRoomMeta): Promise<void> {
   await withDb(async (db) => {
     const tx = db.transaction(ROOMS_STORE, "readwrite");
-    tx.objectStore(ROOMS_STORE).put(roomMeta, roomId);
+    tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(roomMeta), roomId);
     await transactionDone(tx);
   });
 }
@@ -293,7 +615,7 @@ export async function saveRoomMetaAndReadMarker(
 ): Promise<void> {
   await withDb(async (db) => {
     const tx = db.transaction([ROOMS_STORE, PENDING_READ_MARKERS_STORE], "readwrite");
-    tx.objectStore(ROOMS_STORE).put(roomMeta, roomId);
+    tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(roomMeta), roomId);
     tx.objectStore(PENDING_READ_MARKERS_STORE).put({
       roomId: readMarker.roomId,
       eventId: readMarker.eventId,
@@ -320,7 +642,7 @@ export async function saveReadMarkerConfirmation(input: {
   await withDb(async (db) => {
     const tx = db.transaction(stores, "readwrite");
     if (input.roomMeta) {
-      tx.objectStore(ROOMS_STORE).put(input.roomMeta, input.roomId);
+      tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(input.roomMeta), input.roomId);
     }
     if (input.deletePendingMarker) {
       tx.objectStore(PENDING_READ_MARKERS_STORE).delete(input.roomId);
@@ -332,12 +654,16 @@ export async function saveReadMarkerConfirmation(input: {
 export async function saveRoomAndTimeline(
   roomId: string,
   roomMeta: StoredRoomMeta,
-  timelineEvents: RawMatrixEvent[],
+  chunkWrite: ChunkWriteOp,
 ): Promise<void> {
+  const hasChunks = hasChunkWriteOps(chunkWrite);
+  const stores = hasChunks ? [ROOMS_STORE, TIMELINE_CHUNKS_STORE] : [ROOMS_STORE];
   await withDb(async (db) => {
-    const tx = db.transaction([ROOMS_STORE, TIMELINES_STORE], "readwrite");
-    tx.objectStore(ROOMS_STORE).put(roomMeta, roomId);
-    tx.objectStore(TIMELINES_STORE).put({ timelineEvents }, roomId);
+    const tx = db.transaction(stores, "readwrite");
+    tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(roomMeta), roomId);
+    if (hasChunks) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [chunkWrite]);
+    }
     await transactionDone(tx);
   });
 }
@@ -385,7 +711,7 @@ export async function saveEnqueuedEvent(input: {
   pendingEvent: PendingRoomEvent;
   roomId: string;
   roomMeta?: StoredRoomMeta;
-  timelineEvents?: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
   clearDraft?: boolean;
   putBlob?: BlobRecord;
   deleteBlobIds?: string[];
@@ -394,8 +720,9 @@ export async function saveEnqueuedEvent(input: {
   if (input.roomMeta) {
     stores.push(ROOMS_STORE);
   }
-  if (input.timelineEvents) {
-    stores.push(TIMELINES_STORE);
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
   }
   if (input.clearDraft) {
     stores.push(DRAFTS_STORE);
@@ -416,10 +743,10 @@ export async function saveEnqueuedEvent(input: {
     }
     tx.objectStore(PENDING_EVENTS_STORE).put(cleanStoredPendingEvent(input.pendingEvent));
     if (input.roomMeta) {
-      tx.objectStore(ROOMS_STORE).put(input.roomMeta, input.roomId);
+      tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(input.roomMeta), input.roomId);
     }
-    if (input.timelineEvents) {
-      tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
     }
     if (input.clearDraft) {
       tx.objectStore(DRAFTS_STORE).delete(input.roomId);
@@ -445,15 +772,15 @@ export async function replacePendingEvent(
 
 export async function saveUploadedMediaUrl(input: {
   pendingEvent?: PendingRoomEvent;
-  roomId: string;
-  timelineEvents?: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
 }): Promise<void> {
   const stores: string[] = [];
   if (input.pendingEvent) {
     stores.push(PENDING_EVENTS_STORE);
   }
-  if (input.timelineEvents) {
-    stores.push(TIMELINES_STORE);
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
   }
   if (stores.length === 0) {
     return;
@@ -463,8 +790,8 @@ export async function saveUploadedMediaUrl(input: {
     if (input.pendingEvent) {
       tx.objectStore(PENDING_EVENTS_STORE).put(cleanStoredPendingEvent(input.pendingEvent));
     }
-    if (input.timelineEvents) {
-      tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
     }
     await transactionDone(tx);
   });
@@ -473,11 +800,15 @@ export async function saveUploadedMediaUrl(input: {
 export async function saveConfirmedEvent(input: {
   roomId: string;
   txnId: string;
-  timelineEvents: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
   roomMeta?: StoredRoomMeta;
   deleteBlobIds?: string[];
 }): Promise<void> {
-  const stores: string[] = [PENDING_EVENTS_STORE, TIMELINES_STORE];
+  const stores: string[] = [PENDING_EVENTS_STORE];
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
+  }
   if (input.roomMeta) {
     stores.push(ROOMS_STORE);
   }
@@ -487,9 +818,11 @@ export async function saveConfirmedEvent(input: {
   await withDb(async (db) => {
     const tx = db.transaction(stores, "readwrite");
     tx.objectStore(PENDING_EVENTS_STORE).delete(input.txnId);
-    tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
+    }
     if (input.roomMeta) {
-      tx.objectStore(ROOMS_STORE).put(input.roomMeta, input.roomId);
+      tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(input.roomMeta), input.roomId);
     }
     if (input.deleteBlobIds && input.deleteBlobIds.length > 0) {
       const blobs = tx.objectStore(BLOBS_STORE);
@@ -504,49 +837,74 @@ export async function saveConfirmedEvent(input: {
 export async function saveFailedEvent(input: {
   roomId: string;
   txnId: string;
-  timelineEvents: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
   roomMeta?: StoredRoomMeta;
 }): Promise<void> {
-  const stores: string[] = [PENDING_EVENTS_STORE, TIMELINES_STORE];
+  const stores: string[] = [PENDING_EVENTS_STORE];
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
+  }
   if (input.roomMeta) {
     stores.push(ROOMS_STORE);
   }
   await withDb(async (db) => {
     const tx = db.transaction(stores, "readwrite");
     tx.objectStore(PENDING_EVENTS_STORE).delete(input.txnId);
-    tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
+    }
     if (input.roomMeta) {
-      tx.objectStore(ROOMS_STORE).put(input.roomMeta, input.roomId);
+      tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(input.roomMeta), input.roomId);
     }
     await transactionDone(tx);
   });
 }
 
 export async function saveResendEvent(input: {
-  roomId: string;
   pendingEvent: PendingRoomEvent;
-  timelineEvents: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
 }): Promise<void> {
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  const stores = hasChunks ? [PENDING_EVENTS_STORE, TIMELINE_CHUNKS_STORE] : [PENDING_EVENTS_STORE];
   await withDb(async (db) => {
-    const tx = db.transaction([PENDING_EVENTS_STORE, TIMELINES_STORE], "readwrite");
+    const tx = db.transaction(stores, "readwrite");
     tx.objectStore(PENDING_EVENTS_STORE).put(cleanStoredPendingEvent(input.pendingEvent));
-    tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
+    }
     await transactionDone(tx);
   });
 }
 
 export async function saveDiscardFailedEvent(input: {
   roomId: string;
-  timelineEvents: RawMatrixEvent[];
+  chunkWrite?: ChunkWriteOp;
+  roomMeta?: StoredRoomMeta;
   deleteBlobIds?: string[];
 }): Promise<void> {
-  const stores: string[] = [TIMELINES_STORE];
+  const stores: string[] = [];
+  const hasChunks = input.chunkWrite ? hasChunkWriteOps(input.chunkWrite) : false;
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
+  }
+  if (input.roomMeta) {
+    stores.push(ROOMS_STORE);
+  }
   if (input.deleteBlobIds && input.deleteBlobIds.length > 0) {
     stores.push(BLOBS_STORE);
   }
+  if (stores.length === 0) {
+    return;
+  }
   await withDb(async (db) => {
     const tx = db.transaction(stores, "readwrite");
-    tx.objectStore(TIMELINES_STORE).put({ timelineEvents: input.timelineEvents }, input.roomId);
+    if (hasChunks && input.chunkWrite) {
+      applyChunkWritesInTx(tx.objectStore(TIMELINE_CHUNKS_STORE), [input.chunkWrite]);
+    }
+    if (input.roomMeta) {
+      tx.objectStore(ROOMS_STORE).put(cleanStoredRoomMeta(input.roomMeta), input.roomId);
+    }
     if (input.deleteBlobIds && input.deleteBlobIds.length > 0) {
       const blobs = tx.objectStore(BLOBS_STORE);
       for (const blobId of input.deleteBlobIds) {
@@ -564,7 +922,7 @@ export async function saveLeftRoomRemoval(input: {
 }): Promise<void> {
   const stores: string[] = [
     ROOMS_STORE,
-    TIMELINES_STORE,
+    TIMELINE_CHUNKS_STORE,
     DRAFTS_STORE,
     PENDING_EVENTS_STORE,
     PENDING_READ_MARKERS_STORE,
@@ -575,7 +933,9 @@ export async function saveLeftRoomRemoval(input: {
   await withDb(async (db) => {
     const tx = db.transaction(stores, "readwrite");
     tx.objectStore(ROOMS_STORE).delete(input.roomId);
-    tx.objectStore(TIMELINES_STORE).delete(input.roomId);
+    tx.objectStore(TIMELINE_CHUNKS_STORE).delete(
+      globalThis.IDBKeyRange.bound([input.roomId, -Infinity], [input.roomId, Infinity]),
+    );
     tx.objectStore(DRAFTS_STORE).delete(input.roomId);
     tx.objectStore(PENDING_READ_MARKERS_STORE).delete(input.roomId);
     const pendingStore = tx.objectStore(PENDING_EVENTS_STORE);
@@ -596,12 +956,14 @@ export async function saveSyncBatch(input: {
   meta?: SessionMeta;
   putRooms: Array<[string, StoredRoomMeta]>;
   deleteRoomIds: string[];
-  putTimelines: Array<[string, RawMatrixEvent[]]>;
+  chunkWrites: ChunkWriteOp[];
   deletePendingTxnIds: string[];
   deleteReadMarkerRoomIds: string[];
   deleteDraftRoomIds: string[];
   deleteBlobIds: string[];
 }): Promise<void> {
+  const hasChunks =
+    input.chunkWrites.some(hasChunkWriteOps) || input.deleteRoomIds.length > 0;
   const stores: string[] = [];
   if (input.meta) {
     stores.push(META_STORE);
@@ -609,8 +971,8 @@ export async function saveSyncBatch(input: {
   if (input.putRooms.length > 0 || input.deleteRoomIds.length > 0) {
     stores.push(ROOMS_STORE);
   }
-  if (input.putTimelines.length > 0 || input.deleteRoomIds.length > 0) {
-    stores.push(TIMELINES_STORE);
+  if (hasChunks) {
+    stores.push(TIMELINE_CHUNKS_STORE);
   }
   if (input.deletePendingTxnIds.length > 0) {
     stores.push(PENDING_EVENTS_STORE);
@@ -635,19 +997,17 @@ export async function saveSyncBatch(input: {
     if (input.putRooms.length > 0 || input.deleteRoomIds.length > 0) {
       const rooms = tx.objectStore(ROOMS_STORE);
       for (const [roomId, roomMeta] of input.putRooms) {
-        rooms.put(roomMeta, roomId);
+        rooms.put(cleanStoredRoomMeta(roomMeta), roomId);
       }
       for (const roomId of input.deleteRoomIds) {
         rooms.delete(roomId);
       }
     }
-    if (input.putTimelines.length > 0 || input.deleteRoomIds.length > 0) {
-      const timelines = tx.objectStore(TIMELINES_STORE);
-      for (const [roomId, timelineEvents] of input.putTimelines) {
-        timelines.put({ timelineEvents }, roomId);
-      }
+    if (hasChunks) {
+      const chunksStore = tx.objectStore(TIMELINE_CHUNKS_STORE);
+      applyChunkWritesInTx(chunksStore, input.chunkWrites);
       for (const roomId of input.deleteRoomIds) {
-        timelines.delete(roomId);
+        chunksStore.delete(globalThis.IDBKeyRange.bound([roomId, -Infinity], [roomId, Infinity]));
       }
     }
     if (input.deletePendingTxnIds.length > 0) {
@@ -680,7 +1040,7 @@ export async function saveSyncBatch(input: {
 
 export async function resetSessionStores(meta: SessionMeta): Promise<void> {
   await withDb(async (db) => {
-    const tx = db.transaction([...ALL_V2_STORES], "readwrite");
+    const tx = db.transaction([...ALL_V3_STORES], "readwrite");
     for (const storeName of ALL_DOMAIN_STORES) {
       tx.objectStore(storeName).clear();
     }
@@ -711,7 +1071,7 @@ export async function dropCredential(): Promise<void> {
 
 export async function dropPreListSession(): Promise<void> {
   await withDb(async (db) => {
-    const tx = db.transaction([...ALL_V2_STORES], "readwrite");
+    const tx = db.transaction([...ALL_V3_STORES], "readwrite");
     const metaStore = tx.objectStore(META_STORE);
     const current = normalizeSessionMeta(await requestToPromise(metaStore.get(SESSION_KEY)));
     for (const storeName of ALL_DOMAIN_STORES) {
@@ -754,22 +1114,20 @@ export async function deleteLocalDatabase(timeoutMs = 5000): Promise<void> {
 
 export async function loadSession(): Promise<SessionRecord | undefined> {
   return withDb(async (db) => {
-    const tx = db.transaction([...ALL_V2_STORES], "readonly");
+    const tx = db.transaction([...ALL_V3_STORES], "readonly");
     const metaReq = tx.objectStore(META_STORE).get(SESSION_KEY);
     const roomsPromise = readAllKeyedEntries<StoredRoomMeta>(tx.objectStore(ROOMS_STORE));
-    const timelinesPromise = readAllKeyedEntries<{ timelineEvents?: RawMatrixEvent[] } | RawMatrixEvent[]>(
-      tx.objectStore(TIMELINES_STORE),
-    );
+    const chunksReq = tx.objectStore(TIMELINE_CHUNKS_STORE).getAll();
     const draftsPromise = readAllKeyedEntries<DraftRecord>(tx.objectStore(DRAFTS_STORE));
     const pendingReq = tx.objectStore(PENDING_EVENTS_STORE).getAll();
     const markersReq = tx.objectStore(PENDING_READ_MARKERS_STORE).getAll();
     const blobsReq = tx.objectStore(BLOBS_STORE).getAll();
 
-    const [rawMeta, rawRooms, rawTimelines, rawDrafts, rawPending, rawMarkers, rawBlobs] =
+    const [rawMeta, rawRooms, rawChunks, rawDrafts, rawPending, rawMarkers, rawBlobs] =
       await Promise.all([
         requestToPromise(metaReq),
         roomsPromise,
-        timelinesPromise,
+        requestToPromise(chunksReq),
         draftsPromise,
         requestToPromise(pendingReq),
         requestToPromise(markersReq),
@@ -791,16 +1149,22 @@ export async function loadSession(): Promise<SessionRecord | undefined> {
       }
     }
 
-    const timelineMap = new Map<string, RawMatrixEvent[]>();
-    for (const [roomId, value] of rawTimelines) {
-      if (!roomId) {
-        continue;
+    const chunksByRoom = new Map<string, TimelineChunkRecord[]>();
+    if (Array.isArray(rawChunks)) {
+      for (const rawChunk of rawChunks) {
+        const chunk = normalizeTimelineChunkRecord(rawChunk);
+        if (chunk) {
+          const list = chunksByRoom.get(chunk.roomId) ?? [];
+          list.push(chunk);
+          chunksByRoom.set(chunk.roomId, list);
+        }
       }
-      const events = Array.isArray(value)
-        ? value.filter(isPlainObject)
-        : isPlainObject(value) && Array.isArray(value.timelineEvents)
-          ? value.timelineEvents.filter(isPlainObject)
-          : [];
+    }
+
+    const timelineMap = new Map<string, RawMatrixEvent[]>();
+    for (const [roomId, chunks] of chunksByRoom.entries()) {
+      chunks.sort((a, b) => a.seq - b.seq);
+      const events = chunks.flatMap((c) => c.events);
       timelineMap.set(roomId, events.map((ev) => hydrateTimelinePlaceholder(ev, blobById)));
     }
 
@@ -904,11 +1268,11 @@ export async function loadSession(): Promise<SessionRecord | undefined> {
 
 export async function saveSession(session: SessionRecord): Promise<void> {
   await withDb(async (db) => {
-    const tx = db.transaction([...ALL_V2_STORES], "readwrite");
-    for (const storeName of ALL_V2_STORES) {
+    const tx = db.transaction([...ALL_V3_STORES], "readwrite");
+    for (const storeName of ALL_V3_STORES) {
       tx.objectStore(storeName).clear();
     }
-    writeSessionIntoV2Transaction(tx, session);
+    writeSessionIntoV3Transaction(tx, session);
     await transactionDone(tx);
   });
 }
@@ -998,6 +1362,14 @@ function getDb(factory: IDBFactory): Promise<IDBDatabase> {
   return promise;
 }
 
+function abortTxQuietly(tx: IDBTransaction): void {
+  try {
+    tx.abort();
+  } catch {
+    // ignore abort error
+  }
+}
+
 function openDbInternal(factory: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = factory.open(DB_NAME, DB_VERSION);
@@ -1008,15 +1380,18 @@ function openDbInternal(factory: IDBFactory): Promise<IDBDatabase> {
         return;
       }
 
-      const ensureV2Stores = () => {
+      const ensureV3Stores = () => {
         if (!db.objectStoreNames.contains(META_STORE)) {
           db.createObjectStore(META_STORE);
         }
         if (!db.objectStoreNames.contains(ROOMS_STORE)) {
           db.createObjectStore(ROOMS_STORE);
         }
-        if (!db.objectStoreNames.contains(TIMELINES_STORE)) {
-          db.createObjectStore(TIMELINES_STORE);
+        if (!db.objectStoreNames.contains(TIMELINE_CHUNKS_STORE)) {
+          const chunksStore = db.createObjectStore(TIMELINE_CHUNKS_STORE, {
+            keyPath: ["roomId", "seq"],
+          });
+          chunksStore.createIndex("roomId", "roomId", { unique: false });
         }
         if (!db.objectStoreNames.contains(DRAFTS_STORE)) {
           db.createObjectStore(DRAFTS_STORE);
@@ -1037,44 +1412,117 @@ function openDbInternal(factory: IDBFactory): Promise<IDBDatabase> {
         }
       };
 
-      if (event.oldVersion < 1 || !db.objectStoreNames.contains(LEGACY_STORE)) {
-        ensureV2Stores();
+      if (event.oldVersion < 1) {
+        ensureV3Stores();
         return;
       }
 
-      try {
-        ensureV2Stores();
-        const legacyStore = tx.objectStore(LEGACY_STORE);
-        const getReq = legacyStore.get(SESSION_KEY);
-        getReq.onsuccess = () => {
-          try {
-            const rawSession = getReq.result;
-            if (isPlainObject(rawSession)) {
-              writeSessionIntoV2Transaction(tx, rawSession as SessionRecord);
-            }
-            if (db.objectStoreNames.contains(LEGACY_STORE)) {
-              db.deleteObjectStore(LEGACY_STORE);
-            }
-          } catch {
-            try {
-              tx.abort();
-            } catch {
-              // ignore abort error
-            }
-          }
-        };
-        getReq.onerror = () => {
-          try {
-            tx.abort();
-          } catch {
-            // ignore abort error
-          }
-        };
-      } catch {
+      if (event.oldVersion === 1 && db.objectStoreNames.contains(LEGACY_STORE)) {
         try {
-          tx.abort();
+          ensureV3Stores();
+          const legacyStore = tx.objectStore(LEGACY_STORE);
+          const getReq = legacyStore.get(SESSION_KEY);
+          getReq.onsuccess = () => {
+            try {
+              const rawSession = getReq.result;
+              if (isPlainObject(rawSession)) {
+                writeSessionIntoV3Transaction(tx, rawSession as SessionRecord);
+              }
+              if (db.objectStoreNames.contains(LEGACY_STORE)) {
+                db.deleteObjectStore(LEGACY_STORE);
+              }
+              if (db.objectStoreNames.contains(LEGACY_TIMELINES_STORE)) {
+                db.deleteObjectStore(LEGACY_TIMELINES_STORE);
+              }
+            } catch {
+              abortTxQuietly(tx);
+            }
+          };
+          getReq.onerror = () => abortTxQuietly(tx);
         } catch {
-          // ignore abort error
+          abortTxQuietly(tx);
+        }
+        return;
+      }
+
+      if (event.oldVersion < 3) {
+        try {
+          ensureV3Stores();
+          if (!db.objectStoreNames.contains(LEGACY_TIMELINES_STORE)) {
+            return;
+          }
+          const roomsStore = tx.objectStore(ROOMS_STORE);
+          const legacyTimelinesStore = tx.objectStore(LEGACY_TIMELINES_STORE);
+          const chunksStore = tx.objectStore(TIMELINE_CHUNKS_STORE);
+
+          const roomsById = new Map<string, Record<string, unknown>>();
+          const timelinesById = new Map<string, RawMatrixEvent[]>();
+          let remaining = 2;
+
+          const finishV2ToV3 = () => {
+            remaining -= 1;
+            if (remaining > 0) {
+              return;
+            }
+            try {
+              const allRoomIds = new Set<string>([
+                ...roomsById.keys(),
+                ...timelinesById.keys(),
+              ]);
+              for (const roomId of allRoomIds) {
+                const rawRoom = roomsById.get(roomId) ?? {};
+                const events = timelinesById.get(roomId) ?? [];
+                const chunks = splitTimelineEventsIntoChunks(roomId, events);
+                for (const chunk of chunks) {
+                  chunksStore.put(chunk);
+                }
+                const normalizedMeta = normalizeStoredRoomMeta(rawRoom);
+                const enrichedMeta = enrichRoomMetaFromEvents(normalizedMeta, chunks, events);
+                roomsStore.put(cleanStoredRoomMeta(enrichedMeta), roomId);
+              }
+              if (db.objectStoreNames.contains(LEGACY_TIMELINES_STORE)) {
+                db.deleteObjectStore(LEGACY_TIMELINES_STORE);
+              }
+            } catch {
+              abortTxQuietly(tx);
+            }
+          };
+
+          const roomsCursor = roomsStore.openCursor();
+          roomsCursor.onsuccess = () => {
+            const cursor = roomsCursor.result;
+            if (!cursor) {
+              finishV2ToV3();
+              return;
+            }
+            if (typeof cursor.key === "string" && isPlainObject(cursor.value)) {
+              roomsById.set(cursor.key, cursor.value);
+            }
+            cursor.continue();
+          };
+          roomsCursor.onerror = () => abortTxQuietly(tx);
+
+          const timelinesCursor = legacyTimelinesStore.openCursor();
+          timelinesCursor.onsuccess = () => {
+            const cursor = timelinesCursor.result;
+            if (!cursor) {
+              finishV2ToV3();
+              return;
+            }
+            if (typeof cursor.key === "string") {
+              const val = cursor.value;
+              const evs = Array.isArray(val)
+                ? val.filter(isPlainObject)
+                : isPlainObject(val) && Array.isArray(val.timelineEvents)
+                  ? val.timelineEvents.filter(isPlainObject)
+                  : [];
+              timelinesById.set(cursor.key, evs);
+            }
+            cursor.continue();
+          };
+          timelinesCursor.onerror = () => abortTxQuietly(tx);
+        } catch {
+          abortTxQuietly(tx);
         }
       }
     };
@@ -1083,10 +1531,39 @@ function openDbInternal(factory: IDBFactory): Promise<IDBDatabase> {
   });
 }
 
-function writeSessionIntoV2Transaction(tx: IDBTransaction, rawSession: SessionRecord): void {
+function enrichRoomMetaFromEvents(
+  roomMeta: StoredRoomMeta,
+  chunks: TimelineChunkRecord[],
+  allEvents: RawMatrixEvent[],
+): StoredRoomMeta {
+  const lastActivityTs = computeLastActivityTs(allEvents) ?? roomMeta.lastActivityTs;
+  const placeholderChunkSeqs = chunks
+    .filter((c) => c.events.some((ev) => isPlainObject(ev.waypoint_local)))
+    .map((c) => c.seq);
+  const chunkMinSeq = chunks.length > 0 ? chunks[0]!.seq : undefined;
+  const chunkMaxSeq = chunks.length > 0 ? chunks[chunks.length - 1]!.seq : undefined;
+  const readPositionInLocal: boolean | undefined =
+    roomMeta.readPositionEventId !== undefined
+      ? allEvents.some(
+          (ev) => !isPlainObject(ev.waypoint_local) && ev.event_id === roomMeta.readPositionEventId,
+        )
+      : undefined;
+  const { readPositionInLocal: _ignoredReadLocal, ...baseMeta } = roomMeta;
+  void _ignoredReadLocal;
+  return {
+    ...baseMeta,
+    ...(lastActivityTs !== undefined ? { lastActivityTs } : {}),
+    ...(chunkMinSeq !== undefined ? { chunkMinSeq } : {}),
+    ...(chunkMaxSeq !== undefined ? { chunkMaxSeq } : {}),
+    ...(placeholderChunkSeqs.length > 0 ? { placeholderChunkSeqs } : {}),
+    ...(readPositionInLocal !== undefined ? { readPositionInLocal } : {}),
+  };
+}
+
+function writeSessionIntoV3Transaction(tx: IDBTransaction, rawSession: SessionRecord): void {
   const metaStore = tx.objectStore(META_STORE);
   const roomsStore = tx.objectStore(ROOMS_STORE);
-  const timelinesStore = tx.objectStore(TIMELINES_STORE);
+  const chunksStore = tx.objectStore(TIMELINE_CHUNKS_STORE);
   const draftsStore = tx.objectStore(DRAFTS_STORE);
   const pendingStore = tx.objectStore(PENDING_EVENTS_STORE);
   const markersStore = tx.objectStore(PENDING_READ_MARKERS_STORE);
@@ -1146,7 +1623,6 @@ function writeSessionIntoV2Transaction(tx: IDBTransaction, rawSession: SessionRe
         continue;
       }
       const roomMeta = normalizeStoredRoomMeta(roomValue);
-      roomsStore.put(roomMeta, roomId);
       const rawTimeline = Array.isArray(roomValue.timelineEvents)
         ? roomValue.timelineEvents.filter(isPlainObject)
         : [];
@@ -1175,7 +1651,12 @@ function writeSessionIntoV2Transaction(tx: IDBTransaction, rawSession: SessionRe
           waypoint_local: nextLocal,
         };
       });
-      timelinesStore.put({ timelineEvents: nextTimeline }, roomId);
+      const chunks = splitTimelineEventsIntoChunks(roomId, nextTimeline);
+      for (const chunk of chunks) {
+        chunksStore.put(chunk);
+      }
+      const enrichedMeta = enrichRoomMetaFromEvents(roomMeta, chunks, nextTimeline);
+      roomsStore.put(cleanStoredRoomMeta(enrichedMeta), roomId);
     }
   }
 
@@ -1268,6 +1749,128 @@ function writeSessionIntoV2Transaction(tx: IDBTransaction, rawSession: SessionRe
       markersStore.put({ roomId, eventId });
     }
   }
+}
+
+async function readHotChunksForRoom(
+  chunksStore: IDBObjectStore,
+  roomId: string,
+  roomMeta: StoredRoomMeta,
+): Promise<StartupRoomTimeline> {
+  const range = globalThis.IDBKeyRange.bound([roomId, -Infinity], [roomId, Infinity]);
+  const { hotChunksDesc, hasMoreInCursor } = await new Promise<{
+    hotChunksDesc: TimelineChunkRecord[];
+    hasMoreInCursor: boolean;
+  }>((resolve, reject) => {
+    const chunks: TimelineChunkRecord[] = [];
+    let confirmedCount = 0;
+    let peekingMore = false;
+    const req = chunksStore.openCursor(range, "prev");
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) {
+        resolve({ hotChunksDesc: chunks, hasMoreInCursor: false });
+        return;
+      }
+      if (peekingMore) {
+        resolve({ hotChunksDesc: chunks, hasMoreInCursor: true });
+        return;
+      }
+      const parsed = normalizeTimelineChunkRecord(cursor.value);
+      if (parsed) {
+        chunks.push(parsed);
+        for (const ev of parsed.events) {
+          if (!isPlainObject(ev.waypoint_local)) {
+            confirmedCount += 1;
+          }
+        }
+      }
+      if (confirmedCount >= TIMELINE_CHUNK_SIZE) {
+        if (roomMeta.chunkMinSeq !== undefined && parsed) {
+          resolve({
+            hotChunksDesc: chunks,
+            hasMoreInCursor: parsed.seq > roomMeta.chunkMinSeq,
+          });
+          return;
+        }
+        peekingMore = true;
+      }
+      cursor.continue();
+    };
+    req.onerror = () => reject(req.error ?? new Error("IndexedDB hot cursor failed"));
+  });
+
+  const hotChunks = [...hotChunksDesc].reverse();
+  const minHotSeq = hotChunks.length > 0 ? hotChunks[0]!.seq : undefined;
+
+  const coldPlaceholders: Array<{ seq: number; event: RawMatrixEvent }> = [];
+  if (minHotSeq !== undefined && roomMeta.placeholderChunkSeqs && roomMeta.placeholderChunkSeqs.length > 0) {
+    const coldSeqs = roomMeta.placeholderChunkSeqs.filter((seq) => seq < minHotSeq);
+    if (coldSeqs.length > 0) {
+      const fetched = await Promise.all(
+        coldSeqs.map(async (seq) => {
+          const raw = await requestToPromise(chunksStore.get([roomId, seq]));
+          return normalizeTimelineChunkRecord(raw);
+        }),
+      );
+      for (const chunk of fetched) {
+        if (!chunk) {
+          continue;
+        }
+        for (const ev of chunk.events) {
+          if (isPlainObject(ev.waypoint_local)) {
+            coldPlaceholders.push({ seq: chunk.seq, event: ev });
+          }
+        }
+      }
+      coldPlaceholders.sort((a, b) => a.seq - b.seq);
+    }
+  }
+
+  return {
+    hotChunks,
+    coldPlaceholders,
+    hasOlderLocalChunks: hasMoreInCursor,
+  };
+}
+
+function hasChunkWriteOps(op: ChunkWriteOp): boolean {
+  return Boolean(
+    (op.putChunks && op.putChunks.length > 0) ||
+      (op.deleteChunkSeqs && op.deleteChunkSeqs.length > 0),
+  );
+}
+
+function applyChunkWritesInTx(chunksStore: IDBObjectStore, ops: ChunkWriteOp[]): void {
+  for (const op of ops) {
+    for (const seq of op.deleteChunkSeqs ?? []) {
+      chunksStore.delete([op.roomId, seq]);
+    }
+    for (const chunk of op.putChunks ?? []) {
+      chunksStore.put({
+        roomId: op.roomId,
+        seq: chunk.seq,
+        events: chunk.events,
+      });
+    }
+  }
+}
+
+function normalizeTimelineChunkRecord(raw: unknown): TimelineChunkRecord | undefined {
+  if (
+    !isPlainObject(raw) ||
+    typeof raw.roomId !== "string" ||
+    raw.roomId === "" ||
+    typeof raw.seq !== "number" ||
+    !Number.isFinite(raw.seq) ||
+    !Array.isArray(raw.events)
+  ) {
+    return undefined;
+  }
+  return {
+    roomId: raw.roomId,
+    seq: raw.seq,
+    events: raw.events.filter(isPlainObject),
+  };
 }
 
 function hydrateTimelinePlaceholder(
@@ -1414,6 +2017,19 @@ function cleanSessionMeta(meta: SessionMeta): SessionMeta {
   };
 }
 
+function cleanStoredRoomMeta(meta: StoredRoomMeta): StoredRoomMeta {
+  const {
+    timelineEvents: _ignoredEvents,
+    hasOlderLocalChunks: _ignoredHasOlder,
+    coldUnreadState: _ignoredColdUnread,
+    ...rest
+  } = meta as StoredRoomEvents;
+  void _ignoredEvents;
+  void _ignoredHasOlder;
+  void _ignoredColdUnread;
+  return rest;
+}
+
 function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
   const stateEvents = Array.isArray(raw.stateEvents)
     ? raw.stateEvents.filter(isPlainObject)
@@ -1450,6 +2066,23 @@ function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
   const reachedStart = raw.reachedStart === true;
   const backwardToken =
     typeof raw.backwardToken === "string" && raw.backwardToken !== "" ? raw.backwardToken : undefined;
+  const lastActivityTs =
+    typeof raw.lastActivityTs === "number" && Number.isFinite(raw.lastActivityTs)
+      ? raw.lastActivityTs
+      : undefined;
+  const chunkMinSeq =
+    typeof raw.chunkMinSeq === "number" && Number.isFinite(raw.chunkMinSeq)
+      ? raw.chunkMinSeq
+      : undefined;
+  const chunkMaxSeq =
+    typeof raw.chunkMaxSeq === "number" && Number.isFinite(raw.chunkMaxSeq)
+      ? raw.chunkMaxSeq
+      : undefined;
+  const placeholderChunkSeqs = Array.isArray(raw.placeholderChunkSeqs)
+    ? raw.placeholderChunkSeqs.filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+    : undefined;
+  const readPositionInLocal =
+    typeof raw.readPositionInLocal === "boolean" ? raw.readPositionInLocal : undefined;
   return {
     stateEvents,
     ...(timelineGaps.length > 0
@@ -1471,6 +2104,11 @@ function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
       : {}),
     ...(raw.encryptedIrreversible === true ? { encryptedIrreversible: true as const } : {}),
     ...(raw.inviteFailed === true ? { inviteFailed: true as const } : {}),
+    ...(lastActivityTs !== undefined ? { lastActivityTs } : {}),
+    ...(chunkMinSeq !== undefined ? { chunkMinSeq } : {}),
+    ...(chunkMaxSeq !== undefined ? { chunkMaxSeq } : {}),
+    ...(placeholderChunkSeqs && placeholderChunkSeqs.length > 0 ? { placeholderChunkSeqs } : {}),
+    ...(readPositionInLocal !== undefined ? { readPositionInLocal } : {}),
   };
 }
 

@@ -10,13 +10,18 @@ import {
   PENDING_EVENTS_STORE,
   PENDING_READ_MARKERS_STORE,
   ROOMS_STORE,
-  TIMELINES_STORE,
+  LEGACY_TIMELINES_STORE,
+  TIMELINE_CHUNKS_STORE,
+  TIMELINE_CHUNK_SIZE,
   deleteLocalDatabase,
   dropCredential,
   dropPreListSession,
   loadBlob,
   loadSession,
+  loadStartupSnapshot,
+  loadTimelineChunksBefore,
   loadV2Snapshot,
+  scanRoomChunksBackward,
   pruneOrphanBlobs,
   saveDraftInStore,
   saveMeta,
@@ -92,7 +97,76 @@ async function inspectRawDb(): Promise<{
   });
 }
 
-describe("session-store v2", () => {
+
+async function createV2Database(input: {
+  meta: Record<string, unknown>;
+  rooms: Record<string, Record<string, unknown>>;
+  timelines: Record<string, unknown>;
+  drafts?: Record<string, unknown>;
+  pendingEvents?: Array<Record<string, unknown>>;
+  pendingReadMarkers?: Array<Record<string, unknown>>;
+  blobs?: Array<Record<string, unknown>>;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore(META_STORE);
+      db.createObjectStore(ROOMS_STORE);
+      db.createObjectStore(LEGACY_TIMELINES_STORE);
+      db.createObjectStore(DRAFTS_STORE);
+      const pending = db.createObjectStore(PENDING_EVENTS_STORE, { keyPath: "txnId" });
+      pending.createIndex("roomId", "roomId", { unique: false });
+      db.createObjectStore(PENDING_READ_MARKERS_STORE, { keyPath: "roomId" });
+      db.createObjectStore(BLOBS_STORE, { keyPath: "id" });
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(
+        [
+          META_STORE,
+          ROOMS_STORE,
+          LEGACY_TIMELINES_STORE,
+          DRAFTS_STORE,
+          PENDING_EVENTS_STORE,
+          PENDING_READ_MARKERS_STORE,
+          BLOBS_STORE,
+        ],
+        "readwrite",
+      );
+      tx.objectStore(META_STORE).put(input.meta, "session");
+      for (const [roomId, roomMeta] of Object.entries(input.rooms)) {
+        tx.objectStore(ROOMS_STORE).put(roomMeta, roomId);
+      }
+      for (const [roomId, timeline] of Object.entries(input.timelines)) {
+        tx.objectStore(LEGACY_TIMELINES_STORE).put(timeline, roomId);
+      }
+      for (const [roomId, draft] of Object.entries(input.drafts ?? {})) {
+        tx.objectStore(DRAFTS_STORE).put(draft, roomId);
+      }
+      for (const pending of input.pendingEvents ?? []) {
+        tx.objectStore(PENDING_EVENTS_STORE).put(pending);
+      }
+      for (const marker of input.pendingReadMarkers ?? []) {
+        tx.objectStore(PENDING_READ_MARKERS_STORE).put(marker);
+      }
+      for (const blob of input.blobs ?? []) {
+        tx.objectStore(BLOBS_STORE).put(blob);
+      }
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => {
+        db.close();
+        reject(tx.error);
+      };
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+describe("session-store v3", () => {
   beforeEach(() => {
     globalThis.indexedDB = new IDBFactory();
   });
@@ -102,7 +176,7 @@ describe("session-store v2", () => {
     vi.useRealTimers();
   });
 
-  test("fresh database creates all 7 v2 object stores and indexes", async () => {
+  test("fresh database creates all 7 v3 object stores and indexes", async () => {
     await saveMeta({
       baseUrl: "https://matrix.example.com",
       userId: "@alice:example.com",
@@ -119,7 +193,7 @@ describe("session-store v2", () => {
       PENDING_EVENTS_STORE,
       PENDING_READ_MARKERS_STORE,
       ROOMS_STORE,
-      TIMELINES_STORE,
+      TIMELINE_CHUNKS_STORE,
     ]);
   });
 
@@ -256,8 +330,9 @@ describe("session-store v2", () => {
 
     // Blobs store has exactly 2 deduplicated blobs, and legacy records store is gone
     const raw = await inspectRawDb();
-    expect(raw.version).toBe(2);
+    expect(raw.version).toBe(3);
     expect(raw.storeNames).not.toContain(LEGACY_STORE);
+    expect(raw.storeNames).not.toContain(LEGACY_TIMELINES_STORE);
     expect(raw.records[BLOBS_STORE]).toHaveLength(2);
 
     const loadedShared = await loadBlob(pendingAttId);
@@ -490,5 +565,203 @@ describe("session-store v2", () => {
 
     const snap = await loadV2Snapshot();
     expect(snap.drafts["!r1:example.com"]?.text).toBe("flushed");
+  });
+
+  test("losslessly migrates v2 timelines to v3 timeline_chunks (~50 events/chunk), populates summary metadata, and drops legacy timelines store", async () => {
+    const events125 = Array.from({ length: 125 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: i % 2 === 0 ? "@alice:example.com" : "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+    const r2Events = [
+      {
+        type: "m.room.message",
+        sender: "@alice:example.com",
+        content: { msgtype: "m.file", body: "f.bin" },
+        waypoint_local: {
+          id: "loc-r2",
+          status: "failed",
+          txnId: "txn-r2",
+          attachmentId: "att-r2",
+          attachmentMeta: { name: "f.bin", mimeType: "application/octet-stream", size: 2 },
+        },
+      },
+      {
+        type: "m.room.message",
+        event_id: "$r2-1",
+        sender: "@bot:example.com",
+        origin_server_ts: 5000,
+        content: { msgtype: "m.text", body: "r2" },
+      },
+    ];
+
+    await createV2Database({
+      meta: {
+        baseUrl: "https://matrix.example.com",
+        userId: "@alice:example.com",
+        accessToken: "tok-v2",
+        deviceId: "DEV-V2",
+        syncCursor: "batch-v2",
+      },
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [{ type: "m.room.name", state_key: "", content: { name: "长对话" } }],
+          readPositionEventId: "$e10",
+          backwardToken: "prev-r1",
+        },
+        "!r2:example.com": {
+          stateEvents: [{ type: "m.room.name", state_key: "", content: { name: "带失败消息" } }],
+        },
+      },
+      timelines: {
+        "!r1:example.com": { timelineEvents: events125 },
+        "!r2:example.com": { timelineEvents: r2Events },
+      },
+      drafts: {
+        "!r1:example.com": { text: "草稿保留" },
+      },
+      blobs: [
+        {
+          id: "att-r2",
+          name: "f.bin",
+          mimeType: "application/octet-stream",
+          size: 2,
+          data: new Uint8Array([1, 2]),
+        },
+      ],
+    });
+
+    const v2Compat = await loadV2Snapshot();
+    expect(v2Compat.timelines["!r1:example.com"]).toHaveLength(125);
+    expect(v2Compat.timelines["!r1:example.com"]![0]!.event_id).toBe("$e0");
+    expect(v2Compat.timelines["!r1:example.com"]![124]!.event_id).toBe("$e124");
+    expect(v2Compat.timelines["!r2:example.com"]).toHaveLength(2);
+    expect(v2Compat.drafts["!r1:example.com"]?.text).toBe("草稿保留");
+
+    expect(v2Compat.rooms["!r1:example.com"]).toMatchObject({
+      lastActivityTs: 1000 + 124 * 10,
+      chunkMinSeq: 0,
+      chunkMaxSeq: 2,
+      readPositionInLocal: true,
+    });
+    expect(v2Compat.rooms["!r2:example.com"]).toMatchObject({
+      lastActivityTs: 5000,
+      chunkMinSeq: 0,
+      chunkMaxSeq: 0,
+      placeholderChunkSeqs: [0],
+    });
+
+    const raw = await inspectRawDb();
+    expect(raw.version).toBe(3);
+    expect(raw.storeNames).not.toContain(LEGACY_TIMELINES_STORE);
+    expect(raw.storeNames).toContain(TIMELINE_CHUNKS_STORE);
+    const r1Chunks = (raw.records[TIMELINE_CHUNKS_STORE] as Array<{ roomId: string; seq: number; events: unknown[] }>)
+      .filter((c) => c.roomId === "!r1:example.com")
+      .sort((a, b) => a.seq - b.seq);
+    expect(r1Chunks.map((c) => c.events.length)).toEqual([25, TIMELINE_CHUNK_SIZE, TIMELINE_CHUNK_SIZE]);
+
+    const fullSession = await loadSession();
+    expect(fullSession?.rooms?.["!r1:example.com"]?.timelineEvents).toHaveLength(125);
+    expect(await loadBlob("att-r2")).toBeDefined();
+  });
+
+  test("v2 -> v3 migration aborts and rolls back cleanly to v2 on failure", async () => {
+    await createV2Database({
+      meta: {
+        baseUrl: "https://matrix.example.com",
+        userId: "@alice:example.com",
+        accessToken: "tok-v2",
+        deviceId: "DEV-V2",
+      },
+      rooms: {
+        "!r1:example.com": { stateEvents: [] },
+      },
+      timelines: {
+        "!r1:example.com": {
+          timelineEvents: [
+            { type: "m.room.message", event_id: "$e1", sender: "@bot:example.com", origin_server_ts: 1000, content: { msgtype: "m.text", body: "keep" } },
+          ],
+        },
+      },
+    });
+
+    const origPut = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      ...args: Parameters<IDBObjectStore["put"]>
+    ) {
+      if (this.name === TIMELINE_CHUNKS_STORE) {
+        throw new DOMException("Simulated quota error", "QuotaExceededError");
+      }
+      return origPut.apply(this, args);
+    });
+
+    await expect(loadStartupSnapshot()).rejects.toThrow();
+
+    vi.restoreAllMocks();
+    const raw = await inspectRawDb();
+    expect(raw.version).toBe(2);
+    expect(raw.storeNames).toContain(LEGACY_TIMELINES_STORE);
+    expect(raw.storeNames).not.toContain(TIMELINE_CHUNKS_STORE);
+    expect(raw.records[LEGACY_TIMELINES_STORE]).toHaveLength(1);
+  });
+
+  test("loadStartupSnapshot hydrates only hot chunk (~50 events) plus older placeholder chunks without scanning middle cold chunks", async () => {
+    const events = Array.from({ length: 130 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+    // Insert a failed placeholder in the oldest chunk (index 5)
+    events.splice(5, 0, {
+      type: "m.room.message",
+      event_id: "",
+      sender: "@alice:example.com",
+      origin_server_ts: 1055,
+      content: { msgtype: "m.text", body: "failed-old" },
+      waypoint_local: { id: "loc-old", status: "failed", txnId: "txn-old" },
+    } as never);
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [{ type: "m.room.name", state_key: "", content: { name: "Hot" } }],
+          timelineEvents: events,
+          readPositionEventId: "$e120",
+        },
+      },
+    });
+
+    const startup = await loadStartupSnapshot();
+    const r1 = startup.roomTimelines["!r1:example.com"]!;
+    expect(r1.hotChunks).toHaveLength(1);
+    expect(r1.hotChunks[0]!.events).toHaveLength(TIMELINE_CHUNK_SIZE);
+    expect(r1.hotChunks[0]!.events[0]!.event_id).toBe("$e80");
+    expect(r1.hotChunks[0]!.events[49]!.event_id).toBe("$e129");
+    expect(r1.coldPlaceholders).toHaveLength(1);
+    expect((r1.coldPlaceholders[0]!.event.waypoint_local as Record<string, unknown>).id).toBe("loc-old");
+    expect(r1.hasOlderLocalChunks).toBe(true);
+
+    // Load older cold chunks on demand via loadTimelineChunksBefore and scanRoomChunksBackward
+    const minHotSeq = r1.hotChunks[0]!.seq;
+    const prev1 = await loadTimelineChunksBefore("!r1:example.com", minHotSeq, 1);
+    expect(prev1).toHaveLength(1);
+    expect(prev1[0]!.events).toHaveLength(TIMELINE_CHUNK_SIZE);
+    expect(prev1[0]!.events[0]!.event_id).toBe("$e30");
+
+    const visitedSeqs: number[] = [];
+    await scanRoomChunksBackward("!r1:example.com", minHotSeq, (chunk) => {
+      visitedSeqs.push(chunk.seq);
+      return visitedSeqs.length >= 1 ? "stop" : "continue";
+    });
+    expect(visitedSeqs).toEqual([prev1[0]!.seq]);
   });
 });

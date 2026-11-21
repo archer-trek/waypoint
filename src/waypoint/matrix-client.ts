@@ -1,11 +1,15 @@
 import type { HomeserverTransport, TransportResult } from "../adapters/types";
 import { isCredentialRejected } from "./matrix-errors";
 import {
+  TIMELINE_CHUNK_SIZE,
+  computeLastActivityTs,
   dropCredential,
   dropPreListSession,
   generateAttachmentId,
   loadBlob,
-  loadV2Snapshot,
+  loadStartupSnapshot,
+  loadTimelineChunk,
+  loadTimelineChunksBefore,
   pruneOrphanBlobs,
   replacePendingEvent,
   resetSessionStores,
@@ -23,8 +27,12 @@ import {
   saveRoomMetaAndReadMarker,
   saveSyncBatch,
   saveUploadedMediaUrl,
+  scanRoomChunksBackward,
+  splitTimelineEventsIntoChunks,
   type AttachmentMeta,
   type BlobRecord,
+  type ChunkWriteOp,
+  type ColdUnreadState,
   type DraftAttachment,
   type DraftRecord,
   type PendingReadMarker,
@@ -34,7 +42,9 @@ import {
   type StoredRoomEvents,
   type StoredRoomMeta,
   type StoredTimelineGap,
+  type TimelineChunkRecord,
 } from "./session-store";
+import { evaluateRoomUnreadFromEvents } from "./topics";
 
 const MAX_SYNC_TIMELINE_EVENTS_PER_ROOM = 20;
 export const BACKFILL_PAGE_LIMIT = 50;
@@ -64,6 +74,7 @@ export class MatrixClient {
   private syncCursor?: string;
   private storedAccountData: Record<string, unknown> = {};
   private storedRooms: Record<string, StoredRoomEvents> = {};
+  private roomChunkStates = new Map<string, RoomChunkState>();
   private storedPendingEvents: PendingRoomEvent[] = [];
   private storedPendingReadMarkers: PendingReadMarker[] = [];
   private storedDrafts: Record<string, DraftRecord> = {};
@@ -117,6 +128,7 @@ export class MatrixClient {
     this.syncCursor = undefined;
     this.storedAccountData = {};
     this.storedRooms = {};
+    this.roomChunkStates.clear();
     this.storedPendingEvents = [];
     this.storedPendingReadMarkers = [];
     this.storedDrafts = {};
@@ -407,7 +419,7 @@ export class MatrixClient {
   }
 
   async restore(): Promise<"sync" | "password" | "address"> {
-    const snapshot = await loadV2Snapshot();
+    const snapshot = await loadStartupSnapshot();
     if (!snapshot.meta?.baseUrl) {
       try {
         await pruneOrphanBlobs(new Set());
@@ -417,20 +429,70 @@ export class MatrixClient {
       return "address";
     }
     const meta = snapshot.meta;
-    const rawRooms: Record<string, unknown> = {};
-    for (const [roomId, roomMeta] of Object.entries(snapshot.rooms)) {
-      rawRooms[roomId] = {
-        ...roomMeta,
-        timelineEvents: snapshot.timelines[roomId] ?? [],
+    const restoredRooms: Record<string, StoredRoomEvents> = {};
+    const restoredChunkStates = new Map<string, RoomChunkState>();
+
+    for (const [roomId, rawRoomMeta] of Object.entries(snapshot.rooms)) {
+      const startupTl = snapshot.roomTimelines[roomId] ?? {
+        hotChunks: [],
+        coldPlaceholders: [],
+        hasOlderLocalChunks: false,
       };
-    }
-    for (const [roomId, timelineEvents] of Object.entries(snapshot.timelines)) {
-      if (!(roomId in rawRooms)) {
-        rawRooms[roomId] = { stateEvents: [], timelineEvents };
+      const loadedChunks: TimelineChunkRecord[] = startupTl.hotChunks.map((chunk) => ({
+        roomId,
+        seq: chunk.seq,
+        events: chunk.events.map(sanitizePlaceholderForMemory),
+      }));
+      const coldPlaceholders = startupTl.coldPlaceholders.map((item) => ({
+        seq: item.seq,
+        event: sanitizePlaceholderForMemory(item.event),
+      }));
+      const normalizedMeta = normalizeStoredRoomMetaObj(rawRoomMeta, loadedChunks, startupTl.hasOlderLocalChunks);
+      const placeholderSeqs = new Set<number>(normalizedMeta.placeholderChunkSeqs ?? []);
+      for (const cp of coldPlaceholders) {
+        placeholderSeqs.add(cp.seq);
       }
+      for (const c of loadedChunks) {
+        if (c.events.some(localPlaceholderOf)) {
+          placeholderSeqs.add(c.seq);
+        }
+      }
+      const chunkState: RoomChunkState = {
+        loadedChunks,
+        coldPlaceholders,
+        chunkMinSeq:
+          normalizedMeta.chunkMinSeq ??
+          (startupTl.hasOlderLocalChunks
+            ? undefined
+            : loadedChunks.length > 0
+              ? loadedChunks[0]!.seq
+              : undefined),
+        chunkMaxSeq:
+          normalizedMeta.chunkMaxSeq ??
+          (loadedChunks.length > 0 ? loadedChunks[loadedChunks.length - 1]!.seq : undefined),
+        placeholderChunkSeqs: Array.from(placeholderSeqs).sort((a, b) => a - b),
+      };
+
+      const coldResolution = await resolveColdUnreadForRoom(
+        roomId,
+        normalizedMeta,
+        loadedChunks,
+        startupTl.hasOlderLocalChunks,
+      );
+      if (coldResolution.readPositionInLocal !== undefined) {
+        normalizedMeta.readPositionInLocal = coldResolution.readPositionInLocal;
+      }
+
+      const roomEvents = buildRoomFromChunkState(
+        normalizedMeta,
+        chunkState,
+        startupTl.hasOlderLocalChunks,
+        coldResolution.coldUnreadState,
+      );
+      restoredRooms[roomId] = roomEvents;
+      restoredChunkStates.set(roomId, chunkState);
     }
 
-    const restoredRooms = normalizeStoredRooms(rawRooms);
     const restoredPending = clonePendingEvents(snapshot.pendingEvents);
     const restoredMarkers = clonePendingReadMarkers(snapshot.pendingReadMarkers);
     const restoredDrafts = cloneDrafts(snapshot.drafts);
@@ -451,6 +513,7 @@ export class MatrixClient {
     this.syncCursor = meta.syncCursor;
     this.storedAccountData = isAccountData(meta.accountData) ? meta.accountData : {};
     this.storedRooms = restoredRooms;
+    this.roomChunkStates = restoredChunkStates;
     this.storedPendingEvents = restoredPending;
     this.storedPendingReadMarkers = restoredMarkers;
     this.storedDrafts = restoredDrafts;
@@ -472,6 +535,250 @@ export class MatrixClient {
       return "password";
     }
     return "address";
+  }
+
+  hasOlderLocalChunks(roomId: string): boolean {
+    return Boolean(this.storedRooms[roomId]?.hasOlderLocalChunks);
+  }
+
+  needsLocalChunksForReadPosition(roomId: string): boolean {
+    const room = this.storedRooms[roomId];
+    if (!room || !room.hasOlderLocalChunks) {
+      return false;
+    }
+    if (room.readPositionEventId === undefined) {
+      return true;
+    }
+    return timelineIndexOf(room.timelineEvents, room.readPositionEventId) === -1;
+  }
+
+  async loadNextOlderLocalChunk(roomId: string): Promise<number> {
+    let loadedCount = 0;
+    await this.enqueuePersist(async () => {
+      const room = this.storedRooms[roomId];
+      const existingState = this.roomChunkStates.get(roomId);
+      if (!room || !existingState || !room.hasOlderLocalChunks) {
+        return;
+      }
+      const beforeSeq =
+        existingState.loadedChunks.length > 0
+          ? existingState.loadedChunks[0]!.seq
+          : existingState.chunkMaxSeq !== undefined
+            ? existingState.chunkMaxSeq + 1
+            : Infinity;
+      const older = await loadTimelineChunksBefore(roomId, beforeSeq, 1);
+      const nextState = cloneChunkState(existingState);
+      if (older.length === 0) {
+        nextState.chunkMinSeq =
+          nextState.loadedChunks.length > 0 ? nextState.loadedChunks[0]!.seq : undefined;
+        const nextRoom = buildRoomFromChunkState(
+          { ...extractRoomMeta(room), ...(nextState.chunkMinSeq !== undefined ? { chunkMinSeq: nextState.chunkMinSeq } : {}) },
+          nextState,
+          false,
+          undefined,
+        );
+        this.roomChunkStates.set(roomId, nextState);
+        this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
+        return;
+      }
+      const sanitized = older.map((chunk) => ({
+        roomId,
+        seq: chunk.seq,
+        events: chunk.events.map(sanitizePlaceholderForMemory),
+      }));
+      loadedCount = sanitized.reduce((sum, c) => sum + c.events.length, 0);
+      const newMinLoadedSeq = sanitized[0]!.seq;
+      nextState.loadedChunks = [...sanitized, ...nextState.loadedChunks];
+      nextState.coldPlaceholders = nextState.coldPlaceholders.filter(
+        (cp) => cp.seq < newMinLoadedSeq,
+      );
+      const stillHasOlder =
+        nextState.chunkMinSeq !== undefined ? newMinLoadedSeq > nextState.chunkMinSeq : false;
+      const allLoadedEvents = nextState.loadedChunks.flatMap((c) => c.events);
+      const metaBase = extractRoomMeta(room);
+      if (
+        metaBase.readPositionEventId !== undefined &&
+        timelineIndexOf(allLoadedEvents, metaBase.readPositionEventId) !== -1
+      ) {
+        metaBase.readPositionInLocal = true;
+      } else if (!stillHasOlder && metaBase.readPositionEventId !== undefined) {
+        metaBase.readPositionInLocal = false;
+      }
+      const coldResolution = stillHasOlder
+        ? await resolveColdUnreadForRoom(roomId, metaBase, nextState.loadedChunks, true)
+        : { coldUnreadState: undefined };
+      const nextRoom = buildRoomFromChunkState(
+        metaBase,
+        nextState,
+        stillHasOlder,
+        coldResolution.coldUnreadState,
+      );
+      this.roomChunkStates.set(roomId, nextState);
+      this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
+    });
+    return loadedCount;
+  }
+
+  async loadLocalChunksForReadPosition(roomId: string): Promise<number> {
+    let loadedCount = 0;
+    await this.enqueuePersist(async () => {
+      if (!this.needsLocalChunksForReadPosition(roomId)) {
+        return;
+      }
+      const room = this.storedRooms[roomId];
+      const existingState = this.roomChunkStates.get(roomId);
+      if (!room || !existingState) {
+        return;
+      }
+      const nextState = cloneChunkState(existingState);
+      const readPos = room.readPositionEventId;
+      let cursorSeq =
+        nextState.loadedChunks.length > 0
+          ? nextState.loadedChunks[0]!.seq
+          : nextState.chunkMaxSeq !== undefined
+            ? nextState.chunkMaxSeq + 1
+            : Infinity;
+      let foundReadPos = false;
+      let exhausted = false;
+
+      while (!foundReadPos && !exhausted) {
+        const batch = await loadTimelineChunksBefore(roomId, cursorSeq, 4);
+        if (batch.length === 0) {
+          exhausted = true;
+          break;
+        }
+        const sanitized = batch.map((chunk) => ({
+          roomId,
+          seq: chunk.seq,
+          events: chunk.events.map(sanitizePlaceholderForMemory),
+        }));
+        loadedCount += sanitized.reduce((sum, c) => sum + c.events.length, 0);
+        nextState.loadedChunks = [...sanitized, ...nextState.loadedChunks];
+        cursorSeq = sanitized[0]!.seq;
+        if (
+          readPos !== undefined &&
+          sanitized.some((c) => timelineIndexOf(c.events, readPos) !== -1)
+        ) {
+          foundReadPos = true;
+        }
+        if (nextState.chunkMinSeq !== undefined && cursorSeq <= nextState.chunkMinSeq) {
+          exhausted = true;
+        }
+      }
+
+      const minLoadedSeq =
+        nextState.loadedChunks.length > 0 ? nextState.loadedChunks[0]!.seq : undefined;
+      if (minLoadedSeq !== undefined) {
+        nextState.coldPlaceholders = nextState.coldPlaceholders.filter(
+          (cp) => cp.seq < minLoadedSeq,
+        );
+      }
+      const stillHasOlder =
+        !exhausted &&
+        minLoadedSeq !== undefined &&
+        nextState.chunkMinSeq !== undefined &&
+        minLoadedSeq > nextState.chunkMinSeq;
+      const metaBase = extractRoomMeta(room);
+      if (foundReadPos) {
+        metaBase.readPositionInLocal = true;
+      } else if (!stillHasOlder && readPos !== undefined) {
+        metaBase.readPositionInLocal = false;
+      }
+      const nextRoom = buildRoomFromChunkState(
+        metaBase,
+        nextState,
+        stillHasOlder,
+        stillHasOlder ? room.coldUnreadState : undefined,
+      );
+      this.roomChunkStates.set(roomId, nextState);
+      this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
+    });
+    return loadedCount;
+  }
+
+  async unloadColdChunks(roomId: string): Promise<boolean> {
+    let unloaded = false;
+    await this.enqueuePersist(async () => {
+      const room = this.storedRooms[roomId];
+      const existingState = this.roomChunkStates.get(roomId);
+      if (!room || !existingState || existingState.loadedChunks.length <= 1) {
+        return;
+      }
+      let confirmedCount = 0;
+      let keepFromIdx = existingState.loadedChunks.length - 1;
+      for (let i = existingState.loadedChunks.length - 1; i >= 0; i -= 1) {
+        keepFromIdx = i;
+        for (const ev of existingState.loadedChunks[i]!.events) {
+          if (!localPlaceholderOf(ev)) {
+            confirmedCount += 1;
+          }
+        }
+        if (confirmedCount >= TIMELINE_CHUNK_SIZE) {
+          break;
+        }
+      }
+      if (keepFromIdx === 0) {
+        return;
+      }
+
+      const droppedChunks = existingState.loadedChunks.slice(0, keepFromIdx);
+      const keptChunks = existingState.loadedChunks.slice(keepFromIdx);
+      const allLoadedEvents = existingState.loadedChunks.flatMap((c) => c.events);
+      const keptEvents = keptChunks.flatMap((c) => c.events);
+      const agentUserId = boundAgentUserIdFromState(room.stateEvents);
+
+      let nextColdUnreadState: ColdUnreadState | undefined;
+      if (room.readPositionEventId !== undefined) {
+        if (timelineIndexOf(keptEvents, room.readPositionEventId) !== -1) {
+          nextColdUnreadState = undefined;
+        } else if (timelineIndexOf(allLoadedEvents, room.readPositionEventId) !== -1) {
+          nextColdUnreadState = evaluateRoomUnreadFromEvents(
+            allLoadedEvents,
+            room.readPositionEventId,
+            agentUserId,
+          );
+        } else {
+          nextColdUnreadState = room.coldUnreadState;
+        }
+      } else {
+        const evalAll = evaluateRoomUnreadFromEvents(allLoadedEvents, undefined, agentUserId);
+        if (evalAll.unread) {
+          nextColdUnreadState = evalAll;
+        } else if (room.coldUnreadState?.unread) {
+          nextColdUnreadState = room.coldUnreadState;
+        } else {
+          nextColdUnreadState = { unread: false, readPositionUnknown: false };
+        }
+      }
+
+      const nextState = cloneChunkState(existingState);
+      for (const chunk of droppedChunks) {
+        for (const ev of chunk.events) {
+          if (localPlaceholderOf(ev)) {
+            nextState.coldPlaceholders.push({ seq: chunk.seq, event: ev });
+          }
+        }
+      }
+      nextState.coldPlaceholders.sort((a, b) => a.seq - b.seq);
+      nextState.loadedChunks = keptChunks;
+      if (
+        nextState.chunkMinSeq === undefined &&
+        existingState.loadedChunks.length > 0
+      ) {
+        nextState.chunkMinSeq = existingState.loadedChunks[0]!.seq;
+      }
+
+      const nextRoom = buildRoomFromChunkState(
+        extractRoomMeta(room),
+        nextState,
+        true,
+        nextColdUnreadState,
+      );
+      this.roomChunkStates.set(roomId, nextState);
+      this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
+      unloaded = true;
+    });
+    return unloaded;
   }
 
   versions(baseUrl: string): Promise<TransportResult> {
@@ -542,6 +849,7 @@ export class MatrixClient {
       this.syncCursor = undefined;
       this.storedAccountData = {};
       this.storedRooms = {};
+      this.roomChunkStates.clear();
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
@@ -671,8 +979,9 @@ export class MatrixClient {
         return;
       }
       const nextAccountData = mergeAccountData(this.storedAccountData, body);
-      const roomMerge = mergeSyncRooms(
+      const roomMerge = await mergeSyncRoomsChunked(
         this.storedRooms,
+        this.roomChunkStates,
         body,
         this.userId,
         attempt.leaveGeneration,
@@ -722,10 +1031,7 @@ export class MatrixClient {
           extractRoomMeta(roomMerge.rooms[roomId]!),
         ]),
         deleteRoomIds: roomMerge.deletedRoomIds,
-        putTimelines: roomMerge.timelineChangedRoomIds.map((roomId) => [
-          roomId,
-          roomMerge.rooms[roomId]!.timelineEvents,
-        ]),
+        chunkWrites: roomMerge.chunkWrites,
         deletePendingTxnIds: pendingMerge.deletedTxnIds,
         deleteReadMarkerRoomIds: markerMerge.deletedRoomIds,
         deleteDraftRoomIds: draftMerge.deletedRoomIds,
@@ -734,6 +1040,7 @@ export class MatrixClient {
 
       this.storedAccountData = nextAccountData;
       this.storedRooms = roomMerge.rooms;
+      this.roomChunkStates = roomMerge.chunkStates;
       for (const roomId of Array.from(this.optimisticReadPositions.keys())) {
         if (!(roomId in this.storedRooms)) {
           this.optimisticReadPositions.delete(roomId);
@@ -783,26 +1090,77 @@ export class MatrixClient {
       ) {
         return;
       }
-      const room = this.storedRooms[roomId];
-      if (!room) {
+      const existingRoom = this.storedRooms[roomId];
+      if (!existingRoom) {
         return;
       }
-      const applied = applyRoomBackfillPage(room, options.fromToken, options.body, options.gapIndex);
+      const workingState = cloneChunkState(this.roomChunkStates.get(roomId));
+      let workingRoom = existingRoom;
+
+      if (workingRoom.hasOlderLocalChunks) {
+        const gaps = roomTimelineGaps(workingRoom);
+        const resolvedGapIndex =
+          options.gapIndex !== undefined && options.gapIndex >= 0 && options.gapIndex < gaps.length
+            ? options.gapIndex
+            : gaps.findIndex((g) => g.prevBatch === options.fromToken);
+        const targetGap = resolvedGapIndex !== -1 ? gaps[resolvedGapIndex] : undefined;
+        const needsAllLocal =
+          !targetGap ||
+          (!targetGap.gapBeforeEventId && !targetGap.pendingGapAtEnd) ||
+          (targetGap.gapBeforeEventId !== undefined &&
+            timelineIndexOf(workingRoom.timelineEvents, targetGap.gapBeforeEventId) === -1);
+        if (needsAllLocal) {
+          const minLoadedSeq =
+            workingState.loadedChunks.length > 0
+              ? workingState.loadedChunks[0]!.seq
+              : workingState.chunkMaxSeq !== undefined
+                ? workingState.chunkMaxSeq + 1
+                : Infinity;
+          const older = await loadTimelineChunksBefore(roomId, minLoadedSeq, Infinity);
+          if (older.length > 0) {
+            const sanitized = older.map((c) => ({
+              roomId,
+              seq: c.seq,
+              events: c.events.map(sanitizePlaceholderForMemory),
+            }));
+            workingState.loadedChunks = [...sanitized, ...workingState.loadedChunks];
+            workingState.coldPlaceholders = workingState.coldPlaceholders.filter(
+              (cp) => cp.seq < sanitized[0]!.seq,
+            );
+            workingRoom = buildRoomFromChunkState(
+              extractRoomMeta(workingRoom),
+              workingState,
+              false,
+              undefined,
+            );
+          }
+        }
+      }
+
+      const applied = await applyRoomBackfillPageChunked(
+        roomId,
+        workingRoom,
+        workingState,
+        options.fromToken,
+        options.body,
+        options.gapIndex,
+      );
       if (!applied.changed) {
         outcome = {
           prependedCount: 0,
-          reachedStart: Boolean(room.reachedStart),
+          reachedStart: Boolean(workingRoom.reachedStart),
           hasReadPosition:
-            room.readPositionEventId !== undefined &&
-            timelineIndexOf(room.timelineEvents, room.readPositionEventId) !== -1,
+            workingRoom.readPositionEventId !== undefined &&
+            timelineIndexOf(workingRoom.timelineEvents, workingRoom.readPositionEventId) !== -1,
         };
         return;
       }
       await saveRoomAndTimeline(
         roomId,
         extractRoomMeta(applied.room),
-        applied.room.timelineEvents,
+        applied.chunkWrite,
       );
+      this.roomChunkStates.set(roomId, applied.chunkState);
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: applied.room,
@@ -1036,6 +1394,7 @@ export class MatrixClient {
       this.leaveGeneration += 1;
       this.leftAtGeneration.set(roomId, this.leaveGeneration);
       this.storedRooms = nextRooms;
+      this.roomChunkStates.delete(roomId);
       this.storedPendingEvents = nextPending;
       this.storedPendingReadMarkers = nextPendingReadMarkers;
       this.storedDrafts = nextDrafts;
@@ -1108,44 +1467,53 @@ export class MatrixClient {
       });
 
       let nextRooms = this.storedRooms;
-      let updatedTimeline: RawMatrixEvent[] | undefined;
+      let nextChunkState: RoomChunkState | undefined;
+      let chunkWrite: ChunkWriteOp | undefined;
       const room = this.storedRooms[roomId];
       if (room) {
-        const placeholderIndex = room.timelineEvents.findIndex(
+        const currentState = cloneChunkState(this.roomChunkStates.get(roomId));
+        const res = await transformPlaceholderInChunkState(
+          roomId,
+          currentState,
           (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+          (placeholder) => {
+            const existingContent = isPlainObject(placeholder.content) ? placeholder.content : {};
+            return {
+              ...placeholder,
+              content: {
+                ...existingContent,
+                url: mxcUrl,
+              },
+            };
+          },
         );
-        if (placeholderIndex !== -1) {
-          const placeholder = room.timelineEvents[placeholderIndex];
-          const existingContent = isPlainObject(placeholder.content) ? placeholder.content : {};
-          const nextTimeline = [...room.timelineEvents];
-          nextTimeline[placeholderIndex] = {
-            ...placeholder,
-            content: {
-              ...existingContent,
-              url: mxcUrl,
-            },
-          };
-          updatedTimeline = nextTimeline;
+        if (res.matched) {
+          nextChunkState = res.chunkState;
+          chunkWrite = res.chunkWrite;
           nextRooms = {
             ...this.storedRooms,
-            [roomId]: {
-              ...room,
-              timelineEvents: nextTimeline,
-            },
+            [roomId]: buildRoomFromChunkState(
+              extractRoomMeta(room),
+              nextChunkState,
+              Boolean(room.hasOlderLocalChunks),
+              room.coldUnreadState,
+            ),
           };
         }
       }
 
-      if (!updatedPending && !updatedTimeline) {
+      if (!updatedPending && !chunkWrite) {
         return;
       }
 
       await saveUploadedMediaUrl({
         pendingEvent: updatedPending,
-        roomId,
-        timelineEvents: updatedTimeline,
+        chunkWrite,
       });
       this.storedPendingEvents = nextPending;
+      if (nextChunkState) {
+        this.roomChunkStates.set(roomId, nextChunkState);
+      }
       this.storedRooms = nextRooms;
     });
   }
@@ -1214,11 +1582,14 @@ export class MatrixClient {
       const nextPending = [...this.storedPendingEvents, clonePendingEvent(item)];
       let nextRooms = this.storedRooms;
       let nextRoom: StoredRoomEvents | undefined;
-      let isNewRoom = false;
+      let nextChunkState: RoomChunkState | undefined;
+      let chunkWrite: ChunkWriteOp | undefined;
+      let roomMetaChanged = false;
 
       if (type === "m.room.message") {
-        isNewRoom = !(roomId in this.storedRooms);
+        const isNewRoom = !(roomId in this.storedRooms);
         const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+        const prevState = cloneChunkState(this.roomChunkStates.get(roomId));
         const placeholderEvent: RawMatrixEvent = {
           type,
           sender: this.userId,
@@ -1230,10 +1601,16 @@ export class MatrixClient {
             ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
           },
         };
-        nextRoom = {
-          ...existingRoom,
-          timelineEvents: [...existingRoom.timelineEvents, placeholderEvent],
-        };
+        const appended = appendEventsToChunkState(roomId, prevState, [placeholderEvent]);
+        nextChunkState = appended.chunkState;
+        chunkWrite = appended.chunkWrite;
+        nextRoom = buildRoomFromChunkState(
+          extractRoomMeta(existingRoom),
+          nextChunkState,
+          Boolean(existingRoom.hasOlderLocalChunks),
+          existingRoom.coldUnreadState,
+        );
+        roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
         nextRooms = {
           ...this.storedRooms,
           [roomId]: nextRoom,
@@ -1258,8 +1635,8 @@ export class MatrixClient {
       await saveEnqueuedEvent({
         pendingEvent: item,
         roomId,
-        roomMeta: isNewRoom && nextRoom ? extractRoomMeta(nextRoom) : undefined,
-        timelineEvents: nextRoom?.timelineEvents,
+        roomMeta: roomMetaChanged && nextRoom ? extractRoomMeta(nextRoom) : undefined,
+        chunkWrite,
         clearDraft,
         putBlob,
         deleteBlobIds,
@@ -1267,6 +1644,9 @@ export class MatrixClient {
 
       this.pendingOrderSeq += 1;
       this.storedPendingEvents = nextPending;
+      if (nextChunkState) {
+        this.roomChunkStates.set(roomId, nextChunkState);
+      }
       this.storedRooms = nextRooms;
       this.storedDrafts = nextDrafts;
       created = clonePendingEvent(item);
@@ -1376,7 +1756,9 @@ export class MatrixClient {
         const nextRoom: StoredRoomEvents = {
           ...room,
           readPositionEventId: eventId,
+          readPositionInLocal: true,
         };
+        delete nextRoom.coldUnreadState;
         const nextRooms = {
           ...this.storedRooms,
           [roomId]: nextRoom,
@@ -1495,17 +1877,18 @@ export class MatrixClient {
       );
       const isNewRoom = !(roomId in this.storedRooms);
       const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
+      const existingChunkState = cloneChunkState(this.roomChunkStates.get(roomId));
       const alreadyConfirmed = existingRoom.timelineEvents.some(
         (ev) => !localPlaceholderOf(ev) && (eventIdOf(ev) === eventId || transactionIdOf(ev) === txnId),
       );
-      const placeholderIndex = existingRoom.timelineEvents.findIndex(
+      const placeholder = existingRoom.timelineEvents.find(
         (ev) => localPlaceholderOf(ev)?.txnId === txnId,
       );
-      const placeholder =
-        placeholderIndex !== -1 ? existingRoom.timelineEvents[placeholderIndex] : undefined;
       const placeholderMeta = placeholder ? localPlaceholderOf(placeholder) : undefined;
 
-      let nextTimeline = existingRoom.timelineEvents;
+      let nextChunkState = existingChunkState;
+      let chunkWrite: ChunkWriteOp | undefined;
+
       if (!alreadyConfirmed) {
         const source =
           pending ??
@@ -1527,22 +1910,42 @@ export class MatrixClient {
             content: cloneValue(source.content),
             unsigned: { transaction_id: txnId },
           };
-          nextTimeline = [...existingRoom.timelineEvents];
-          if (placeholderIndex !== -1) {
-            nextTimeline[placeholderIndex] = confirmedEvent;
+          if (placeholder) {
+            const res = await transformPlaceholderInChunkState(
+              roomId,
+              existingChunkState,
+              (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+              () => confirmedEvent,
+            );
+            nextChunkState = res.chunkState;
+            chunkWrite = res.chunkWrite;
           } else {
-            nextTimeline.push(confirmedEvent);
+            const appended = appendEventsToChunkState(roomId, existingChunkState, [confirmedEvent]);
+            nextChunkState = appended.chunkState;
+            chunkWrite = appended.chunkWrite;
           }
         }
-      } else if (placeholderIndex !== -1) {
-        nextTimeline = [...existingRoom.timelineEvents];
-        nextTimeline.splice(placeholderIndex, 1);
+      } else if (placeholder) {
+        const res = await transformPlaceholderInChunkState(
+          roomId,
+          existingChunkState,
+          (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+          () => undefined,
+        );
+        nextChunkState = res.chunkState;
+        chunkWrite = res.chunkWrite;
       }
 
       const nextRoom: StoredRoomEvents =
-        nextTimeline !== existingRoom.timelineEvents
-          ? { ...existingRoom, timelineEvents: nextTimeline }
+        chunkWrite || isNewRoom
+          ? buildRoomFromChunkState(
+              extractRoomMeta(existingRoom),
+              nextChunkState,
+              Boolean(existingRoom.hasOlderLocalChunks),
+              existingRoom.coldUnreadState,
+            )
           : existingRoom;
+      const roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
       const nextRooms =
         nextRoom !== existingRoom || isNewRoom
           ? { ...this.storedRooms, [roomId]: nextRoom }
@@ -1562,12 +1965,13 @@ export class MatrixClient {
       await saveConfirmedEvent({
         roomId,
         txnId,
-        timelineEvents: nextRoom.timelineEvents,
-        roomMeta: isNewRoom ? extractRoomMeta(nextRoom) : undefined,
+        chunkWrite,
+        roomMeta: roomMetaChanged ? extractRoomMeta(nextRoom) : undefined,
         deleteBlobIds,
       });
 
       this.storedPendingEvents = nextPending;
+      this.roomChunkStates.set(roomId, nextChunkState);
       this.storedRooms = nextRooms;
     });
   }
@@ -1582,15 +1986,12 @@ export class MatrixClient {
       if (!existingRoom) {
         return;
       }
-      const placeholderIndex = existingRoom.timelineEvents.findIndex((ev) => {
+      const placeholder = existingRoom.timelineEvents.find((ev) => {
         const meta = localPlaceholderOf(ev);
         return meta?.id === localId && meta.status === "failed";
       });
-      if (placeholderIndex === -1) {
-        return;
-      }
-      const placeholder = existingRoom.timelineEvents[placeholderIndex];
       if (
+        !placeholder ||
         typeof placeholder.type !== "string" ||
         placeholder.type === "" ||
         typeof placeholder.sender !== "string" ||
@@ -1614,31 +2015,45 @@ export class MatrixClient {
         order: this.pendingOrderSeq,
         ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
       };
-      const nextTimeline = [...existingRoom.timelineEvents];
-      nextTimeline[placeholderIndex] = {
-        ...placeholder,
-        waypoint_local: {
-          id: localId,
-          status: "unconfirmed",
-          txnId: newTxnId,
-          ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
+      const existingChunkState = cloneChunkState(this.roomChunkStates.get(roomId));
+      const res = await transformPlaceholderInChunkState(
+        roomId,
+        existingChunkState,
+        (ev) => {
+          const meta = localPlaceholderOf(ev);
+          return meta?.id === localId && meta.status === "failed";
         },
-      };
+        (ev) => ({
+          ...ev,
+          waypoint_local: {
+            id: localId,
+            status: "unconfirmed",
+            txnId: newTxnId,
+            ...(attachmentId && attachmentMeta ? { attachmentId, attachmentMeta } : {}),
+          },
+        }),
+      );
+      if (!res.matched) {
+        return;
+      }
+      const nextRoom = buildRoomFromChunkState(
+        extractRoomMeta(existingRoom),
+        res.chunkState,
+        Boolean(existingRoom.hasOlderLocalChunks),
+        existingRoom.coldUnreadState,
+      );
       const nextRooms = {
         ...this.storedRooms,
-        [roomId]: {
-          ...existingRoom,
-          timelineEvents: nextTimeline,
-        },
+        [roomId]: nextRoom,
       };
       const nextPending = [...this.storedPendingEvents, item];
       await saveResendEvent({
-        roomId,
         pendingEvent: item,
-        timelineEvents: nextTimeline,
+        chunkWrite: res.chunkWrite,
       });
       this.pendingOrderSeq += 1;
       this.storedPendingEvents = nextPending;
+      this.roomChunkStates.set(roomId, res.chunkState);
       this.storedRooms = nextRooms;
       created = clonePendingEvent(item);
     });
@@ -1655,22 +2070,37 @@ export class MatrixClient {
       if (!existingRoom) {
         return;
       }
-      const placeholderIndex = existingRoom.timelineEvents.findIndex((ev) => {
+      const targetPlaceholder = existingRoom.timelineEvents.find((ev) => {
         const meta = localPlaceholderOf(ev);
         return meta?.id === localId && meta.status === "failed";
       });
-      if (placeholderIndex === -1) {
+      if (!targetPlaceholder) {
         return;
       }
-      const removedMeta = localPlaceholderOf(existingRoom.timelineEvents[placeholderIndex]);
-      const nextTimeline = [...existingRoom.timelineEvents];
-      nextTimeline.splice(placeholderIndex, 1);
+      const removedMeta = localPlaceholderOf(targetPlaceholder);
+      const existingChunkState = cloneChunkState(this.roomChunkStates.get(roomId));
+      const res = await transformPlaceholderInChunkState(
+        roomId,
+        existingChunkState,
+        (ev) => {
+          const meta = localPlaceholderOf(ev);
+          return meta?.id === localId && meta.status === "failed";
+        },
+        () => undefined,
+      );
+      if (!res.matched) {
+        return;
+      }
+      const nextRoom = buildRoomFromChunkState(
+        extractRoomMeta(existingRoom),
+        res.chunkState,
+        Boolean(existingRoom.hasOlderLocalChunks),
+        existingRoom.coldUnreadState,
+      );
+      const roomMetaChanged = didRoomChunkMetaChange(existingRoom, nextRoom);
       const nextRooms = {
         ...this.storedRooms,
-        [roomId]: {
-          ...existingRoom,
-          timelineEvents: nextTimeline,
-        },
+        [roomId]: nextRoom,
       };
       const deleteBlobIds: string[] = [];
       if (
@@ -1686,9 +2116,11 @@ export class MatrixClient {
       }
       await saveDiscardFailedEvent({
         roomId,
-        timelineEvents: nextTimeline,
+        chunkWrite: res.chunkWrite,
+        roomMeta: roomMetaChanged ? extractRoomMeta(nextRoom) : undefined,
         deleteBlobIds,
       });
+      this.roomChunkStates.set(roomId, res.chunkState);
       this.storedRooms = nextRooms;
       removed = true;
     });
@@ -1708,30 +2140,39 @@ export class MatrixClient {
       );
       const isNewRoom = !(roomId in this.storedRooms);
       const existingRoom = this.storedRooms[roomId] ?? { stateEvents: [], timelineEvents: [] };
-      const placeholderIndex = existingRoom.timelineEvents.findIndex(
+      const existingChunkState = cloneChunkState(this.roomChunkStates.get(roomId));
+      const placeholder = existingRoom.timelineEvents.find(
         (ev) => localPlaceholderOf(ev)?.txnId === txnId,
       );
-      let nextTimeline = existingRoom.timelineEvents;
-      if (placeholderIndex !== -1) {
-        const placeholder = existingRoom.timelineEvents[placeholderIndex];
-        const meta = localPlaceholderOf(placeholder)!;
-        const attachmentId = meta.attachmentId ?? pending?.attachmentId;
-        const attachmentMeta = meta.attachmentMeta ?? pending?.attachmentMeta;
-        nextTimeline = [...existingRoom.timelineEvents];
-        nextTimeline[placeholderIndex] = {
-          ...placeholder,
-          waypoint_local: {
-            id: meta.id,
-            status: "failed",
-            txnId,
-            ...(attachmentId && attachmentMeta
-              ? { attachmentId, attachmentMeta: { ...attachmentMeta } }
-              : {}),
+      let nextChunkState = existingChunkState;
+      let chunkWrite: ChunkWriteOp | undefined;
+
+      if (placeholder) {
+        const res = await transformPlaceholderInChunkState(
+          roomId,
+          existingChunkState,
+          (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+          (ev) => {
+            const meta = localPlaceholderOf(ev)!;
+            const attachmentId = meta.attachmentId ?? pending?.attachmentId;
+            const attachmentMeta = meta.attachmentMeta ?? pending?.attachmentMeta;
+            return {
+              ...ev,
+              waypoint_local: {
+                id: meta.id,
+                status: "failed",
+                txnId,
+                ...(attachmentId && attachmentMeta
+                  ? { attachmentId, attachmentMeta: { ...attachmentMeta } }
+                  : {}),
+              },
+            };
           },
-        };
+        );
+        nextChunkState = res.chunkState;
+        chunkWrite = res.chunkWrite;
       } else if (pending && pending.type === "m.room.message") {
-        nextTimeline = [
-          ...existingRoom.timelineEvents,
+        const appended = appendEventsToChunkState(roomId, existingChunkState, [
           {
             type: pending.type,
             sender: pending.sender,
@@ -1748,12 +2189,21 @@ export class MatrixClient {
                 : {}),
             },
           },
-        ];
+        ]);
+        nextChunkState = appended.chunkState;
+        chunkWrite = appended.chunkWrite;
       }
-      const nextRoom: StoredRoomEvents =
-        nextTimeline !== existingRoom.timelineEvents
-          ? { ...existingRoom, timelineEvents: nextTimeline }
+
+      const nextRoom =
+        chunkWrite || isNewRoom
+          ? buildRoomFromChunkState(
+              extractRoomMeta(existingRoom),
+              nextChunkState,
+              Boolean(existingRoom.hasOlderLocalChunks),
+              existingRoom.coldUnreadState,
+            )
           : existingRoom;
+      const roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
       const nextRooms =
         nextRoom !== existingRoom || isNewRoom
           ? { ...this.storedRooms, [roomId]: nextRoom }
@@ -1762,10 +2212,11 @@ export class MatrixClient {
       await saveFailedEvent({
         roomId,
         txnId,
-        timelineEvents: nextRoom.timelineEvents,
-        roomMeta: isNewRoom ? extractRoomMeta(nextRoom) : undefined,
+        chunkWrite,
+        roomMeta: roomMetaChanged ? extractRoomMeta(nextRoom) : undefined,
       });
       this.storedPendingEvents = nextPending;
+      this.roomChunkStates.set(roomId, nextChunkState);
       this.storedRooms = nextRooms;
     });
   }
@@ -1844,6 +2295,7 @@ export class MatrixClient {
       this.syncCursor = undefined;
       this.storedAccountData = {};
       this.storedRooms = {};
+      this.roomChunkStates.clear();
       this.storedPendingEvents = [];
       this.storedPendingReadMarkers = [];
       this.storedDrafts = {};
@@ -1921,8 +2373,15 @@ export class MatrixClient {
 }
 
 function extractRoomMeta(room: StoredRoomEvents): StoredRoomMeta {
-  const { timelineEvents: _ignored, ...meta } = room;
+  const {
+    timelineEvents: _ignored,
+    hasOlderLocalChunks: _ignoredOlder,
+    coldUnreadState: _ignoredUnread,
+    ...meta
+  } = room;
   void _ignored;
+  void _ignoredOlder;
+  void _ignoredUnread;
   return meta;
 }
 
@@ -2164,69 +2623,443 @@ function sanitizePlaceholderForMemory(event: RawMatrixEvent): RawMatrixEvent {
   };
 }
 
-function normalizeStoredRooms(rooms: Record<string, unknown>): Record<string, StoredRoomEvents> {
-  const cloned: Record<string, StoredRoomEvents> = {};
-  for (const [roomId, value] of Object.entries(rooms)) {
-    if (!isPlainObject(value)) {
-      continue;
-    }
-    const stateEvents = Array.isArray(value.stateEvents)
-      ? value.stateEvents.filter(isPlainObject).map(cloneObject)
-      : [];
-    const timelineEvents = Array.isArray(value.timelineEvents)
-      ? value.timelineEvents.filter(isPlainObject).map(sanitizePlaceholderForMemory)
-      : [];
-    const gaps: StoredTimelineGap[] = [];
-    if (Array.isArray(value.timelineGaps)) {
-      for (const rawGap of value.timelineGaps) {
-        const g = cloneStoredGap(rawGap);
-        if (g) {
-          gaps.push(g);
-        }
-      }
-    }
-    if (gaps.length === 0) {
-      const single = cloneStoredGap(value.timelineGap);
-      if (single) {
-        gaps.push(single);
-      }
-    }
-    const backwardToken =
-      typeof value.backwardToken === "string" && value.backwardToken !== ""
-        ? value.backwardToken
-        : gaps.length === 1 &&
-            gaps[0].prevBatch &&
-            (timelineEvents.findIndex((ev) => !localPlaceholderOf(ev)) === -1 ||
-              gaps[0].gapBeforeEventId ===
-                eventIdOf(
-                  timelineEvents[timelineEvents.findIndex((ev) => !localPlaceholderOf(ev))] ?? {},
-                ))
-          ? gaps[0].prevBatch
-          : undefined;
-    const reachedStart = value.reachedStart === true;
-    cloned[roomId] = {
-      stateEvents,
-      timelineEvents,
-      ...(gaps.length > 0 ? { timelineGap: { ...gaps[0] }, timelineGaps: gaps } : {}),
-      ...(backwardToken && !reachedStart ? { backwardToken } : {}),
-      ...(reachedStart ? { reachedStart: true } : {}),
-      ...(typeof value.readPositionEventId === "string" && value.readPositionEventId !== ""
-        ? { readPositionEventId: value.readPositionEventId }
-        : {}),
-      ...(typeof value.fullyReadEventId === "string" && value.fullyReadEventId !== ""
-        ? { fullyReadEventId: value.fullyReadEventId }
-        : {}),
-      ...(typeof value.privateReadEventId === "string" && value.privateReadEventId !== ""
-        ? { privateReadEventId: value.privateReadEventId }
-        : {}),
-      ...(isPlainObject(value.tags) && Object.keys(value.tags).length > 0
-        ? { tags: cloneValue(value.tags) as Record<string, unknown> }
-        : {}),
-      ...(value.encryptedIrreversible === true ? { encryptedIrreversible: true as const } : {}),
-      ...(value.inviteFailed === true ? { inviteFailed: true as const } : {}),
+type RoomChunkState = {
+  loadedChunks: TimelineChunkRecord[];
+  coldPlaceholders: Array<{ seq: number; event: RawMatrixEvent }>;
+  chunkMinSeq?: number;
+  chunkMaxSeq?: number;
+  placeholderChunkSeqs: number[];
+};
+
+function cloneChunkState(state: RoomChunkState | undefined): RoomChunkState {
+  if (!state) {
+    return {
+      loadedChunks: [],
+      coldPlaceholders: [],
+      placeholderChunkSeqs: [],
     };
   }
-  return cloned;
+  return {
+    loadedChunks: state.loadedChunks.map((c) => ({
+      roomId: c.roomId,
+      seq: c.seq,
+      events: [...c.events],
+    })),
+    coldPlaceholders: state.coldPlaceholders.map((p) => ({ ...p })),
+    chunkMinSeq: state.chunkMinSeq,
+    chunkMaxSeq: state.chunkMaxSeq,
+    placeholderChunkSeqs: [...state.placeholderChunkSeqs],
+  };
+}
+
+function normalizeStoredRoomMetaObj(
+  raw: StoredRoomMeta,
+  loadedChunks: TimelineChunkRecord[],
+  hasOlderLocalChunks: boolean,
+): StoredRoomMeta {
+  const gaps: StoredTimelineGap[] = [];
+  if (Array.isArray(raw.timelineGaps)) {
+    for (const g of raw.timelineGaps) {
+      const cloned = cloneStoredGap(g);
+      if (cloned) {
+        gaps.push(cloned);
+      }
+    }
+  } else if (raw.timelineGap) {
+    const single = cloneStoredGap(raw.timelineGap);
+    if (single) {
+      gaps.push(single);
+    }
+  }
+  const loadedEvents = loadedChunks.flatMap((c) => c.events);
+  const reachedStart = raw.reachedStart === true;
+  const backwardToken =
+    typeof raw.backwardToken === "string" && raw.backwardToken !== ""
+      ? raw.backwardToken
+      : !hasOlderLocalChunks &&
+          gaps.length === 1 &&
+          gaps[0]!.prevBatch &&
+          (loadedEvents.findIndex((ev) => !localPlaceholderOf(ev)) === -1 ||
+            gaps[0]!.gapBeforeEventId ===
+              eventIdOf(
+                loadedEvents[loadedEvents.findIndex((ev) => !localPlaceholderOf(ev))] ?? {},
+              ))
+        ? gaps[0]!.prevBatch
+        : undefined;
+  return {
+    stateEvents: raw.stateEvents.map(cloneObject),
+    ...(gaps.length > 0 ? { timelineGap: { ...gaps[0]! }, timelineGaps: gaps } : {}),
+    ...(backwardToken && !reachedStart ? { backwardToken } : {}),
+    ...(reachedStart ? { reachedStart: true } : {}),
+    ...(raw.readPositionEventId ? { readPositionEventId: raw.readPositionEventId } : {}),
+    ...(raw.fullyReadEventId ? { fullyReadEventId: raw.fullyReadEventId } : {}),
+    ...(raw.privateReadEventId ? { privateReadEventId: raw.privateReadEventId } : {}),
+    ...(isPlainObject(raw.tags) && Object.keys(raw.tags).length > 0
+      ? { tags: cloneValue(raw.tags) as Record<string, unknown> }
+      : {}),
+    ...(raw.encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
+    ...(raw.inviteFailed ? { inviteFailed: true as const } : {}),
+    ...(raw.lastActivityTs !== undefined ? { lastActivityTs: raw.lastActivityTs } : {}),
+    ...(raw.chunkMinSeq !== undefined ? { chunkMinSeq: raw.chunkMinSeq } : {}),
+    ...(raw.chunkMaxSeq !== undefined ? { chunkMaxSeq: raw.chunkMaxSeq } : {}),
+    ...(raw.placeholderChunkSeqs && raw.placeholderChunkSeqs.length > 0
+      ? { placeholderChunkSeqs: [...raw.placeholderChunkSeqs] }
+      : {}),
+    ...(raw.readPositionInLocal !== undefined
+      ? { readPositionInLocal: raw.readPositionInLocal }
+      : {}),
+  };
+}
+
+function syncChunkBounds(state: RoomChunkState, hasOlderLocalChunks: boolean): void {
+  const placeholderSeqs = new Set<number>();
+  for (const cp of state.coldPlaceholders) {
+    placeholderSeqs.add(cp.seq);
+  }
+  for (const c of state.loadedChunks) {
+    if (c.events.some(localPlaceholderOf)) {
+      placeholderSeqs.add(c.seq);
+    }
+  }
+  state.placeholderChunkSeqs = Array.from(placeholderSeqs).sort((a, b) => a - b);
+  if (state.loadedChunks.length === 0) {
+    if (!hasOlderLocalChunks) {
+      state.chunkMinSeq = undefined;
+      state.chunkMaxSeq = undefined;
+    }
+    return;
+  }
+  const minLoaded = state.loadedChunks[0]!.seq;
+  const maxLoaded = state.loadedChunks[state.loadedChunks.length - 1]!.seq;
+  if (!hasOlderLocalChunks) {
+    state.chunkMinSeq = minLoaded;
+  } else if (state.chunkMinSeq === undefined || minLoaded < state.chunkMinSeq) {
+    state.chunkMinSeq = minLoaded;
+  }
+  state.chunkMaxSeq = maxLoaded;
+}
+
+function buildRoomFromChunkState(
+  roomMeta: StoredRoomMeta,
+  state: RoomChunkState,
+  hasOlderLocalChunks: boolean,
+  coldUnreadState: ColdUnreadState | undefined,
+): StoredRoomEvents {
+  syncChunkBounds(state, hasOlderLocalChunks);
+  const timelineEvents: RawMatrixEvent[] = [
+    ...state.coldPlaceholders.map((p) => p.event),
+    ...state.loadedChunks.flatMap((c) => c.events),
+  ];
+  const next: StoredRoomEvents = {
+    ...roomMeta,
+    timelineEvents,
+    ...(state.chunkMinSeq !== undefined ? { chunkMinSeq: state.chunkMinSeq } : {}),
+    ...(state.chunkMaxSeq !== undefined ? { chunkMaxSeq: state.chunkMaxSeq } : {}),
+    ...(state.placeholderChunkSeqs.length > 0
+      ? { placeholderChunkSeqs: [...state.placeholderChunkSeqs] }
+      : {}),
+    ...(hasOlderLocalChunks ? { hasOlderLocalChunks: true } : {}),
+    ...(coldUnreadState ? { coldUnreadState } : {}),
+  };
+  if (state.chunkMinSeq === undefined) {
+    delete next.chunkMinSeq;
+  }
+  if (state.chunkMaxSeq === undefined) {
+    delete next.chunkMaxSeq;
+  }
+  if (state.placeholderChunkSeqs.length === 0) {
+    delete next.placeholderChunkSeqs;
+  }
+  if (!hasOlderLocalChunks) {
+    delete next.hasOlderLocalChunks;
+  }
+  if (!coldUnreadState) {
+    delete next.coldUnreadState;
+  }
+  return next;
+}
+
+function didRoomChunkMetaChange(prev: StoredRoomEvents, next: StoredRoomEvents): boolean {
+  if (
+    prev.chunkMinSeq !== next.chunkMinSeq ||
+    prev.chunkMaxSeq !== next.chunkMaxSeq ||
+    prev.lastActivityTs !== next.lastActivityTs ||
+    prev.readPositionInLocal !== next.readPositionInLocal
+  ) {
+    return true;
+  }
+  const prevP = prev.placeholderChunkSeqs ?? [];
+  const nextP = next.placeholderChunkSeqs ?? [];
+  if (prevP.length !== nextP.length) {
+    return true;
+  }
+  for (let i = 0; i < prevP.length; i += 1) {
+    if (prevP[i] !== nextP[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function appendEventsToChunkState(
+  roomId: string,
+  state: RoomChunkState,
+  eventsToAppend: RawMatrixEvent[],
+): { chunkState: RoomChunkState; chunkWrite: ChunkWriteOp } {
+  const next = cloneChunkState(state);
+  const putChunks: TimelineChunkRecord[] = [];
+  if (eventsToAppend.length === 0) {
+    return { chunkState: next, chunkWrite: { roomId } };
+  }
+  let idx = 0;
+  if (next.loadedChunks.length > 0) {
+    const tailIdx = next.loadedChunks.length - 1;
+    const tail = next.loadedChunks[tailIdx]!;
+    if (tail.events.length < TIMELINE_CHUNK_SIZE) {
+      const space = TIMELINE_CHUNK_SIZE - tail.events.length;
+      const take = eventsToAppend.slice(0, space);
+      const updatedTail: TimelineChunkRecord = {
+        roomId,
+        seq: tail.seq,
+        events: [...tail.events, ...take],
+      };
+      next.loadedChunks[tailIdx] = updatedTail;
+      putChunks.push(updatedTail);
+      idx += take.length;
+    }
+  }
+  let nextSeq =
+    next.loadedChunks.length > 0
+      ? next.loadedChunks[next.loadedChunks.length - 1]!.seq + 1
+      : (next.chunkMaxSeq !== undefined ? next.chunkMaxSeq + 1 : 0);
+  while (idx < eventsToAppend.length) {
+    const slice = eventsToAppend.slice(idx, idx + TIMELINE_CHUNK_SIZE);
+    const created: TimelineChunkRecord = { roomId, seq: nextSeq, events: slice };
+    next.loadedChunks.push(created);
+    putChunks.push(created);
+    nextSeq += 1;
+    idx += slice.length;
+  }
+  return {
+    chunkState: next,
+    chunkWrite: { roomId, putChunks },
+  };
+}
+
+async function transformPlaceholderInChunkState(
+  roomId: string,
+  state: RoomChunkState,
+  predicate: (ev: RawMatrixEvent) => boolean,
+  transform: (ev: RawMatrixEvent) => RawMatrixEvent | undefined,
+): Promise<{
+  matched: boolean;
+  chunkState: RoomChunkState;
+  chunkWrite?: ChunkWriteOp;
+}> {
+  const next = cloneChunkState(state);
+  for (let cIdx = next.loadedChunks.length - 1; cIdx >= 0; cIdx -= 1) {
+    const chunk = next.loadedChunks[cIdx]!;
+    const eIdx = chunk.events.findIndex(predicate);
+    if (eIdx === -1) {
+      continue;
+    }
+    const replacement = transform(chunk.events[eIdx]!);
+    const nextEvents = [...chunk.events];
+    if (replacement === undefined) {
+      nextEvents.splice(eIdx, 1);
+    } else {
+      nextEvents[eIdx] = replacement;
+    }
+    if (nextEvents.length === 0) {
+      next.loadedChunks.splice(cIdx, 1);
+      return {
+        matched: true,
+        chunkState: next,
+        chunkWrite: { roomId, deleteChunkSeqs: [chunk.seq] },
+      };
+    }
+    const updatedChunk: TimelineChunkRecord = {
+      roomId,
+      seq: chunk.seq,
+      events: nextEvents,
+    };
+    next.loadedChunks[cIdx] = updatedChunk;
+    return {
+      matched: true,
+      chunkState: next,
+      chunkWrite: { roomId, putChunks: [updatedChunk] },
+    };
+  }
+
+  const cpIdx = next.coldPlaceholders.findIndex((cp) => predicate(cp.event));
+  if (cpIdx !== -1) {
+    const cp = next.coldPlaceholders[cpIdx]!;
+    const coldChunk = await loadTimelineChunk(roomId, cp.seq);
+    if (coldChunk) {
+      const eIdx = coldChunk.events.findIndex(predicate);
+      if (eIdx !== -1) {
+        const replacement = transform(coldChunk.events[eIdx]!);
+        const nextEvents = [...coldChunk.events];
+        if (replacement === undefined) {
+          nextEvents.splice(eIdx, 1);
+        } else {
+          nextEvents[eIdx] = replacement;
+        }
+        next.coldPlaceholders.splice(cpIdx, 1);
+        if (replacement !== undefined && localPlaceholderOf(replacement)) {
+          next.coldPlaceholders.push({ seq: cp.seq, event: replacement });
+          next.coldPlaceholders.sort((a, b) => a.seq - b.seq);
+        }
+        if (nextEvents.length === 0) {
+          return {
+            matched: true,
+            chunkState: next,
+            chunkWrite: { roomId, deleteChunkSeqs: [cp.seq] },
+          };
+        }
+        return {
+          matched: true,
+          chunkState: next,
+          chunkWrite: {
+            roomId,
+            putChunks: [{ roomId, seq: cp.seq, events: nextEvents }],
+          },
+        };
+      }
+    }
+  }
+
+  return { matched: false, chunkState: next };
+}
+
+async function resolveColdUnreadForRoom(
+  roomId: string,
+  roomMeta: StoredRoomMeta,
+  loadedChunks: TimelineChunkRecord[],
+  hasOlderLocalChunks: boolean,
+): Promise<{ coldUnreadState?: ColdUnreadState; readPositionInLocal?: boolean }> {
+  if (!hasOlderLocalChunks) {
+    return {};
+  }
+  const hotEvents = loadedChunks.flatMap((c) => c.events);
+  const readPos = roomMeta.readPositionEventId;
+  const agentUserId = boundAgentUserIdFromState(roomMeta.stateEvents);
+
+  if (readPos !== undefined) {
+    if (timelineIndexOf(hotEvents, readPos) !== -1) {
+      return { readPositionInLocal: true };
+    }
+    if (roomMeta.readPositionInLocal === false) {
+      return {
+        coldUnreadState: { unread: false, readPositionUnknown: true },
+        readPositionInLocal: false,
+      };
+    }
+    if (roomMeta.readPositionInLocal === true) {
+      if (!agentUserId) {
+        return {
+          coldUnreadState: { unread: false, readPositionUnknown: false },
+          readPositionInLocal: true,
+        };
+      }
+      const hotEval = evaluateRoomUnreadFromEvents(hotEvents, undefined, agentUserId);
+      if (hotEval.unread) {
+        return {
+          coldUnreadState: { unread: true, readPositionUnknown: false },
+          readPositionInLocal: true,
+        };
+      }
+      const minHotSeq = loadedChunks.length > 0 ? loadedChunks[0]!.seq : undefined;
+      const scannedDesc: TimelineChunkRecord[] = [];
+      let outcome: ColdUnreadState = { unread: false, readPositionUnknown: false };
+      let foundReadPos = false;
+      await scanRoomChunksBackward(roomId, minHotSeq, (chunk) => {
+        scannedDesc.push(chunk);
+        const combined = [...[...scannedDesc].reverse().flatMap((c) => c.events), ...hotEvents];
+        if (timelineIndexOf(chunk.events, readPos) !== -1) {
+          foundReadPos = true;
+          outcome = evaluateRoomUnreadFromEvents(combined, readPos, agentUserId);
+          return "stop";
+        }
+        const evalSoFar = evaluateRoomUnreadFromEvents(combined, undefined, agentUserId);
+        if (evalSoFar.unread) {
+          outcome = { unread: true, readPositionUnknown: false };
+          return "stop";
+        }
+        return "continue";
+      });
+      if (!foundReadPos && !outcome.unread) {
+        outcome = { unread: false, readPositionUnknown: true };
+      }
+      return {
+        coldUnreadState: outcome,
+        readPositionInLocal: foundReadPos || outcome.unread ? true : false,
+      };
+    }
+    const minHotSeq = loadedChunks.length > 0 ? loadedChunks[0]!.seq : undefined;
+    const scannedDesc: TimelineChunkRecord[] = [];
+    let foundReadPos = false;
+    await scanRoomChunksBackward(roomId, minHotSeq, (chunk) => {
+      scannedDesc.push(chunk);
+      if (timelineIndexOf(chunk.events, readPos) !== -1) {
+        foundReadPos = true;
+        return "stop";
+      }
+      return "continue";
+    });
+    if (!foundReadPos) {
+      return {
+        coldUnreadState: { unread: false, readPositionUnknown: true },
+        readPositionInLocal: false,
+      };
+    }
+    const combined = [...[...scannedDesc].reverse().flatMap((c) => c.events), ...hotEvents];
+    return {
+      coldUnreadState: evaluateRoomUnreadFromEvents(combined, readPos, agentUserId),
+      readPositionInLocal: true,
+    };
+  }
+
+  const hotEval = evaluateRoomUnreadFromEvents(hotEvents, undefined, agentUserId);
+  if (hotEval.unread) {
+    return { coldUnreadState: { unread: true, readPositionUnknown: false } };
+  }
+  if (!agentUserId) {
+    return { coldUnreadState: { unread: false, readPositionUnknown: false } };
+  }
+  const minHotSeq = loadedChunks.length > 0 ? loadedChunks[0]!.seq : undefined;
+  const scannedDesc: TimelineChunkRecord[] = [];
+  let foundUnread = false;
+  await scanRoomChunksBackward(roomId, minHotSeq, (chunk) => {
+    scannedDesc.push(chunk);
+    const combined = [...[...scannedDesc].reverse().flatMap((c) => c.events), ...hotEvents];
+    if (evaluateRoomUnreadFromEvents(combined, undefined, agentUserId).unread) {
+      foundUnread = true;
+      return "stop";
+    }
+    return "continue";
+  });
+  return {
+    coldUnreadState: { unread: foundUnread, readPositionUnknown: false },
+  };
+}
+
+function collectRedactionTargetsInto(
+  events: RawMatrixEvent[],
+  targetSet: Set<string>,
+): void {
+  for (const ev of events) {
+    const targetId = redactedEventIdOf(ev);
+    if (targetId !== undefined) {
+      targetSet.add(targetId);
+    }
+    if (isRedactedStub(ev)) {
+      const id = eventIdOf(ev);
+      if (id !== undefined) {
+        targetSet.add(id);
+      }
+    }
+  }
 }
 
 function reconcileGapsAfterTimelineChange(
@@ -2234,6 +3067,8 @@ function reconcileGapsAfterTimelineChange(
   oldTimeline: RawMatrixEvent[],
   mergedIds: Set<string>,
   firstNewInBatch: string | undefined,
+  oldLoadedIds?: Set<string>,
+  redactedIds?: Set<string>,
 ): StoredTimelineGap[] {
   const next: StoredTimelineGap[] = [];
   for (const gap of gaps) {
@@ -2253,6 +3088,14 @@ function reconcileGapsAfterTimelineChange(
       continue;
     }
     if (gap.gapBeforeEventId && !mergedIds.has(gap.gapBeforeEventId)) {
+      if (
+        oldLoadedIds &&
+        !oldLoadedIds.has(gap.gapBeforeEventId) &&
+        !(redactedIds && redactedIds.has(gap.gapBeforeEventId))
+      ) {
+        next.push({ ...gap });
+        continue;
+      }
       const oldGapIdx = timelineIndexOf(oldTimeline, gap.gapBeforeEventId);
       const nextExistingAnchor =
         oldGapIdx !== -1
@@ -2276,32 +3119,36 @@ function reconcileGapsAfterTimelineChange(
   return next;
 }
 
-function mergeSyncRooms(
+async function mergeSyncRoomsChunked(
   current: Record<string, StoredRoomEvents>,
+  currentChunkStates: Map<string, RoomChunkState>,
   body: unknown,
   ownerUserId: string,
   leaveGeneration?: number,
   leftAtGeneration?: Map<string, number>,
   tagGeneration?: number,
   tagUpdatedAtGeneration?: Map<string, number>,
-): {
+): Promise<{
   rooms: Record<string, StoredRoomEvents>;
+  chunkStates: Map<string, RoomChunkState>;
   metaChangedRoomIds: string[];
-  timelineChangedRoomIds: string[];
+  chunkWrites: ChunkWriteOp[];
   deletedRoomIds: string[];
   removedAttachmentIds: string[];
-} {
+}> {
   const next: Record<string, StoredRoomEvents> = { ...current };
+  const nextChunkStates = new Map<string, RoomChunkState>(currentChunkStates);
   const metaChangedRoomIds: string[] = [];
-  const timelineChangedRoomIds: string[] = [];
+  const chunkWrites: ChunkWriteOp[] = [];
   const deletedRoomIds: string[] = [];
   const removedAttachmentIds: string[] = [];
 
   if (!isPlainObject(body) || !isPlainObject(body.rooms)) {
     return {
       rooms: next,
+      chunkStates: nextChunkStates,
       metaChangedRoomIds,
-      timelineChangedRoomIds,
+      chunkWrites,
       deletedRoomIds,
       removedAttachmentIds,
     };
@@ -2322,9 +3169,12 @@ function mergeSyncRooms(
       }
       const existing = next[roomId] ?? { stateEvents: [], timelineEvents: [] };
       const isNewRoom = !(roomId in next);
-      const existingConfirmedCount = existing.timelineEvents.filter(
-        (ev) => !localPlaceholderOf(ev),
-      ).length;
+      const chunkState = cloneChunkState(nextChunkStates.get(roomId));
+      const hasOlderLocalChunks = Boolean(existing.hasOlderLocalChunks);
+      const existingConfirmedCount =
+        existing.timelineEvents.filter((ev) => !localPlaceholderOf(ev)).length +
+        (hasOlderLocalChunks ? 1 : 0);
+
       const rawState =
         isPlainObject(roomSync.state) && Array.isArray(roomSync.state.events)
           ? roomSync.state.events.filter(isPlainObject)
@@ -2345,36 +3195,306 @@ function mergeSyncRooms(
         roomSync.timeline.prev_batch !== ""
           ? roomSync.timeline.prev_batch
           : undefined;
-      const {
-        timeline: mergedTimeline,
-        redactedIds,
-        changed: timelineChanged,
-        removedAttachmentIds: roomRemovedAttachments,
-      } = mergeTimelineEventsWithRedactions(existing.timelineEvents, rawTimeline);
-      for (const attId of roomRemovedAttachments) {
-        removedAttachmentIds.push(attId);
+
+      const loadedBeforeEvents = chunkState.loadedChunks.flatMap((c) => c.events);
+      const oldLoadedIds = new Set(
+        loadedBeforeEvents.map(eventIdOf).filter((id): id is string => id !== undefined),
+      );
+
+      const incomingRedactedIds = new Set<string>();
+      collectRedactionTargetsInto(rawTimeline, incomingRedactedIds);
+
+      const redactedIds = new Set<string>(incomingRedactedIds);
+      collectRedactionTargetsInto(loadedBeforeEvents, redactedIds);
+
+      const dirtyChunkMap = new Map<number, TimelineChunkRecord>();
+      const deletedChunkSeqs = new Set<number>();
+      let coldEventsScanned: TimelineChunkRecord[] | undefined;
+      let removedRedactedTsMax: number | undefined;
+      let coldReadPosFallback: string | undefined;
+      let coldReadPosRemoved = false;
+
+      const unmatchedIncomingRedacted = Array.from(incomingRedactedIds).filter(
+        (id) => !oldLoadedIds.has(id),
+      );
+      if (unmatchedIncomingRedacted.length > 0 && hasOlderLocalChunks) {
+        const minLoadedSeq =
+          chunkState.loadedChunks.length > 0
+            ? chunkState.loadedChunks[0]!.seq
+            : chunkState.chunkMaxSeq !== undefined
+              ? chunkState.chunkMaxSeq + 1
+              : Infinity;
+        coldEventsScanned = await loadTimelineChunksBefore(roomId, minLoadedSeq, Infinity);
+        for (const chunk of coldEventsScanned) {
+          collectRedactionTargetsInto(chunk.events, redactedIds);
+        }
       }
 
-      const existingIds = new Set(
-        existing.timelineEvents.map(eventIdOf).filter((id): id is string => id !== undefined),
-      );
+      const shouldOmit = (event: RawMatrixEvent): boolean => {
+        if (event.type === "m.room.redaction" || isRedactedStub(event)) {
+          return true;
+        }
+        const id = eventIdOf(event);
+        if (id !== undefined && redactedIds.has(id)) {
+          return true;
+        }
+        const replaceTarget = replaceTargetIdOf(event);
+        if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
+          return true;
+        }
+        const reactionTarget = reactionTargetIdOf(event);
+        if (reactionTarget !== undefined && redactedIds.has(reactionTarget)) {
+          return true;
+        }
+        return false;
+      };
+
+      const filterChunkEvents = (
+        events: RawMatrixEvent[],
+      ): { events: RawMatrixEvent[]; modified: boolean } => {
+        if (redactedIds.size === 0) {
+          return { events, modified: false };
+        }
+        let modified = false;
+        const out: RawMatrixEvent[] = [];
+        for (const ev of events) {
+          if (!shouldOmit(ev)) {
+            out.push(ev);
+          } else if (shouldPreserveRedactedReaction(ev, redactedIds)) {
+            modified = true;
+            out.push(markRedactedReaction(ev));
+          } else {
+            modified = true;
+            const ts = ev.origin_server_ts;
+            if (typeof ts === "number" && Number.isFinite(ts)) {
+              removedRedactedTsMax =
+                removedRedactedTsMax !== undefined ? Math.max(removedRedactedTsMax, ts) : ts;
+            }
+          }
+        }
+        return { events: modified ? out : events, modified };
+      };
+
+      if (coldEventsScanned) {
+        if (
+          existing.readPositionEventId !== undefined &&
+          redactedIds.has(existing.readPositionEventId)
+        ) {
+          const allCold = coldEventsScanned.flatMap((c) => c.events);
+          const idx = timelineIndexOf(allCold, existing.readPositionEventId);
+          if (idx !== -1) {
+            coldReadPosRemoved = true;
+            for (let i = idx - 1; i >= 0; i -= 1) {
+              const candidate = allCold[i]!;
+              const cid = eventIdOf(candidate);
+              if (cid !== undefined && !shouldOmit(candidate)) {
+                coldReadPosFallback = cid;
+                break;
+              }
+            }
+          }
+        }
+        for (let cIdx = 0; cIdx < coldEventsScanned.length; cIdx += 1) {
+          const coldChunk = coldEventsScanned[cIdx]!;
+          const filtered = filterChunkEvents(coldChunk.events);
+          if (filtered.modified) {
+            if (filtered.events.length === 0) {
+              deletedChunkSeqs.add(coldChunk.seq);
+            } else {
+              const updated = { roomId, seq: coldChunk.seq, events: filtered.events };
+              coldEventsScanned[cIdx] = updated;
+              dirtyChunkMap.set(coldChunk.seq, updated);
+            }
+          }
+        }
+      }
+
+      if (rawTimeline.length > 0 && redactedIds.size > 0) {
+        for (let cIdx = chunkState.loadedChunks.length - 1; cIdx >= 0; cIdx -= 1) {
+          const chunk = chunkState.loadedChunks[cIdx]!;
+          const filtered = filterChunkEvents(chunk.events);
+          if (filtered.modified) {
+            if (filtered.events.length === 0) {
+              deletedChunkSeqs.add(chunk.seq);
+              chunkState.loadedChunks.splice(cIdx, 1);
+            } else {
+              const updated = { roomId, seq: chunk.seq, events: filtered.events };
+              chunkState.loadedChunks[cIdx] = updated;
+              dirtyChunkMap.set(chunk.seq, updated);
+            }
+          }
+        }
+      }
+
+      const indexByEventId = new Map<string, { cIdx: number; eIdx: number }>();
+      const indexByLocalTxnId = new Map<string, { cIdx: number; eIdx: number }>();
+      chunkState.loadedChunks.forEach((chunk, cIdx) => {
+        chunk.events.forEach((event, eIdx) => {
+          const local = localPlaceholderOf(event);
+          if (local) {
+            indexByLocalTxnId.set(local.txnId, { cIdx, eIdx });
+            return;
+          }
+          const id = eventIdOf(event);
+          if (id !== undefined) {
+            indexByEventId.set(id, { cIdx, eIdx });
+          }
+        });
+      });
+
+      const coldPlaceholderByTxn = new Map<string, number>();
+      chunkState.coldPlaceholders.forEach((cp, idx) => {
+        const local = localPlaceholderOf(cp.event);
+        if (local) {
+          coldPlaceholderByTxn.set(local.txnId, idx);
+        }
+      });
+
+      const newTailEvents: RawMatrixEvent[] = [];
+      let incomingAppendedOrUpdated = false;
+      const incomingInsertedIds: string[] = [];
+
+      for (const rawEvent of rawTimeline) {
+        let event: RawMatrixEvent;
+        if (!shouldOmit(rawEvent)) {
+          event = cloneObject(rawEvent);
+        } else if (shouldPreserveRedactedReaction(rawEvent, redactedIds)) {
+          event = markRedactedReaction(rawEvent);
+        } else {
+          continue;
+        }
+        incomingAppendedOrUpdated = true;
+        const id = eventIdOf(event);
+        const txnId = transactionIdOf(event);
+
+        if (id !== undefined && indexByEventId.has(id)) {
+          const pos = indexByEventId.get(id)!;
+          const chunk = chunkState.loadedChunks[pos.cIdx]!;
+          const nextEvents = [...chunk.events];
+          nextEvents[pos.eIdx] = event;
+          const updated = { roomId, seq: chunk.seq, events: nextEvents };
+          chunkState.loadedChunks[pos.cIdx] = updated;
+          dirtyChunkMap.set(chunk.seq, updated);
+          if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
+            indexByLocalTxnId.delete(txnId);
+          }
+        } else if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
+          const pos = indexByLocalTxnId.get(txnId)!;
+          const chunk = chunkState.loadedChunks[pos.cIdx]!;
+          const replacedLocal = localPlaceholderOf(chunk.events[pos.eIdx]!);
+          if (replacedLocal?.attachmentId) {
+            removedAttachmentIds.push(replacedLocal.attachmentId);
+          }
+          const nextEvents = [...chunk.events];
+          nextEvents[pos.eIdx] = event;
+          const updated = { roomId, seq: chunk.seq, events: nextEvents };
+          chunkState.loadedChunks[pos.cIdx] = updated;
+          dirtyChunkMap.set(chunk.seq, updated);
+          indexByLocalTxnId.delete(txnId);
+          if (id !== undefined) {
+            indexByEventId.set(id, pos);
+          }
+        } else if (txnId !== undefined && coldPlaceholderByTxn.has(txnId)) {
+          const cpIdx = coldPlaceholderByTxn.get(txnId)!;
+          const cp = chunkState.coldPlaceholders[cpIdx]!;
+          const replacedLocal = localPlaceholderOf(cp.event);
+          if (replacedLocal?.attachmentId) {
+            removedAttachmentIds.push(replacedLocal.attachmentId);
+          }
+          const coldChunk =
+            coldEventsScanned?.find((c) => c.seq === cp.seq) ??
+            (await loadTimelineChunk(roomId, cp.seq));
+          if (coldChunk) {
+            const eIdx = coldChunk.events.findIndex(
+              (ev) => localPlaceholderOf(ev)?.txnId === txnId,
+            );
+            if (eIdx !== -1) {
+              const nextEvents = [...coldChunk.events];
+              nextEvents[eIdx] = event;
+              const updated = { roomId, seq: coldChunk.seq, events: nextEvents };
+              dirtyChunkMap.set(coldChunk.seq, updated);
+            }
+          }
+          chunkState.coldPlaceholders.splice(cpIdx, 1);
+          coldPlaceholderByTxn.delete(txnId);
+        } else {
+          newTailEvents.push(event);
+          if (id !== undefined) {
+            incomingInsertedIds.push(id);
+          }
+        }
+      }
+
+      if (newTailEvents.length > 0) {
+        const appended = appendEventsToChunkState(roomId, chunkState, newTailEvents);
+        chunkState.loadedChunks = appended.chunkState.loadedChunks;
+        for (const putChunk of appended.chunkWrite.putChunks ?? []) {
+          dirtyChunkMap.set(putChunk.seq, putChunk);
+          deletedChunkSeqs.delete(putChunk.seq);
+        }
+      }
+
+      if (!hasOlderLocalChunks) {
+        chunkState.chunkMinSeq =
+          chunkState.loadedChunks.length > 0 ? chunkState.loadedChunks[0]!.seq : undefined;
+      } else if (coldEventsScanned) {
+        const survivingCold = coldEventsScanned.filter((c) => !deletedChunkSeqs.has(c.seq));
+        if (survivingCold.length > 0) {
+          chunkState.chunkMinSeq = survivingCold[0]!.seq;
+        } else if (chunkState.loadedChunks.length > 0) {
+          chunkState.chunkMinSeq = chunkState.loadedChunks[0]!.seq;
+        } else {
+          chunkState.chunkMinSeq = undefined;
+        }
+      }
+      if (chunkState.loadedChunks.length > 0) {
+        chunkState.chunkMaxSeq =
+          chunkState.loadedChunks[chunkState.loadedChunks.length - 1]!.seq;
+      }
+
+      const placeholderSeqs = new Set<number>();
+      for (const cp of chunkState.coldPlaceholders) {
+        placeholderSeqs.add(cp.seq);
+      }
+      for (const c of chunkState.loadedChunks) {
+        if (c.events.some(localPlaceholderOf)) {
+          placeholderSeqs.add(c.seq);
+        }
+      }
+      if (coldEventsScanned) {
+        for (const c of coldEventsScanned) {
+          if (!deletedChunkSeqs.has(c.seq) && c.events.some(localPlaceholderOf)) {
+            placeholderSeqs.add(c.seq);
+          }
+        }
+      }
+      chunkState.placeholderChunkSeqs = Array.from(placeholderSeqs).sort((a, b) => a - b);
+
+      const stillHasOlder =
+        chunkState.chunkMinSeq !== undefined &&
+        chunkState.loadedChunks.length > 0 &&
+        chunkState.loadedChunks[0]!.seq > chunkState.chunkMinSeq;
+
+      const mergedTimeline = [
+        ...chunkState.coldPlaceholders.map((p) => p.event),
+        ...chunkState.loadedChunks.flatMap((c) => c.events),
+      ];
       const mergedIds = new Set(
         mergedTimeline.map(eventIdOf).filter((id): id is string => id !== undefined),
       );
-      const firstNewInBatch = mergedTimeline
-        .map(eventIdOf)
-        .find((id): id is string => id !== undefined && !existingIds.has(id));
-
+      const firstNewInBatch = incomingInsertedIds.find((id) => mergedIds.has(id));
       const overlapsExistingTimeline = rawTimeline.some((event) => {
         const id = eventIdOf(event);
-        return id !== undefined && existingIds.has(id);
+        return id !== undefined && oldLoadedIds.has(id);
       });
 
       let nextGaps = reconcileGapsAfterTimelineChange(
         roomTimelineGaps(existing),
-        existing.timelineEvents,
+        loadedBeforeEvents,
         mergedIds,
         firstNewInBatch,
+        oldLoadedIds,
+        redactedIds,
       );
       if (isLimited && !overlapsExistingTimeline) {
         const survivingIncomingAnchor = rawTimeline
@@ -2386,7 +3506,7 @@ function mergeSyncRooms(
           ...(prevBatch ? { prevBatch } : {}),
           ...(anchor ? { gapBeforeEventId: anchor } : { pendingGapAtEnd: true as const }),
         };
-        if (nextGaps.length > 0 && nextGaps[nextGaps.length - 1].pendingGapAtEnd && !anchor) {
+        if (nextGaps.length > 0 && nextGaps[nextGaps.length - 1]!.pendingGapAtEnd && !anchor) {
           nextGaps[nextGaps.length - 1] = incomingGap;
         } else {
           nextGaps.push(incomingGap);
@@ -2406,12 +3526,14 @@ function mergeSyncRooms(
       );
 
       let effectivePrevReadPos = existing.readPositionEventId;
-      if (effectivePrevReadPos !== undefined && !mergedIds.has(effectivePrevReadPos)) {
-        const oldReadIdx = timelineIndexOf(existing.timelineEvents, effectivePrevReadPos);
+      if (coldReadPosRemoved) {
+        effectivePrevReadPos = coldReadPosFallback;
+      } else if (effectivePrevReadPos !== undefined && !mergedIds.has(effectivePrevReadPos)) {
+        const oldReadIdx = timelineIndexOf(loadedBeforeEvents, effectivePrevReadPos);
         if (oldReadIdx !== -1) {
           let fallback: string | undefined;
           for (let i = oldReadIdx - 1; i >= 0; i -= 1) {
-            const candidate = eventIdOf(existing.timelineEvents[i]);
+            const candidate = eventIdOf(loadedBeforeEvents[i]!);
             if (candidate !== undefined && mergedIds.has(candidate)) {
               fallback = candidate;
               break;
@@ -2484,10 +3606,70 @@ function mergeSyncRooms(
         }
       }
 
-      const nextRoom: StoredRoomEvents = {
+      let nextLastActivityTs: number | undefined;
+      const loadedMaxTs = computeLastActivityTs(mergedTimeline);
+      if (
+        removedRedactedTsMax !== undefined &&
+        existing.lastActivityTs !== undefined &&
+        removedRedactedTsMax >= existing.lastActivityTs
+      ) {
+        let coldMaxTs: number | undefined;
+        if (coldEventsScanned) {
+          coldMaxTs = computeLastActivityTs(
+            coldEventsScanned
+              .filter((c) => !deletedChunkSeqs.has(c.seq))
+              .flatMap((c) => c.events),
+          );
+        } else if (stillHasOlder) {
+          const minLoadedSeq = chunkState.loadedChunks[0]!.seq;
+          await scanRoomChunksBackward(roomId, minLoadedSeq, (chunk) => {
+            const ts = computeLastActivityTs(chunk.events);
+            if (ts !== undefined) {
+              coldMaxTs = coldMaxTs !== undefined ? Math.max(coldMaxTs, ts) : ts;
+              return "stop";
+            }
+            return "continue";
+          });
+        }
+        nextLastActivityTs =
+          loadedMaxTs !== undefined && coldMaxTs !== undefined
+            ? Math.max(loadedMaxTs, coldMaxTs)
+            : (loadedMaxTs ?? coldMaxTs);
+      } else {
+        const incomingMaxTs = computeLastActivityTs(rawTimeline);
+        const candidates = [existing.lastActivityTs, loadedMaxTs, incomingMaxTs].filter(
+          (v): v is number => v !== undefined,
+        );
+        nextLastActivityTs = candidates.length > 0 ? Math.max(...candidates) : undefined;
+      }
+
+      let nextReadPositionInLocal: boolean | undefined = existing.readPositionInLocal;
+      if (nextReadPositionEventId === undefined) {
+        nextReadPositionInLocal = undefined;
+      } else if (mergedIds.has(nextReadPositionEventId)) {
+        nextReadPositionInLocal = true;
+      } else if (!stillHasOlder) {
+        nextReadPositionInLocal = false;
+      } else if (coldEventsScanned) {
+        nextReadPositionInLocal = coldEventsScanned.some(
+          (c) => !deletedChunkSeqs.has(c.seq) && timelineIndexOf(c.events, nextReadPositionEventId) !== -1,
+        );
+      } else if (nextReadPositionEventId !== existing.readPositionEventId) {
+        const minLoadedSeq = chunkState.loadedChunks[0]!.seq;
+        let foundInCold = false;
+        await scanRoomChunksBackward(roomId, minLoadedSeq, (chunk) => {
+          if (timelineIndexOf(chunk.events, nextReadPositionEventId) !== -1) {
+            foundInCold = true;
+            return "stop";
+          }
+          return "continue";
+        });
+        nextReadPositionInLocal = foundInCold;
+      }
+
+      const roomMetaNext: StoredRoomMeta = {
         stateEvents: mergedStateEvents,
-        timelineEvents: mergedTimeline,
-        ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
+        ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0]! }, timelineGaps: nextGaps } : {}),
         ...(nextBackwardToken && !nextReachedStart ? { backwardToken: nextBackwardToken } : {}),
         ...(nextReachedStart ? { reachedStart: true } : {}),
         ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
@@ -2496,7 +3678,41 @@ function mergeSyncRooms(
         ...(nextTags && Object.keys(nextTags).length > 0 ? { tags: nextTags } : {}),
         ...(encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
         ...(inviteFailed ? { inviteFailed: true as const } : {}),
+        ...(nextLastActivityTs !== undefined ? { lastActivityTs: nextLastActivityTs } : {}),
+        ...(nextReadPositionInLocal !== undefined ? { readPositionInLocal: nextReadPositionInLocal } : {}),
       };
+
+      let nextColdUnreadState: ColdUnreadState | undefined;
+      if (stillHasOlder) {
+        if (nextReadPositionEventId !== undefined && mergedIds.has(nextReadPositionEventId)) {
+          nextColdUnreadState = undefined;
+        } else if (
+          nextReadPositionEventId === existing.readPositionEventId &&
+          !coldEventsScanned &&
+          existing.coldUnreadState &&
+          !incomingAppendedOrUpdated
+        ) {
+          nextColdUnreadState = existing.coldUnreadState;
+        } else {
+          const res = await resolveColdUnreadForRoom(
+            roomId,
+            roomMetaNext,
+            chunkState.loadedChunks,
+            stillHasOlder,
+          );
+          nextColdUnreadState = res.coldUnreadState;
+          if (res.readPositionInLocal !== undefined) {
+            roomMetaNext.readPositionInLocal = res.readPositionInLocal;
+          }
+        }
+      }
+
+      const nextRoom = buildRoomFromChunkState(
+        roomMetaNext,
+        chunkState,
+        stillHasOlder,
+        nextColdUnreadState,
+      );
 
       const metaChanged =
         isNewRoom ||
@@ -2509,14 +3725,20 @@ function mergeSyncRooms(
         syncTags !== undefined ||
         encryptedIrreversible !== existing.encryptedIrreversible ||
         inviteFailed !== existing.inviteFailed ||
+        didRoomChunkMetaChange(existing, nextRoom) ||
         JSON.stringify(nextGaps) !== JSON.stringify(roomTimelineGaps(existing));
 
       next[roomId] = nextRoom;
+      nextChunkStates.set(roomId, chunkState);
       if (metaChanged) {
         metaChangedRoomIds.push(roomId);
       }
-      if (isNewRoom || timelineChanged) {
-        timelineChangedRoomIds.push(roomId);
+      if (dirtyChunkMap.size > 0 || deletedChunkSeqs.size > 0) {
+        chunkWrites.push({
+          roomId,
+          ...(dirtyChunkMap.size > 0 ? { putChunks: Array.from(dirtyChunkMap.values()) } : {}),
+          ...(deletedChunkSeqs.size > 0 ? { deleteChunkSeqs: Array.from(deletedChunkSeqs) } : {}),
+        });
       }
     }
   }
@@ -2533,6 +3755,7 @@ function mergeSyncRooms(
           }
         }
         delete next[roomId];
+        nextChunkStates.delete(roomId);
         deletedRoomIds.push(roomId);
       }
     }
@@ -2540,8 +3763,9 @@ function mergeSyncRooms(
 
   return {
     rooms: next,
+    chunkStates: nextChunkStates,
     metaChangedRoomIds,
-    timelineChangedRoomIds,
+    chunkWrites,
     deletedRoomIds,
     removedAttachmentIds,
   };
@@ -2562,14 +3786,29 @@ function extractRoomTags(roomSync: Record<string, unknown>): Record<string, unkn
   return found;
 }
 
-function applyRoomBackfillPage(
+async function applyRoomBackfillPageChunked(
+  roomId: string,
   room: StoredRoomEvents,
+  existingState: RoomChunkState,
   fromToken: string,
   body: unknown,
   gapIndex?: number,
-): { changed: boolean; room: StoredRoomEvents; prependedCount: number } {
+): Promise<{
+  changed: boolean;
+  room: StoredRoomEvents;
+  chunkState: RoomChunkState;
+  chunkWrite: ChunkWriteOp;
+  prependedCount: number;
+}> {
+  const nextState = cloneChunkState(existingState);
   if (!isPlainObject(body)) {
-    return { changed: false, room, prependedCount: 0 };
+    return {
+      changed: false,
+      room,
+      chunkState: nextState,
+      chunkWrite: { roomId },
+      prependedCount: 0,
+    };
   }
   const rawChunk = Array.isArray(body.chunk) ? body.chunk.filter(isPlainObject) : [];
   const rawState = Array.isArray(body.state) ? body.state.filter(isPlainObject) : [];
@@ -2635,10 +3874,10 @@ function applyRoomBackfillPage(
     const readIdxInIncoming = incomingChronological.findIndex(
       (ev) => eventIdOf(ev) === effectiveReadPos,
     );
-    if (readIdxInIncoming !== -1 && shouldOmit(incomingChronological[readIdxInIncoming])) {
+    if (readIdxInIncoming !== -1 && shouldOmit(incomingChronological[readIdxInIncoming]!)) {
       let fallback: string | undefined;
       for (let i = readIdxInIncoming - 1; i >= 0; i -= 1) {
-        const candidate = incomingChronological[i];
+        const candidate = incomingChronological[i]!;
         const id = eventIdOf(candidate);
         if (id !== undefined && !shouldOmit(candidate)) {
           fallback = id;
@@ -2647,7 +3886,7 @@ function applyRoomBackfillPage(
       }
       if (fallback === undefined) {
         for (let i = beforeSlice.length - 1; i >= 0; i -= 1) {
-          const candidate = beforeSlice[i];
+          const candidate = beforeSlice[i]!;
           const id = eventIdOf(candidate);
           if (id !== undefined && !shouldOmit(candidate)) {
             fallback = id;
@@ -2681,12 +3920,6 @@ function applyRoomBackfillPage(
     }
     return undefined;
   };
-  const filteredBefore = beforeSlice
-    .map(filterPreserveRedactedPrompt)
-    .filter((ev): ev is RawMatrixEvent => ev !== undefined);
-  const filteredAfter = afterSlice
-    .map(filterPreserveRedactedPrompt)
-    .filter((ev): ev is RawMatrixEvent => ev !== undefined);
 
   const seenIncomingIds = new Set<string>();
   const dedupedIncoming: RawMatrixEvent[] = [];
@@ -2705,7 +3938,151 @@ function applyRoomBackfillPage(
     dedupedIncoming.push(transformed);
   }
 
-  const mergedTimeline = [...filteredBefore, ...dedupedIncoming, ...filteredAfter];
+  const dirtyChunks = new Map<number, TimelineChunkRecord>();
+  const deletedSeqs = new Set<number>();
+
+  let loadedChunksFiltered = false;
+  for (let cIdx = nextState.loadedChunks.length - 1; cIdx >= 0; cIdx -= 1) {
+    const chunk = nextState.loadedChunks[cIdx]!;
+    let chunkModified = false;
+    const nextEvents: RawMatrixEvent[] = [];
+    for (const ev of chunk.events) {
+      if (!shouldOmit(ev)) {
+        nextEvents.push(ev);
+      } else if (shouldPreserveRedactedReaction(ev, redactedIds)) {
+        chunkModified = true;
+        nextEvents.push(markRedactedReaction(ev));
+      } else {
+        chunkModified = true;
+      }
+    }
+    if (chunkModified) {
+      loadedChunksFiltered = true;
+      if (nextEvents.length === 0) {
+        deletedSeqs.add(chunk.seq);
+        nextState.loadedChunks.splice(cIdx, 1);
+      } else {
+        const updated = { roomId, seq: chunk.seq, events: nextEvents };
+        nextState.loadedChunks[cIdx] = updated;
+        dirtyChunks.set(chunk.seq, updated);
+      }
+    }
+  }
+
+  if (dedupedIncoming.length > 0) {
+    const cpCount = nextState.coldPlaceholders.length;
+    const insertInLoadedIdx = Math.max(0, insertIdx - cpCount);
+    if (nextState.loadedChunks.length === 0) {
+      const created = splitTimelineEventsIntoChunks(roomId, dedupedIncoming);
+      nextState.loadedChunks = created;
+      for (const c of created) {
+        dirtyChunks.set(c.seq, c);
+      }
+    } else if (insertInLoadedIdx === 0) {
+      const first = nextState.loadedChunks[0]!;
+      if (first.events.length + dedupedIncoming.length <= TIMELINE_CHUNK_SIZE && !loadedChunksFiltered) {
+        const mergedFirst: TimelineChunkRecord = {
+          roomId,
+          seq: first.seq,
+          events: [...dedupedIncoming, ...first.events],
+        };
+        nextState.loadedChunks[0] = mergedFirst;
+        dirtyChunks.set(mergedFirst.seq, mergedFirst);
+      } else {
+        const newChunks = splitTimelineEventsIntoChunks(roomId, dedupedIncoming);
+        const offset = first.seq - newChunks.length;
+        const shifted = newChunks.map((c, idx) => ({
+          roomId,
+          seq: offset + idx,
+          events: c.events,
+        }));
+        nextState.loadedChunks = [...shifted, ...nextState.loadedChunks];
+        for (const c of shifted) {
+          dirtyChunks.set(c.seq, c);
+        }
+      }
+    } else {
+      let remainingOffset = insertInLoadedIdx;
+      let targetChunkIdx = nextState.loadedChunks.length - 1;
+      let localOffset = nextState.loadedChunks[targetChunkIdx]!.events.length;
+      for (let i = 0; i < nextState.loadedChunks.length; i += 1) {
+        const len = nextState.loadedChunks[i]!.events.length;
+        if (remainingOffset <= len) {
+          targetChunkIdx = i;
+          localOffset = remainingOffset;
+          break;
+        }
+        remainingOffset -= len;
+      }
+      const targetChunk = nextState.loadedChunks[targetChunkIdx]!;
+      const combined = [
+        ...targetChunk.events.slice(0, localOffset),
+        ...dedupedIncoming,
+        ...targetChunk.events.slice(localOffset),
+      ];
+      if (combined.length <= TIMELINE_CHUNK_SIZE) {
+        const updated = { roomId, seq: targetChunk.seq, events: combined };
+        nextState.loadedChunks[targetChunkIdx] = updated;
+        dirtyChunks.set(updated.seq, updated);
+      } else {
+        const splitPieces = splitTimelineEventsIntoChunks(roomId, combined);
+        const prevSeq =
+          targetChunkIdx > 0 ? nextState.loadedChunks[targetChunkIdx - 1]!.seq : undefined;
+        const nextSeq =
+          targetChunkIdx < nextState.loadedChunks.length - 1
+            ? nextState.loadedChunks[targetChunkIdx + 1]!.seq
+            : undefined;
+        let assignedSeqs: number[] | undefined;
+        if (prevSeq === undefined && nextSeq !== undefined) {
+          assignedSeqs = splitPieces.map((_, idx) => nextSeq - splitPieces.length + idx);
+        } else if (nextSeq === undefined && prevSeq !== undefined) {
+          assignedSeqs = splitPieces.map((_, idx) => prevSeq + 1 + idx);
+        } else if (prevSeq !== undefined && nextSeq !== undefined) {
+          const step = (nextSeq - prevSeq) / (splitPieces.length + 1);
+          const candidates = splitPieces.map((_, idx) => prevSeq + step * (idx + 1));
+          const strictlyOrdered = candidates.every(
+            (s, idx) =>
+              s > (idx === 0 ? prevSeq : candidates[idx - 1]!) && s < nextSeq,
+          );
+          if (strictlyOrdered) {
+            assignedSeqs = candidates;
+          }
+        }
+        if (assignedSeqs) {
+          deletedSeqs.add(targetChunk.seq);
+          const inserted = splitPieces.map((piece, idx) => ({
+            roomId,
+            seq: assignedSeqs![idx]!,
+            events: piece.events,
+          }));
+          nextState.loadedChunks.splice(targetChunkIdx, 1, ...inserted);
+          for (const c of inserted) {
+            deletedSeqs.delete(c.seq);
+            dirtyChunks.set(c.seq, c);
+          }
+        } else {
+          for (const c of nextState.loadedChunks) {
+            deletedSeqs.add(c.seq);
+          }
+          const baseEvents = nextState.loadedChunks.flatMap((c, idx) =>
+            idx === targetChunkIdx ? combined : c.events,
+          );
+          const rechunked = splitTimelineEventsIntoChunks(roomId, baseEvents);
+          nextState.loadedChunks = rechunked;
+          dirtyChunks.clear();
+          for (const c of rechunked) {
+            deletedSeqs.delete(c.seq);
+            dirtyChunks.set(c.seq, c);
+          }
+        }
+      }
+    }
+  }
+
+  const mergedTimeline = [
+    ...nextState.coldPlaceholders.map((p) => p.event),
+    ...nextState.loadedChunks.flatMap((c) => c.events),
+  ];
   const mergedIds = new Set(
     mergedTimeline.map(eventIdOf).filter((id): id is string => id !== undefined),
   );
@@ -2714,7 +4091,7 @@ function applyRoomBackfillPage(
     if (oldReadIdx !== -1) {
       let fallback: string | undefined;
       for (let i = oldReadIdx - 1; i >= 0; i -= 1) {
-        const candidate = eventIdOf(room.timelineEvents[i]);
+        const candidate = eventIdOf(room.timelineEvents[i]!);
         if (candidate !== undefined && mergedIds.has(candidate)) {
           fallback = candidate;
           break;
@@ -2724,9 +4101,13 @@ function applyRoomBackfillPage(
     }
   }
 
+  const filteredAfter = afterSlice
+    .map(filterPreserveRedactedPrompt)
+    .filter((ev): ev is RawMatrixEvent => ev !== undefined);
+
   let nextGaps: StoredTimelineGap[] = [];
   for (let i = 0; i < gaps.length; i += 1) {
-    const gap = gaps[i];
+    const gap = gaps[i]!;
     if (i === resolvedGapIndex) {
       if (beforeHasConfirmed) {
         if (!overlappedBefore && !atEnd) {
@@ -2760,11 +4141,16 @@ function applyRoomBackfillPage(
     }
     nextGaps.push({ ...gap });
   }
+  const oldLoadedIds = new Set(
+    room.timelineEvents.map(eventIdOf).filter((id): id is string => id !== undefined),
+  );
   nextGaps = reconcileGapsAfterTimelineChange(
     nextGaps,
     room.timelineEvents,
     mergedIds,
     undefined,
+    oldLoadedIds,
+    redactedIds,
   );
   nextGaps = normalizeGaps(nextGaps, mergedTimeline);
 
@@ -2810,10 +4196,31 @@ function applyRoomBackfillPage(
     rawState.some((ev) => ev.type === "m.room.encryption") ||
     incomingChronological.some((ev) => ev.type === "m.room.encryption");
 
-  const nextRoom: StoredRoomEvents = {
+  const loadedMaxTs = computeLastActivityTs(mergedTimeline);
+  const nextLastActivityTs =
+    room.lastActivityTs !== undefined && loadedMaxTs !== undefined
+      ? Math.max(room.lastActivityTs, loadedMaxTs)
+      : (loadedMaxTs ?? room.lastActivityTs);
+
+  const nextReadPositionInLocal =
+    nextReadPositionEventId === undefined
+      ? undefined
+      : mergedIds.has(nextReadPositionEventId)
+        ? true
+        : room.hasOlderLocalChunks
+          ? room.readPositionInLocal
+          : false;
+
+  const stillHasOlder = Boolean(
+    room.hasOlderLocalChunks &&
+      nextState.chunkMinSeq !== undefined &&
+      nextState.loadedChunks.length > 0 &&
+      nextState.loadedChunks[0]!.seq > nextState.chunkMinSeq,
+  );
+
+  const nextMeta: StoredRoomMeta = {
     stateEvents: nextStateEvents,
-    timelineEvents: mergedTimeline,
-    ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0] }, timelineGaps: nextGaps } : {}),
+    ...(nextGaps.length > 0 ? { timelineGap: { ...nextGaps[0]! }, timelineGaps: nextGaps } : {}),
     ...(nextBackwardToken && !nextReachedStart ? { backwardToken: nextBackwardToken } : {}),
     ...(nextReachedStart ? { reachedStart: true } : {}),
     ...(nextReadPositionEventId ? { readPositionEventId: nextReadPositionEventId } : {}),
@@ -2824,11 +4231,26 @@ function applyRoomBackfillPage(
       : {}),
     ...(hasEnc ? { encryptedIrreversible: true as const } : {}),
     ...(room.inviteFailed ? { inviteFailed: true as const } : {}),
+    ...(nextLastActivityTs !== undefined ? { lastActivityTs: nextLastActivityTs } : {}),
+    ...(nextReadPositionInLocal !== undefined ? { readPositionInLocal: nextReadPositionInLocal } : {}),
   };
+
+  const nextRoom = buildRoomFromChunkState(
+    nextMeta,
+    nextState,
+    stillHasOlder,
+    stillHasOlder ? room.coldUnreadState : undefined,
+  );
 
   return {
     changed: true,
     room: nextRoom,
+    chunkState: nextState,
+    chunkWrite: {
+      roomId,
+      ...(dirtyChunks.size > 0 ? { putChunks: Array.from(dirtyChunks.values()) } : {}),
+      ...(deletedSeqs.size > 0 ? { deleteChunkSeqs: Array.from(deletedSeqs) } : {}),
+    },
     prependedCount: dedupedIncoming.length,
   };
 }
@@ -3093,122 +4515,6 @@ function replaceTargetIdOf(event: RawMatrixEvent): string | undefined {
     return relatesTo.event_id;
   }
   return undefined;
-}
-
-function mergeTimelineEventsWithRedactions(
-  existing: RawMatrixEvent[],
-  incoming: RawMatrixEvent[],
-): {
-  timeline: RawMatrixEvent[];
-  redactedIds: Set<string>;
-  changed: boolean;
-  removedAttachmentIds: string[];
-} {
-  if (incoming.length === 0) {
-    return {
-      timeline: existing,
-      redactedIds: new Set<string>(),
-      changed: false,
-      removedAttachmentIds: [],
-    };
-  }
-  const redactedIds = new Set<string>();
-  for (const event of [...existing, ...incoming]) {
-    const targetId = redactedEventIdOf(event);
-    if (targetId !== undefined) {
-      redactedIds.add(targetId);
-    }
-    if (isRedactedStub(event)) {
-      const id = eventIdOf(event);
-      if (id !== undefined) {
-        redactedIds.add(id);
-      }
-    }
-  }
-
-  const shouldOmit = (event: RawMatrixEvent): boolean => {
-    if (event.type === "m.room.redaction" || isRedactedStub(event)) {
-      return true;
-    }
-    const id = eventIdOf(event);
-    if (id !== undefined && redactedIds.has(id)) {
-      return true;
-    }
-    const replaceTarget = replaceTargetIdOf(event);
-    if (replaceTarget !== undefined && redactedIds.has(replaceTarget)) {
-      return true;
-    }
-    const reactionTarget = reactionTargetIdOf(event);
-    if (reactionTarget !== undefined && redactedIds.has(reactionTarget)) {
-      return true;
-    }
-    return false;
-  };
-
-  const result = existing
-    .map((event) => {
-      if (!shouldOmit(event)) {
-        return cloneObject(event);
-      }
-      if (shouldPreserveRedactedReaction(event, redactedIds)) {
-        return markRedactedReaction(event);
-      }
-      return undefined;
-    })
-    .filter((event): event is RawMatrixEvent => event !== undefined);
-  const indexByEventId = new Map<string, number>();
-  const indexByLocalTxnId = new Map<string, number>();
-  result.forEach((event, index) => {
-    const local = localPlaceholderOf(event);
-    if (local) {
-      indexByLocalTxnId.set(local.txnId, index);
-      return;
-    }
-    const id = eventIdOf(event);
-    if (id !== undefined) {
-      indexByEventId.set(id, index);
-    }
-  });
-
-  const removedAttachmentIds: string[] = [];
-
-  for (const rawEvent of incoming) {
-    let event: RawMatrixEvent;
-    if (!shouldOmit(rawEvent)) {
-      event = cloneObject(rawEvent);
-    } else if (shouldPreserveRedactedReaction(rawEvent, redactedIds)) {
-      event = markRedactedReaction(rawEvent);
-    } else {
-      continue;
-    }
-    const id = eventIdOf(event);
-    const txnId = transactionIdOf(event);
-    if (id !== undefined && indexByEventId.has(id)) {
-      const existingIndex = indexByEventId.get(id)!;
-      result[existingIndex] = event;
-      if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
-        indexByLocalTxnId.delete(txnId);
-      }
-    } else if (txnId !== undefined && indexByLocalTxnId.has(txnId)) {
-      const localIndex = indexByLocalTxnId.get(txnId)!;
-      const replacedLocal = localPlaceholderOf(result[localIndex]!);
-      if (replacedLocal?.attachmentId) {
-        removedAttachmentIds.push(replacedLocal.attachmentId);
-      }
-      result[localIndex] = event;
-      indexByLocalTxnId.delete(txnId);
-      if (id !== undefined) {
-        indexByEventId.set(id, localIndex);
-      }
-    } else if (id !== undefined) {
-      indexByEventId.set(id, result.length);
-      result.push(event);
-    } else {
-      result.push(event);
-    }
-  }
-
-  return { timeline: result, redactedIds, changed: true, removedAttachmentIds };
 }
 
 function mergeAccountData(
