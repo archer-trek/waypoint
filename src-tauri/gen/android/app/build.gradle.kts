@@ -54,6 +54,7 @@ val overrideAbiFilters = (project.findProperty("waypointAbiFilters") as String?)
 
 android {
     compileSdk = 37
+    ndkVersion = "27.3.13750724"
     namespace = "app.waypoint.client"
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
@@ -85,7 +86,7 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            manifestPlaceholders["usesCleartextTraffic"] = "true"
             isDebuggable = true
             isJniDebuggable = true
             isMinifyEnabled = false
@@ -94,11 +95,13 @@ android {
             }
         }
         getByName("release") {
-            isMinifyEnabled = false
+            manifestPlaceholders["usesCleartextTraffic"] = "false"
+            isMinifyEnabled = true
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
             proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
                 *fileTree(".") {
                   include("**/*.pro")
                   exclude("build/**")

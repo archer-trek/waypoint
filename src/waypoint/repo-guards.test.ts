@@ -177,7 +177,13 @@ describe("Repository, asset, and error-copy guards", () => {
       resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
       "utf-8",
     );
-    expect(gradleKts).toContain("isMinifyEnabled = false");
+    const debugBlock = gradleKts.match(/getByName\("debug"\)\s*\{([\s\S]*?)\n\s{8}\}/)?.[1] ?? "";
+    const releaseBlock = gradleKts.match(/getByName\("release"\)\s*\{([\s\S]*?)\n\s{8}\}/)?.[1] ?? "";
+    expect(debugBlock).toContain("isMinifyEnabled = false");
+    expect(debugBlock).toContain('manifestPlaceholders["usesCleartextTraffic"] = "true"');
+    expect(releaseBlock).toContain("isMinifyEnabled = true");
+    expect(releaseBlock).toContain('manifestPlaceholders["usesCleartextTraffic"] = "false"');
+    expect(releaseBlock).toContain("proguard-android-optimize.txt");
     expect(gradleKts).toContain("WAYPOINT_ANDROID_KEYSTORE_PATH");
     expect(gradleKts).toContain("keystore.properties");
 
@@ -306,5 +312,50 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(filePathsXml).not.toContain("<external-path");
     expect(filePathsXml).toContain("<cache-path");
     expect(filePathsXml).toContain("waypoint-media/");
+  });
+
+  test("Android network security config splits debug/release cleartext policy, R8 keep rules cover bridges, and CI gates native changes (#140)", () => {
+    const manifestXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/AndroidManifest.xml"),
+      "utf-8",
+    );
+    expect(manifestXml).toContain('android:networkSecurityConfig="@xml/network_security_config"');
+
+    const releaseNetSec = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/xml/network_security_config.xml"),
+      "utf-8",
+    );
+    expect(releaseNetSec).toContain('<base-config cleartextTrafficPermitted="false">');
+    expect(releaseNetSec).toContain('<domain-config cleartextTrafficPermitted="true">');
+    expect(releaseNetSec).toContain('<domain includeSubdomains="false">localhost</domain>');
+    expect(releaseNetSec).toContain('<domain includeSubdomains="false">127.0.0.1</domain>');
+
+    const debugNetSec = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/debug/res/xml/network_security_config.xml"),
+      "utf-8",
+    );
+    expect(debugNetSec).toContain('<base-config cleartextTrafficPermitted="true">');
+
+    const proguardRules = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/proguard-rules.pro"),
+      "utf-8",
+    );
+    expect(proguardRules).toContain("@android.webkit.JavascriptInterface");
+    expect(proguardRules).toContain("app.waypoint.client.MainActivity");
+    expect(proguardRules).toContain("getMediaCacheDirPath()");
+    expect(proguardRules).toContain("openMediaFile(java.lang.String, java.lang.String)");
+    expect(proguardRules).toContain("setSystemAppearance(java.lang.String)");
+    expect(proguardRules).toContain("MainActivity$WaypointAndroidBridge");
+    expect(proguardRules).toContain("app.waypoint.client.Rust");
+    expect(proguardRules).toContain("app.tauri.**");
+    expect(proguardRules).toContain("app.tauri.opener.**");
+
+    const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf-8");
+    expect(ciYml).toContain("workflow_dispatch:");
+    expect(ciYml).toContain("src-tauri/");
+    expect(ciYml).toContain(".github/workflows/");
+    expect(ciYml).toContain("cargo test");
+    expect(ciYml).toContain("./gradlew :app:testUniversalDebugUnitTest");
+    expect(ciYml).toContain("npx tauri android build --apk --target aarch64 --ci");
   });
 });

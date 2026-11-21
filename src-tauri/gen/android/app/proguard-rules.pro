@@ -1,21 +1,54 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Preserve annotations & generic metadata needed by JNI, WebView JS bridges, and Tauri reflection
+-keepattributes JavascriptInterface,*Annotation*,Signature,InnerClasses,EnclosingMethod
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# WebView @JavascriptInterface methods across app & generated classes
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# MainActivity native/JNI & JS bridge entrypoints
+-keep class app.waypoint.client.MainActivity {
+    public <init>(...);
+    public java.lang.String getMediaCacheDirPath();
+    public java.lang.String openMediaFile(java.lang.String, java.lang.String);
+    public void setSystemAppearance(java.lang.String);
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+-keep class app.waypoint.client.MainActivity$WaypointAndroidBridge {
+    public <init>(...);
+    @android.webkit.JavascriptInterface <methods>;
+}
+
+# Tauri & Wry generated native bindings & activity classes
+-keep class app.waypoint.client.Rust {
+    *;
+}
+
+-keep class app.waypoint.client.TauriActivity {
+    *;
+}
+
+-keep class app.waypoint.client.WryActivity {
+    *;
+}
+
+-keep class app.waypoint.client.Logger {
+    *;
+}
+
+-keep class app.waypoint.client.PermissionHelper {
+    *;
+}
+
+# Tauri runtime & plugins (including tauri-plugin-opener)
+-keep class app.tauri.** {
+    *;
+}
+
+-keep class app.tauri.opener.** {
+    *;
+}
+
+# Preserve line numbers for release crash diagnostics
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

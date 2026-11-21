@@ -45,3 +45,118 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  native-filter:
+    name: Detect native changes
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      run_native: ${{ steps.filter.outputs.run_native }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check native path changes
+        id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run_native=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE_SHA="${{ github.event.before }}"
+            HEAD_SHA="${{ github.sha }}"
+          fi
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "run_native=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)
+          if echo "$CHANGED" | grep -Eq '^(src-tauri/|\.github/workflows/)'; then
+            echo "run_native=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run_native=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  native-checks:
+    name: Rust and Android checks
+    needs: native-filter
+    if: needs.native-filter.outputs.run_native == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install Linux Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK & NDK
+        run: |
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.3.13750724" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.3.13750724" >> "$GITHUB_ENV"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-37" \
+            "build-tools;36.1.0" \
+            "ndk;27.3.13750724"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('src-tauri/gen/android/**/*.gradle*', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Install & build frontend assets
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Rust unit tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Run Android JVM unit tests
+        working-directory: src-tauri/gen/android
+        run: ./gradlew :app:testUniversalDebugUnitTest
+
+      - name: Build Android Release APK (aarch64, R8 enabled)
+        run: npx tauri android build --apk --target aarch64 --ci
