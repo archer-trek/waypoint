@@ -1,13 +1,5 @@
 .PHONY: all build-android-apk apk test-android-jvm help
 
-ANDROID_HOME ?= $(HOME)/Android/Sdk
-NDK_HOME ?= $(ANDROID_HOME)/ndk/27.3.13750724
-JAVA_HOME ?= /usr/lib/jvm/java-17-openjdk-arm64
-
-export ANDROID_HOME
-export NDK_HOME
-export JAVA_HOME
-
 all: build-android-apk
 
 build-android-apk:

@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, readFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,17 +67,122 @@ function hasSigningConfigured() {
   return hasEnv || existsSync(KEYSTORE_PROPS_PATH);
 }
 
-function findApksigner() {
+function readLocalProperties() {
+  const localPropsPath = resolve(ANDROID_DIR, "local.properties");
+  if (!existsSync(localPropsPath)) return {};
+  const content = readFileSync(localPropsPath, "utf8");
+  const props = {};
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx !== -1) {
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      props[key] = val;
+    }
+  }
+  return props;
+}
+
+function resolveAndroidSdk(localProps) {
+  const candidates = [
+    process.env.ANDROID_HOME?.trim(),
+    process.env.ANDROID_SDK_ROOT?.trim(),
+    localProps["sdk.dir"]?.trim(),
+    resolve(homedir(), "Android/Sdk"),
+    resolve(homedir(), "Library/Android/sdk"),
+    process.env.LOCALAPPDATA ? resolve(process.env.LOCALAPPDATA, "Android/Sdk") : null,
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function resolveNdkDir(sdkDir, localProps) {
+  const candidates = [
+    process.env.NDK_HOME?.trim(),
+    process.env.ANDROID_NDK_HOME?.trim(),
+    localProps["ndk.dir"]?.trim(),
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  if (sdkDir) {
+    const ndkRoot = resolve(sdkDir, "ndk");
+    if (existsSync(ndkRoot)) {
+      try {
+        const versions = readdirSync(ndkRoot).filter((dir) => {
+          try {
+            return statSync(resolve(ndkRoot, dir)).isDirectory();
+          } catch {
+            return false;
+          }
+        });
+        versions.sort((a, b) =>
+          b.localeCompare(a, undefined, { numeric: true, sensitivity: "base" }),
+        );
+        if (versions.length > 0) {
+          return resolve(ndkRoot, versions[0]);
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return null;
+}
+
+function resolveJavaHome() {
+  if (process.env.JAVA_HOME?.trim() && existsSync(process.env.JAVA_HOME.trim())) {
+    return process.env.JAVA_HOME.trim();
+  }
+
+  if (process.platform === "darwin") {
+    try {
+      const jHome = execFileSync("/usr/libexec/java_home", { encoding: "utf8" }).trim();
+      if (jHome && existsSync(jHome)) return jHome;
+    } catch {
+      // ignore
+    }
+  }
+
+  for (const binName of ["javac", "java"]) {
+    try {
+      const binPath = execFileSync("which", [binName], { encoding: "utf8" }).trim();
+      if (binPath && existsSync(binPath)) {
+        const real = realpathSync(binPath);
+        const candidateHome = dirname(dirname(real));
+        if (existsSync(candidateHome) && existsSync(resolve(candidateHome, "bin"))) {
+          return candidateHome;
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function findApksigner(sdkDir) {
   const sdkRoots = [
-    process.env.ANDROID_HOME,
-    process.env.ANDROID_SDK_ROOT,
+    sdkDir,
+    process.env.ANDROID_HOME?.trim(),
+    process.env.ANDROID_SDK_ROOT?.trim(),
     resolve(homedir(), "Android/Sdk"),
   ].filter(Boolean);
 
   for (const sdk of sdkRoots) {
     const btDir = resolve(sdk, "build-tools");
     if (!existsSync(btDir)) continue;
-    const versions = readdirSync(btDir).sort().reverse();
+    const versions = readdirSync(btDir).sort((a, b) =>
+      b.localeCompare(a, undefined, { numeric: true, sensitivity: "base" }),
+    );
     for (const ver of versions) {
       const candidate = resolve(btDir, ver, "apksigner");
       if (existsSync(candidate)) return candidate;
@@ -108,28 +222,15 @@ function main() {
 
   cleanOtherAbiJniLibs();
 
-  const androidHome =
-    process.env.ANDROID_HOME?.trim() ||
-    process.env.ANDROID_SDK_ROOT?.trim() ||
-    resolve(homedir(), "Android/Sdk");
-  const ndkHome =
-    process.env.NDK_HOME?.trim() ||
-    process.env.ANDROID_NDK_HOME?.trim() ||
-    resolve(androidHome, "ndk/27.3.13750724");
-  const javaHome =
-    process.env.JAVA_HOME?.trim() ||
-    (existsSync("/usr/lib/jvm/java-17-openjdk-arm64")
-      ? "/usr/lib/jvm/java-17-openjdk-arm64"
-      : undefined);
+  const localProps = readLocalProperties();
+  const androidHome = resolveAndroidSdk(localProps);
+  const ndkHome = resolveNdkDir(androidHome, localProps);
+  const javaHome = resolveJavaHome();
 
   const env = {
     ...process.env,
-    ...(androidHome && existsSync(androidHome)
-      ? { ANDROID_HOME: androidHome, ANDROID_SDK_ROOT: androidHome }
-      : {}),
-    ...(ndkHome && existsSync(ndkHome)
-      ? { NDK_HOME: ndkHome, ANDROID_NDK_HOME: ndkHome }
-      : {}),
+    ...(androidHome ? { ANDROID_HOME: androidHome, ANDROID_SDK_ROOT: androidHome } : {}),
+    ...(ndkHome ? { NDK_HOME: ndkHome, ANDROID_NDK_HOME: ndkHome } : {}),
     ...(javaHome ? { JAVA_HOME: javaHome } : {}),
     WAYPOINT_ANDROID_ABI_FILTERS: "arm64-v8a",
     WAYPOINT_ANDROID_VERSION_CODE: versionCode,
@@ -180,7 +281,7 @@ function main() {
     process.exit(1);
   }
 
-  const apksigner = findApksigner();
+  const apksigner = findApksigner(androidHome);
   let signerOutput = "";
   if (apksigner) {
     signerOutput = execFileSync(apksigner, ["verify", "--print-certs", finalApk], {
