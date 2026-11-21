@@ -15,10 +15,10 @@
   - `MainActivity` 接管系统返回手势与物理返回键并联动前端 `onSystemBack`：处在 Topic、表单、设置、模态确认框或存在未保存修改时由应用内退栈或拦截确认；处在最顶层 Topic 列表或认证入口且无弹窗时交还系统退出，不做“再按一次退出”拦截。
 - **媒体附件打开（`open_media_file`）**：
   - Android 端临时媒体写入应用私有缓存目录（并在启动或写入前清理过期临时文件），通过 `FileProvider` 暴露为 `content://` URI 并附带精确 MIME 类型与只读授权拉起系统查看器，不申请外部存储权限。
-- **网络安全边界**（分期于 `#140` 落地）：
-  - `debug` 构建允许明文 HTTP 以便本地联调；`release` 构建通过 `network_security_config.xml` 全局禁用明文流量，仅放行 `localhost` / `127.0.0.1`。Owner 在正式包直连自建「Homeserver 地址」需使用 `https://`。（本项在 `#139` 期间暂维持既有 `usesCleartextTraffic = "false"`，于 `#140` 统一切换。）
+- **网络安全边界**：
+  - `debug` 构建允许明文 HTTP 以便本地联调；`release` 构建通过 `network_security_config.xml` 全局禁用明文流量，仅放行 `localhost` / `127.0.0.1`。Owner 在正式包直连自建「Homeserver 地址」需使用 `https://`。
 - **自动填充与外观外壳**：
   - `strings.xml` 保持无外层引号的 `Waypoint`；登录与重认证输入框显式声明 `username` / `current-password` 等 `autoComplete` 语义（`Homeserver 地址` 隔离为 `url`）；Bitwarden 在 WebView 场景下仍将匹配 `http://tauri.localhost`。
   - 前端外观切换（`跟随系统` / `浅色` / `深色`）同步桥接至 `MainActivity` 的 `WindowInsetsControllerCompat`，保持状态栏与手势导航栏图标对比度正确；冷启动 `windowBackground` 锁定为 `#ffffff` / `#09090b`，并移除未使用的 `Hello World` 布局、示例配色与 Android TV `leanback` 声明。
-- **Release 优化与 CI 门禁**（分期于 `#140` 落地）：
-  - Android `release` 构建开启 R8 代码压缩（`isMinifyEnabled = true`）并配置 Tauri/Wry/插件 keep 规则；CI 针对 `src-tauri/**`、工作流配置变更及手动触发运行 Rust 与 Android 编译校验。（本项在 `#139` 期间暂维持 `isMinifyEnabled = false`，于 `#140` 启用。）
+- **Release 优化与 CI 门禁**：
+  - Android `release` 构建开启 R8 代码压缩（`isMinifyEnabled = true`）并配置 Tauri/Wry/插件 keep 规则；CI 针对 `src-tauri/**`、工作流配置变更及手动触发运行 Rust 与 Android 编译校验。
