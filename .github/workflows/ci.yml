@@ -16,7 +16,7 @@ concurrency:
 
 env:
   ANDROID_BUILD_TOOLS_VERSION: "36.1.0"
-  ANDROID_COMPILE_SDK_VERSION: "37"
+  ANDROID_COMPILE_SDK_VERSION: "37.0"
   ANDROID_NDK_VERSION: "27.3.13750724"
 
 jobs:
@@ -161,12 +161,12 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      - name: Build Android Release APK (aarch64, R8 enabled)
+        run: npx tauri android build --apk --target aarch64 --ci
+
       - name: Run Android JVM unit tests
         working-directory: src-tauri/gen/android
         run: ./gradlew :app:testUniversalDebugUnitTest
-
-      - name: Build Android Release APK (aarch64, R8 enabled)
-        run: npx tauri android build --apk --target aarch64 --ci
 
       - name: Verify R8-kept bridge classes in Release APK
         run: |
