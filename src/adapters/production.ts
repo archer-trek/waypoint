@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { installViewportScrollLock } from "../lib/viewport-lock";
+import { getAndroidBridge, type WaypointAndroidWindow } from "./android-bridge";
 import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
@@ -9,23 +10,6 @@ const KEYBOARD_INSET_EVENT = "waypoint:keyboard-inset";
 type VirtualKeyboardLike = EventTarget & {
   boundingRect?: { height?: number };
 };
-
-export type WaypointAndroidBridge = {
-  setSystemBackEnabled?: (enabled: boolean) => void;
-  setSystemAppearance?: (appearance: string) => void;
-};
-
-type WaypointWindow = Window & {
-  WaypointAndroid?: WaypointAndroidBridge;
-  __waypointHandleSystemBack?: () => boolean;
-};
-
-function getAndroidBridge(): WaypointAndroidBridge | undefined {
-  if (typeof window === "undefined") {
-    return undefined;
-  }
-  return (window as WaypointWindow).WaypointAndroid;
-}
 
 export const systemClock: Clock = {
   setTimeout: (handler, timeoutMs) => window.setTimeout(handler, timeoutMs),
@@ -331,7 +315,7 @@ export function detectPlatform(): PlatformAdapter {
         return () => undefined;
       }
       hasSystemBackListener = true;
-      const win = window as WaypointWindow;
+      const win = window as WaypointAndroidWindow;
       const nativeHandler = () => handler();
       win.__waypointHandleSystemBack = nativeHandler;
       const handlePopState = () => {

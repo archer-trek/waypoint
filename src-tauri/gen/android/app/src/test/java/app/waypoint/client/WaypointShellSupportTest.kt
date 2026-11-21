@@ -4,6 +4,7 @@ import java.io.File
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -20,20 +21,20 @@ class WaypointShellSupportTest {
   }
 
   @Test
-  fun systemBackStateControlsInterceptAndFallback() {
-    val state = SystemBackState()
-    assertFalse(state.shouldInterceptBack())
+  fun systemBackSupportEvaluatesJsResultFallback() {
+    assertFalse(SystemBackSupport.shouldFallbackToSystemAfterJsResult("true"))
+    assertFalse(SystemBackSupport.shouldFallbackToSystemAfterJsResult(" true "))
+    assertTrue(SystemBackSupport.shouldFallbackToSystemAfterJsResult("false"))
+    assertTrue(SystemBackSupport.shouldFallbackToSystemAfterJsResult("null"))
+    assertTrue(SystemBackSupport.shouldFallbackToSystemAfterJsResult(null))
+  }
 
-    state.setCanHandleInApp(true)
-    assertTrue(state.shouldInterceptBack())
-
-    assertFalse(state.shouldFallbackToSystemAfterJsResult("true"))
-    assertTrue(state.shouldFallbackToSystemAfterJsResult("false"))
-    assertTrue(state.shouldFallbackToSystemAfterJsResult("null"))
-    assertTrue(state.shouldFallbackToSystemAfterJsResult(null))
-
-    state.setCanHandleInApp(false)
-    assertFalse(state.shouldInterceptBack())
+  @Test
+  fun mediaOpenResultMapsBridgeValues() {
+    assertNull(MediaOpenResult.Opened.toBridgeResult())
+    assertEquals(MediaViewerSupport.NO_VIEWER_ERROR_CODE, MediaOpenResult.NoViewerApp.toBridgeResult())
+    assertEquals("io failure", MediaOpenResult.Failed("io failure").toBridgeResult())
+    assertEquals("Unable to open media file", MediaOpenResult.Failed("  ").toBridgeResult())
   }
 
   @Test

@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useSyncExternalStore } from "react";
+import { getAndroidBridge } from "../adapters/android-bridge";
 
 export type AppearanceMode = "system" | "light" | "dark";
 export type ResolvedAppearance = "light" | "dark";
@@ -164,18 +165,11 @@ function syncThemeColorMeta(resolved: ResolvedAppearance): void {
   }
 }
 
-function syncNativeAppearance(resolved: ResolvedAppearance): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  const bridge = (
-    window as Window & {
-      WaypointAndroid?: { setSystemAppearance?: (appearance: string) => void };
-    }
-  ).WaypointAndroid;
+function syncNativeAppearance(mode: AppearanceMode): void {
+  const bridge = getAndroidBridge();
   if (typeof bridge?.setSystemAppearance === "function") {
     try {
-      bridge.setSystemAppearance(resolved);
+      bridge.setSystemAppearance(mode);
     } catch {
       // Ignore bridge errors when WebView is tearing down.
     }
@@ -183,7 +177,7 @@ function syncNativeAppearance(resolved: ResolvedAppearance): void {
   }
   if (isTauri()) {
     void Promise.resolve(
-      invoke("sync_system_appearance", { appearance: resolved }),
+      invoke("sync_system_appearance", { appearance: mode }),
     ).catch(() => undefined);
   }
 }
@@ -197,7 +191,7 @@ export function applyAppearanceToDocument(mode: AppearanceMode): ResolvedAppeara
     root.dataset.theme = resolved;
     syncThemeColorMeta(resolved);
   }
-  syncNativeAppearance(resolved);
+  syncNativeAppearance(mode);
   return resolved;
 }
 

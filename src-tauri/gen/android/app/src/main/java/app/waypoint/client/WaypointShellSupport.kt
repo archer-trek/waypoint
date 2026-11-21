@@ -23,19 +23,21 @@ internal object SystemBarContrast {
   }
 }
 
-internal class SystemBackState {
-  @Volatile
-  var canHandleInApp: Boolean = false
-    private set
-
-  fun setCanHandleInApp(enabled: Boolean) {
-    canHandleInApp = enabled
-  }
-
-  fun shouldInterceptBack(): Boolean = canHandleInApp
-
+internal object SystemBackSupport {
   fun shouldFallbackToSystemAfterJsResult(rawResult: String?): Boolean {
     return rawResult?.trim() != "true"
+  }
+}
+
+internal sealed interface MediaOpenResult {
+  object Opened : MediaOpenResult
+  object NoViewerApp : MediaOpenResult
+  data class Failed(val message: String) : MediaOpenResult
+
+  fun toBridgeResult(): String? = when (this) {
+    is Opened -> null
+    is NoViewerApp -> MediaViewerSupport.NO_VIEWER_ERROR_CODE
+    is Failed -> message.ifBlank { "Unable to open media file" }
   }
 }
 

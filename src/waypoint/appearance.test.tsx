@@ -559,7 +559,7 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
       const addressInput = await screen.findByLabelText("Homeserver 地址");
       expect(addressInput).toHaveAttribute("autocomplete", "url");
       expect(addressInput).toHaveAttribute("inputmode", "url");
-      expect(setSystemAppearance).toHaveBeenCalledWith("light");
+      expect(setSystemAppearance).toHaveBeenCalledWith("system");
 
       await user.type(addressInput, "https://matrix.example.com");
       await user.click(screen.getByRole("button", { name: "继续" }));
@@ -590,12 +590,12 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
         mm.setSystemDark(true);
       });
       await user.click(within(group).getByRole("radio", { name: "跟随系统" }));
-      expect(setSystemAppearance).toHaveBeenLastCalledWith("dark");
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("system");
 
       act(() => {
         mm.setSystemDark(false);
       });
-      expect(setSystemAppearance).toHaveBeenLastCalledWith("light");
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("system");
       view.unmount();
     } finally {
       delete (window as Window & { WaypointAndroid?: unknown }).WaypointAndroid;
@@ -614,7 +614,7 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
       };
       const tauriView = renderApp(makeConnectedHomeserver());
       await screen.findByLabelText("Homeserver 地址");
-      expect(invokeSpy).toHaveBeenCalledWith("sync_system_appearance", { appearance: "light" });
+      expect(invokeSpy).toHaveBeenCalledWith("sync_system_appearance", { appearance: "system" });
       tauriView.unmount();
     } finally {
       if (prevIsTauri === undefined) {

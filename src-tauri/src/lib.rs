@@ -11,6 +11,7 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(target_os = "android")]
 mod android_bridge {
+    use jni::JNIEnv;
     use jni::objects::{JObject, JString, JValue};
     use std::path::PathBuf;
     use std::sync::mpsc;
@@ -18,46 +19,58 @@ mod android_bridge {
 
     const BRIDGE_TIMEOUT: Duration = Duration::from_secs(10);
 
-    fn take_jni_error(env: &mut jni::JNIEnv<'_>, fallback: &str) -> String {
+    fn take_jni_error(env: &mut JNIEnv<'_>, fallback: &str) -> String {
         if env.exception_check().unwrap_or(false) {
             let _ = env.exception_clear();
         }
         fallback.to_string()
     }
 
-    pub fn query_media_cache_dir(window: &tauri::WebviewWindow) -> Result<PathBuf, String> {
+    fn read_nullable_jstring(env: &mut JNIEnv<'_>, obj: JObject<'_>) -> Result<Option<String>, String> {
+        if obj.is_null() {
+            return Ok(None);
+        }
+        let jstr = JString::from(obj);
+        let value: String = env
+            .get_string(&jstr)
+            .map_err(|err| take_jni_error(env, &err.to_string()))?
+            .into();
+        Ok(Some(value))
+    }
+
+    fn exec_on_activity<T, F>(
+        window: &tauri::WebviewWindow,
+        timeout_msg: &str,
+        action: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut JNIEnv<'_>, &JObject<'_>) -> Result<T, String> + Send + 'static,
+    {
         let (tx, rx) = mpsc::channel();
         window
             .with_webview(move |webview| {
                 webview.jni_handle().exec(move |env, activity, _webview| {
-                    let result = (|| -> Result<PathBuf, String> {
-                        let value = env
-                            .call_method(
-                                activity,
-                                "getMediaCacheDirPath",
-                                "()Ljava/lang/String;",
-                                &[],
-                            )
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        let obj: JObject<'_> = value
-                            .l()
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        if obj.is_null() {
-                            return Err("Android cache directory is unavailable".to_string());
-                        }
-                        let jstr = JString::from(obj);
-                        let raw: String = env
-                            .get_string(&jstr)
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?
-                            .into();
-                        Ok(PathBuf::from(raw))
-                    })();
+                    let result = action(env, activity);
                     let _ = tx.send(result);
                 });
             })
             .map_err(|err| err.to_string())?;
         rx.recv_timeout(BRIDGE_TIMEOUT)
-            .map_err(|_| "Timed out resolving Android cache directory".to_string())?
+            .map_err(|_| timeout_msg.to_string())?
+    }
+
+    pub fn query_media_cache_dir(window: &tauri::WebviewWindow) -> Result<PathBuf, String> {
+        exec_on_activity(window, "Timed out resolving Android cache directory", |env, activity| {
+            let value = env
+                .call_method(activity, "getMediaCacheDirPath", "()Ljava/lang/String;", &[])
+                .map_err(|err| take_jni_error(env, &err.to_string()))?;
+            let obj = value.l().map_err(|err| take_jni_error(env, &err.to_string()))?;
+            match read_nullable_jstring(env, obj)? {
+                Some(raw) if !raw.is_empty() => Ok(PathBuf::from(raw)),
+                _ => Err("Android cache directory is unavailable".to_string()),
+            }
+        })
     }
 
     pub fn open_media_file(
@@ -67,48 +80,27 @@ mod android_bridge {
     ) -> Result<(), String> {
         let path_owned = file_path.to_string();
         let mime_owned = mime_type.to_string();
-        let (tx, rx) = mpsc::channel();
-        window
-            .with_webview(move |webview| {
-                webview.jni_handle().exec(move |env, activity, _webview| {
-                    let result = (|| -> Result<(), String> {
-                        let jpath = env
-                            .new_string(&path_owned)
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        let jmime = env
-                            .new_string(&mime_owned)
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        let value = env
-                            .call_method(
-                                activity,
-                                "openMediaFile",
-                                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                                &[JValue::Object(&jpath), JValue::Object(&jmime)],
-                            )
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        let obj: JObject<'_> = value
-                            .l()
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?;
-                        if obj.is_null() {
-                            return Ok(());
-                        }
-                        let jstr = JString::from(obj);
-                        let error_msg: String = env
-                            .get_string(&jstr)
-                            .map_err(|err| take_jni_error(env, &err.to_string()))?
-                            .into();
-                        if error_msg.is_empty() {
-                            Ok(())
-                        } else {
-                            Err(error_msg)
-                        }
-                    })();
-                    let _ = tx.send(result);
-                });
-            })
-            .map_err(|err| err.to_string())?;
-        rx.recv_timeout(BRIDGE_TIMEOUT)
-            .map_err(|_| "Timed out opening media file on Android".to_string())?
+        exec_on_activity(window, "Timed out opening media file on Android", move |env, activity| {
+            let jpath = env
+                .new_string(&path_owned)
+                .map_err(|err| take_jni_error(env, &err.to_string()))?;
+            let jmime = env
+                .new_string(&mime_owned)
+                .map_err(|err| take_jni_error(env, &err.to_string()))?;
+            let value = env
+                .call_method(
+                    activity,
+                    "openMediaFile",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&jpath), JValue::Object(&jmime)],
+                )
+                .map_err(|err| take_jni_error(env, &err.to_string()))?;
+            let obj = value.l().map_err(|err| take_jni_error(env, &err.to_string()))?;
+            match read_nullable_jstring(env, obj)? {
+                Some(err_msg) if !err_msg.is_empty() => Err(err_msg),
+                _ => Ok(()),
+            }
+        })
     }
 
     pub fn set_system_appearance(
@@ -127,9 +119,7 @@ mod android_bridge {
                             &[JValue::Object(&jappearance)],
                         );
                     }
-                    if env.exception_check().unwrap_or(false) {
-                        let _ = env.exception_clear();
-                    }
+                    let _ = take_jni_error(env, "");
                 });
             })
             .map_err(|err| err.to_string())

@@ -475,6 +475,32 @@ export function TopicsWorkspace({
     syncNavigationDepth(targetDepth);
   }
 
+  function handleSubViewBack(
+    isBusy: boolean,
+    isDirty: boolean,
+    onCleanClose: () => void,
+    onDirtyClose: () => void,
+  ): true {
+    if (viewportMode === "narrow") {
+      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+    }
+    if (isBusy) {
+      if (viewportMode === "narrow") {
+        syncNavigationDepth(targetDepth);
+      }
+      return true;
+    }
+    if (isDirty) {
+      if (viewportMode === "narrow") {
+        syncNavigationDepth(targetDepth);
+      }
+      setPendingDiscardAction(() => onDirtyClose);
+      return true;
+    }
+    onCleanClose();
+    return true;
+  }
+
   backHandlerRef.current = () => {
     if (pendingDiscardAction !== null) {
       restoreNarrowNavDepthAfterIntercept();
@@ -519,66 +545,32 @@ export function TopicsWorkspace({
       return true;
     }
     if (settingsOpen) {
-      if (viewportMode === "narrow") {
-        navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      }
-      if (agentsSubmitting || exiting) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        return true;
-      }
-      if (settingsIsDirty) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        setPendingDiscardAction(() => closeSettings);
-        return true;
-      }
-      setSettingsOpen(false);
-      resetAgentsForm();
-      setExitConfirmOpen(false);
-      return true;
+      return handleSubViewBack(
+        agentsSubmitting || exiting,
+        settingsIsDirty,
+        () => {
+          setSettingsOpen(false);
+          resetAgentsForm();
+          setExitConfirmOpen(false);
+        },
+        closeSettings,
+      );
     }
     if (creating) {
-      if (viewportMode === "narrow") {
-        navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      }
-      if (submitting || quickSubmitting) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        return true;
-      }
-      if (createIsDirty) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        setPendingDiscardAction(() => closeCreateForm);
-        return true;
-      }
-      resetCreateForm();
-      return true;
+      return handleSubViewBack(
+        submitting || quickSubmitting,
+        createIsDirty,
+        resetCreateForm,
+        closeCreateForm,
+      );
     }
     if (editing && activeTopic) {
-      if (viewportMode === "narrow") {
-        navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      }
-      if (editSubmitting) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        return true;
-      }
-      if (editIsDirty) {
-        if (viewportMode === "narrow") {
-          syncNavigationDepth(targetDepth);
-        }
-        setPendingDiscardAction(() => closeEditForm);
-        return true;
-      }
-      resetEditForm();
-      return true;
+      return handleSubViewBack(
+        editSubmitting,
+        editIsDirty,
+        resetEditForm,
+        closeEditForm,
+      );
     }
     if (viewportMode === "narrow" && activeTopic) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);

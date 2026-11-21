@@ -275,7 +275,7 @@ describe("Repository, asset, and error-copy guards", () => {
       resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/values/colors.xml"),
       "utf-8",
     );
-    expect(colorsXml).not.toMatch(/purple_|teal_/);
+    expect(colorsXml).not.toMatch(/purple_|teal_|name="black"|name="white"/);
     expect(colorsXml).toContain("#FFFFFF");
     expect(colorsXml).toContain("#09090B");
 

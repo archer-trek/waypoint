@@ -23,13 +23,11 @@ class MainActivity : TauriActivity() {
   private var lastImeVisible = false
   private var lastImeBottomPx = -1
   private var lastSyncedAppearance: String? = null
-  private val systemBackState = SystemBackState()
   private lateinit var systemBackCallback: OnBackPressedCallback
 
   private inner class WaypointAndroidBridge {
     @JavascriptInterface
     fun setSystemBackEnabled(enabled: Boolean) {
-      systemBackState.setCanHandleInApp(enabled)
       runOnUiThread {
         if (::systemBackCallback.isInitialized) {
           systemBackCallback.isEnabled = enabled
@@ -57,7 +55,7 @@ class MainActivity : TauriActivity() {
         webView.evaluateJavascript(
           "(function() { return typeof window.__waypointHandleSystemBack === 'function' ? Boolean(window.__waypointHandleSystemBack()) : false; })()",
         ) { rawResult ->
-          if (systemBackState.shouldFallbackToSystemAfterJsResult(rawResult)) {
+          if (SystemBackSupport.shouldFallbackToSystemAfterJsResult(rawResult)) {
             fallbackToSystemBack()
           }
         }
@@ -108,13 +106,13 @@ class MainActivity : TauriActivity() {
 
   override fun onConfigurationChanged(newConfig: Configuration) {
     super.onConfigurationChanged(newConfig)
-    lastSyncedAppearance?.let { applySystemAppearanceOnUiThread(it) }
+    lastSyncedAppearance?.let { applySystemAppearanceOnUiThread(it, newConfig.uiMode) }
   }
 
   fun setSystemAppearance(appearance: String) {
     lastSyncedAppearance = appearance
     runOnUiThread {
-      applySystemAppearanceOnUiThread(appearance)
+      applySystemAppearanceOnUiThread(appearance, resources.configuration.uiMode)
     }
   }
 
@@ -127,6 +125,11 @@ class MainActivity : TauriActivity() {
   }
 
   fun openMediaFile(filePath: String, mimeType: String?): String? {
+    val outcome = openMediaFileResult(filePath, mimeType)
+    return outcome.toBridgeResult()
+  }
+
+  private fun openMediaFileResult(filePath: String, mimeType: String?): MediaOpenResult {
     return try {
       val file = File(filePath)
       val uri = FileProvider.getUriForFile(
@@ -142,27 +145,26 @@ class MainActivity : TauriActivity() {
         }
         try {
           startActivity(intent)
-          return null
+          return MediaOpenResult.Opened
         } catch (_: ActivityNotFoundException) {
           // Try next MIME candidate (e.g. generic "*/*") before failing.
         }
       }
-      MediaViewerSupport.NO_VIEWER_ERROR_CODE
+      MediaOpenResult.NoViewerApp
     } catch (ex: Exception) {
-      ex.message ?: "Unable to open media file"
+      MediaOpenResult.Failed(ex.message ?: "Unable to open media file")
     }
   }
 
   private fun fallbackToSystemBack() {
-    systemBackState.setCanHandleInApp(false)
     if (::systemBackCallback.isInitialized) {
       systemBackCallback.isEnabled = false
     }
     onBackPressedDispatcher.onBackPressed()
   }
 
-  private fun applySystemAppearanceOnUiThread(appearance: String) {
-    val nightMask = resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK
+  private fun applySystemAppearanceOnUiThread(appearance: String, uiMode: Int) {
+    val nightMask = uiMode and Configuration.UI_MODE_NIGHT_MASK
     val systemIsNightMode = nightMask == Configuration.UI_MODE_NIGHT_YES
     val useLightBars = SystemBarContrast.isLightSystemBars(appearance, systemIsNightMode)
     val controller = WindowCompat.getInsetsController(window, window.decorView)
