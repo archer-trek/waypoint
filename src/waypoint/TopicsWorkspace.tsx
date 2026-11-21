@@ -320,6 +320,8 @@ export function TopicsWorkspace({
   const activeVisibleRoomRef = useRef<string | null>(null);
   const backfillInFlightRoomsRef = useRef(new Set<string>());
   const openBackfillStoppedRoomsRef = useRef(new Set<string>());
+  const viewportBackfillStoppedRoomsRef = useRef(new Set<string>());
+  const viewportBackfillLastTokenRef = useRef<Map<string, string>>(new Map());
   const pendingScrollPreserveRef = useRef<{
     roomId: string;
     prevScrollHeight: number;
@@ -1858,6 +1860,127 @@ export function TopicsWorkspace({
     };
   }, [visibleComposerRoomId, activeTopicNeedsReadGapBackfill, backfillTick, client, exiting, reauthRequired]);
 
+  useEffect(() => {
+    for (const roomId of Array.from(viewportBackfillStoppedRoomsRef.current)) {
+      if (roomId !== visibleComposerRoomId) {
+        viewportBackfillStoppedRoomsRef.current.delete(roomId);
+        viewportBackfillLastTokenRef.current.delete(roomId);
+      }
+    }
+    if (!visibleComposerRoomId) {
+      return;
+    }
+    if (
+      pausedRef.current ||
+      reauthRequiredRef.current ||
+      exiting ||
+      !client.hasToken ||
+      backfillInFlightRoomsRef.current.has(visibleComposerRoomId) ||
+      openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId) ||
+      viewportBackfillStoppedRoomsRef.current.has(visibleComposerRoomId)
+    ) {
+      return;
+    }
+    if (
+      activeTopicNeedsReadGapBackfill &&
+      nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId])
+    ) {
+      return;
+    }
+    const container = timelineRef.current;
+    if (
+      !container ||
+      container.clientHeight <= 0 ||
+      container.scrollHeight > container.clientHeight + TOP_SCROLL_THRESHOLD_PX
+    ) {
+      return;
+    }
+    const target = nextBackfillTargetForScrollUp(client.rooms()[visibleComposerRoomId]);
+    if (!target) {
+      return;
+    }
+    if (viewportBackfillLastTokenRef.current.get(visibleComposerRoomId) === target.fromToken) {
+      viewportBackfillStoppedRoomsRef.current.add(visibleComposerRoomId);
+      return;
+    }
+    const roomId = visibleComposerRoomId;
+    const myEpoch = syncEpochRef.current;
+    const leaveGen = client.currentLeaveGeneration;
+    backfillInFlightRoomsRef.current.add(roomId);
+    let cancelled = false;
+    void (async () => {
+      try {
+        let result: TransportResult;
+        try {
+          result = await client.roomMessagesBackward(roomId, target.fromToken, BACKFILL_PAGE_LIMIT);
+        } catch {
+          viewportBackfillStoppedRoomsRef.current.add(roomId);
+          return;
+        }
+        if (
+          cancelled ||
+          !mountedRef.current ||
+          pausedRef.current ||
+          reauthRequiredRef.current ||
+          exiting ||
+          !client.hasToken ||
+          syncEpochRef.current !== myEpoch
+        ) {
+          return;
+        }
+        if (isCredentialRejected(result)) {
+          onCredentialRejected();
+          return;
+        }
+        if (result.type !== "response" || result.status !== 200) {
+          viewportBackfillStoppedRoomsRef.current.add(roomId);
+          return;
+        }
+        const el = timelineRef.current;
+        const shouldPreserve =
+          el !== null &&
+          activeVisibleRoomRef.current === roomId &&
+          userScrolledRoomRef.current === roomId;
+        const prevScrollHeight = el?.scrollHeight ?? 0;
+        const prevScrollTop = el?.scrollTop ?? 0;
+        viewportBackfillLastTokenRef.current.set(roomId, target.fromToken);
+        await client.applyBackfillPage(roomId, {
+          fromToken: target.fromToken,
+          body: result.body,
+          gapIndex: target.gapIndex,
+          leaveGeneration: leaveGen,
+        });
+        if (cancelled || !mountedRef.current || pausedRef.current || syncEpochRef.current !== myEpoch) {
+          return;
+        }
+        if (shouldPreserve && el) {
+          pendingScrollPreserveRef.current = {
+            roomId,
+            prevScrollHeight,
+            prevScrollTop,
+          };
+        }
+        setRevision((value) => value + 1);
+      } finally {
+        backfillInFlightRoomsRef.current.delete(roomId);
+        if (mountedRef.current && activeVisibleRoomRef.current === roomId) {
+          setBackfillTick((value) => value + 1);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    visibleComposerRoomId,
+    activeTopicNeedsReadGapBackfill,
+    timelineContentKey,
+    backfillTick,
+    client,
+    exiting,
+    reauthRequired,
+  ]);
+
   function collapseDescription() {
     setDescriptionExpanded(false);
   }
@@ -2109,6 +2232,15 @@ export function TopicsWorkspace({
       return;
     }
     syncTimelineHeightAnchor(container, roomId);
+    if (
+      container.clientHeight > 0 &&
+      container.scrollHeight <= container.clientHeight + TOP_SCROLL_THRESHOLD_PX &&
+      !backfillInFlightRoomsRef.current.has(roomId) &&
+      !viewportBackfillStoppedRoomsRef.current.has(roomId) &&
+      nextBackfillTargetForScrollUp(client.rooms()[roomId])
+    ) {
+      setBackfillTick((value) => value + 1);
+    }
   });
 
   useLayoutEffect(() => {

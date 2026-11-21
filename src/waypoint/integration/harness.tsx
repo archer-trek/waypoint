@@ -220,8 +220,12 @@ export function withMockedTimelineLayout<T>(
 
   return fn().finally(() => {
     if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+    else delete (HTMLElement.prototype as { clientHeight?: unknown }).clientHeight;
     if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
+    else delete (HTMLElement.prototype as { scrollHeight?: unknown }).scrollHeight;
     if (offsetHeightDesc) Object.defineProperty(HTMLElement.prototype, "offsetHeight", offsetHeightDesc);
+    else delete (HTMLElement.prototype as { offsetHeight?: unknown }).offsetHeight;
     if (offsetTopDesc) Object.defineProperty(HTMLElement.prototype, "offsetTop", offsetTopDesc);
+    else delete (HTMLElement.prototype as { offsetTop?: unknown }).offsetTop;
   });
 }
