@@ -486,7 +486,12 @@ export function deriveTopics(
           ...allRooms.filter((candidate) => candidate !== room),
         ])
       : undefined;
-    const lastActivityTs = lastMessageTs ?? createTs ?? markerTs;
+    const lastActivityTs =
+      (lastMessageTs !== undefined && room.lastActivityTs !== undefined
+        ? Math.max(lastMessageTs, room.lastActivityTs)
+        : (room.lastActivityTs ?? lastMessageTs)) ??
+      createTs ??
+      markerTs;
     const pinned = isRecord(room.tags) && isRecord(room.tags["im.waypoint.pinned"]);
     const unreadState = deriveTopicUnreadState(room, agentUserId);
     const responding = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId).size > 0;
@@ -502,7 +507,10 @@ export function deriveTopics(
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
       readPositionUnknown: unreadState.readPositionUnknown,
-      needsReadGapBackfill: unreadState.readPositionUnknown || hasLimitedGapAfterReadPosition(room),
+      needsReadGapBackfill:
+        unreadState.readPositionUnknown ||
+        hasLimitedGapAfterReadPosition(room) ||
+        (room.readPositionEventId === undefined && Boolean(room.hasOlderLocalChunks)),
       responding,
       ...(sendStatus ? { sendStatus } : {}),
       unavailable: availability.unavailable,
@@ -1992,27 +2000,18 @@ function isRenderableTextBubbleEvent(
   return body.trim() !== "";
 }
 
-function deriveTopicUnreadState(
-  room: StoredRoomEvents,
+function findFirstUnreadAgentEventAfterIndex(
+  timelineEvents: RawMatrixEvent[],
+  startIndex: number,
   agentUserId: string | undefined,
 ): { unread: boolean; firstUnreadEventId?: string; readPositionUnknown: boolean } {
-  const readPos = room.readPositionEventId;
-  let startIndex = -1;
-  if (readPos !== undefined) {
-    startIndex = room.timelineEvents.findIndex(
-      (event) => !localPlaceholderOf(event) && event.event_id === readPos,
-    );
-    if (startIndex === -1) {
-      return { unread: false, readPositionUnknown: true };
-    }
-  }
   if (!agentUserId) {
     return { unread: false, readPositionUnknown: false };
   }
-  const redactedIds = collectRedactedEventIds(room.timelineEvents);
-  const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
-  for (let i = startIndex + 1; i < room.timelineEvents.length; i += 1) {
-    const event = room.timelineEvents[i];
+  const redactedIds = collectRedactedEventIds(timelineEvents);
+  const latestEdits = collectLatestEdits(timelineEvents, redactedIds);
+  for (let i = startIndex + 1; i < timelineEvents.length; i += 1) {
+    const event = timelineEvents[i];
     if (event.sender !== agentUserId) {
       continue;
     }
@@ -2028,6 +2027,60 @@ function deriveTopicUnreadState(
     };
   }
   return { unread: false, readPositionUnknown: false };
+}
+
+export function evaluateRoomUnreadFromEvents(
+  timelineEvents: RawMatrixEvent[],
+  readPositionEventId: string | undefined,
+  agentUserId: string | undefined,
+): { unread: boolean; firstUnreadEventId?: string; readPositionUnknown: boolean } {
+  let startIndex = -1;
+  if (readPositionEventId !== undefined) {
+    startIndex = timelineEvents.findIndex(
+      (event) => !localPlaceholderOf(event) && event.event_id === readPositionEventId,
+    );
+    if (startIndex === -1) {
+      return { unread: false, readPositionUnknown: true };
+    }
+  }
+  return findFirstUnreadAgentEventAfterIndex(timelineEvents, startIndex, agentUserId);
+}
+
+function deriveTopicUnreadState(
+  room: StoredRoomEvents,
+  agentUserId: string | undefined,
+): { unread: boolean; firstUnreadEventId?: string; readPositionUnknown: boolean } {
+  const readPos = room.readPositionEventId;
+  let startIndex = -1;
+  if (readPos !== undefined) {
+    startIndex = room.timelineEvents.findIndex(
+      (event) => !localPlaceholderOf(event) && event.event_id === readPos,
+    );
+    if (startIndex === -1) {
+      if (room.coldUnreadState) {
+        if (room.coldUnreadState.readPositionUnknown) {
+          return { unread: false, readPositionUnknown: true };
+        }
+        if (room.coldUnreadState.unread) {
+          return {
+            unread: true,
+            firstUnreadEventId: room.coldUnreadState.firstUnreadEventId,
+            readPositionUnknown: false,
+          };
+        }
+        startIndex = -1;
+      } else {
+        return { unread: false, readPositionUnknown: true };
+      }
+    }
+  } else if (room.coldUnreadState?.unread) {
+    return {
+      unread: true,
+      firstUnreadEventId: room.coldUnreadState.firstUnreadEventId,
+      readPositionUnknown: false,
+    };
+  }
+  return findFirstUnreadAgentEventAfterIndex(room.timelineEvents, startIndex, agentUserId);
 }
 
 export type BubbleVisibility = "above" | "visible" | "below";

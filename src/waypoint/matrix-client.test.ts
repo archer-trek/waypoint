@@ -2,6 +2,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { HomeserverTransport } from "../adapters/types";
 import { MatrixClient, localPlaceholderOf } from "./matrix-client";
+import { deriveTopics } from "./topics";
 import {
   BLOBS_STORE,
   DB_NAME,
@@ -11,7 +12,8 @@ import {
   PENDING_EVENTS_STORE,
   PENDING_READ_MARKERS_STORE,
   ROOMS_STORE,
-  TIMELINES_STORE,
+  TIMELINE_CHUNKS_STORE,
+  TIMELINE_CHUNK_SIZE,
   loadBlob,
   loadV2Snapshot,
   saveSession,
@@ -266,7 +268,7 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     await client.restore();
 
     // 1. retainSync fails -> cursor, rooms, accountData untouched
-    let spy = rejectNextStoreWrite([META_STORE, ROOMS_STORE, TIMELINES_STORE]);
+    let spy = rejectNextStoreWrite([META_STORE, ROOMS_STORE, TIMELINE_CHUNKS_STORE]);
     await expect(
       client.retainSync({
         result: {
@@ -327,7 +329,7 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     expect(client.rooms()["!r1:example.com"]!.stateEvents[0]!.content).toEqual({ name: "Orig" });
 
     // 6. enqueueRoomEvent fails -> pending queue, timeline, and draft remain untouched
-    spy = rejectNextStoreWrite([PENDING_EVENTS_STORE, TIMELINES_STORE, DRAFTS_STORE]);
+    spy = rejectNextStoreWrite([PENDING_EVENTS_STORE, TIMELINE_CHUNKS_STORE, DRAFTS_STORE]);
     await expect(
       client.enqueueRoomEvent(
         "!r1:example.com",
@@ -443,5 +445,478 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     const removeWriteTxs = txSpy.mock.calls.filter((c) => c[1] === "readwrite");
     expect(removeWriteTxs).toHaveLength(1);
     expect(client.draft("!r1:example.com")).toEqual({ text: "after remove" });
+  });
+
+  test("incremental sync and local placeholder lifecycle only write affected tail chunk(s) in IndexedDB", async () => {
+    const events100 = Array.from({ length: 100 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [
+            { type: "m.room.create", state_key: "", origin_server_ts: 500, content: {} },
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: events100,
+          readPositionEventId: "$e99",
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+
+    const writtenChunkSeqs: number[] = [];
+    const origPut = IDBObjectStore.prototype.put;
+    const putSpy = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      ...rest: unknown[]
+    ) {
+      if (this.name === TIMELINE_CHUNKS_STORE && value && typeof value === "object") {
+        writtenChunkSeqs.push((value as { seq: number }).seq);
+      }
+      return origPut.apply(this, [value, ...rest] as Parameters<IDBObjectStore["put"]>);
+    });
+
+    // Sync appends 1 event -> tail chunk 1 has 50 events, so new chunk seq=2 is written; seq 0 & 1 are untouched
+    await client.retainSync({
+      result: {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!r1:example.com": {
+                timeline: {
+                  events: [
+                    {
+                      type: "m.room.message",
+                      event_id: "$e100",
+                      sender: "@bot:example.com",
+                      origin_server_ts: 3000,
+                      content: { msgtype: "m.text", body: "sync-new" },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      incremental: true,
+    });
+    expect(writtenChunkSeqs).toEqual([2]);
+
+    // Enqueue + confirm only updates chunk 2
+    writtenChunkSeqs.length = 0;
+    const pending = await client.enqueueRoomEvent("!r1:example.com", "m.room.message", {
+      msgtype: "m.text",
+      body: "local-msg",
+    });
+    expect(writtenChunkSeqs).toEqual([2]);
+
+    writtenChunkSeqs.length = 0;
+    await client.confirmSentRoomEvent("!r1:example.com", pending.txnId, "$e101");
+    expect(writtenChunkSeqs).toEqual([2]);
+
+    putSpy.mockRestore();
+    const snap = await loadV2Snapshot();
+    expect(snap.timelines["!r1:example.com"]).toHaveLength(102);
+  });
+
+  test("applyBackfillPage prepends new historical chunks without rewriting newer chunks", async () => {
+    const events100 = Array.from({ length: 100 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 5000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [],
+          timelineEvents: events100,
+          backwardToken: "prev-1",
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+    // Load local cold chunk 0 first
+    expect(await client.loadNextOlderLocalChunk("!r1:example.com")).toBe(TIMELINE_CHUNK_SIZE);
+    expect(client.hasOlderLocalChunks("!r1:example.com")).toBe(false);
+
+    const writtenChunkSeqs: number[] = [];
+    const origPut = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      ...rest: unknown[]
+    ) {
+      if (this.name === TIMELINE_CHUNKS_STORE && value && typeof value === "object") {
+        writtenChunkSeqs.push((value as { seq: number }).seq);
+      }
+      return origPut.apply(this, [value, ...rest] as Parameters<IDBObjectStore["put"]>);
+    });
+
+    const older50 = Array.from({ length: 50 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$old-${49 - i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + (49 - i) * 10,
+      content: { msgtype: "m.text", body: `old-${49 - i}` },
+    }));
+
+    const outcome = await client.applyBackfillPage("!r1:example.com", {
+      fromToken: "prev-1",
+      body: { chunk: older50, end: "prev-2" },
+    });
+    expect(outcome.prependedCount).toBe(50);
+    expect(writtenChunkSeqs).toEqual([-1]);
+
+    const snap = await loadV2Snapshot();
+    expect(snap.timelines["!r1:example.com"]).toHaveLength(150);
+    expect(snap.timelines["!r1:example.com"]![0]!.event_id).toBe("$old-0");
+    expect(snap.timelines["!r1:example.com"]![149]!.event_id).toBe("$e99");
+  });
+
+  test("hot-window hydration, cold read-position unread resolution, cold chunk loading, and unloading", async () => {
+    const r1Events = Array.from({ length: 120 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$r1-${i}`,
+      sender: i === 11 ? "@bot:example.com" : "@alice:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `r1-${i}` },
+    }));
+    // Notice in r1: $r1-10 is readPositionEventId (chunk 0), $r1-11 is Agent message (chunk 0), hot chunk 2 ($r1-70..$r1-119) has only Owner messages!
+    const r2Events = Array.from({ length: 60 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$r2-${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 5000 + i * 10,
+      content: { msgtype: "m.text", body: `r2-${i}` },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      accountData: {
+        "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com" }] },
+      },
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [
+            { type: "m.room.create", state_key: "", origin_server_ts: 100, content: {} },
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+            { type: "m.room.name", state_key: "", content: { name: "冷块未读话题" } },
+          ],
+          timelineEvents: r1Events,
+          readPositionEventId: "$r1-10",
+        },
+        "!r2:example.com": {
+          stateEvents: [
+            { type: "m.room.create", state_key: "", origin_server_ts: 200, content: {} },
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+            { type: "m.room.name", state_key: "", content: { name: "已读话题" } },
+          ],
+          timelineEvents: r2Events,
+          readPositionEventId: "$r2-59",
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+
+    const rooms = client.rooms();
+    expect(rooms["!r1:example.com"]!.timelineEvents).toHaveLength(TIMELINE_CHUNK_SIZE);
+    expect(rooms["!r1:example.com"]!.hasOlderLocalChunks).toBe(true);
+    expect(rooms["!r2:example.com"]!.timelineEvents).toHaveLength(TIMELINE_CHUNK_SIZE);
+    expect(rooms["!r2:example.com"]!.hasOlderLocalChunks).toBe(true);
+
+    const topics = deriveTopics(
+      rooms,
+      [{ userId: "@bot:example.com" }],
+      "@alice:example.com",
+      client.pendingRoomEvents(),
+    );
+    expect(topics[0]!.roomId).toBe("!r2:example.com");
+    expect(topics[0]!.unread).toBe(false);
+    expect(topics[0]!.lastActivityTs).toBe(5000 + 59 * 10);
+
+    expect(topics[1]!.roomId).toBe("!r1:example.com");
+    expect(topics[1]!.unread).toBe(true);
+    expect(topics[1]!.readPositionUnknown).toBe(false);
+    expect(topics[1]!.needsReadGapBackfill).toBe(true);
+    expect(topics[1]!.lastActivityTs).toBe(1000 + 119 * 10);
+
+    // Load cold chunks for read position -> brings all 120 events into memory
+    await client.loadLocalChunksForReadPosition("!r1:example.com");
+    expect(client.rooms()["!r1:example.com"]!.timelineEvents).toHaveLength(120);
+    expect(client.hasOlderLocalChunks("!r1:example.com")).toBe(false);
+
+    // Unload cold chunks on topic switch -> trims back to hot window while keeping all 120 on disk
+    const unloaded = await client.unloadColdChunks("!r1:example.com");
+    expect(unloaded).toBe(true);
+    expect(client.rooms()["!r1:example.com"]!.timelineEvents).toHaveLength(TIMELINE_CHUNK_SIZE);
+    expect(client.rooms()["!r1:example.com"]!.hasOlderLocalChunks).toBe(true);
+
+    const topicsAfterUnload = deriveTopics(
+      client.rooms(),
+      [{ userId: "@bot:example.com" }],
+      "@alice:example.com",
+      client.pendingRoomEvents(),
+    );
+    const r1Summary = topicsAfterUnload.find((t) => t.roomId === "!r1:example.com")!;
+    expect(r1Summary.unread).toBe(true);
+    expect(r1Summary.firstUnreadEventId).toBe("$r1-11");
+
+    const diskSnap = await loadV2Snapshot();
+    expect(diskSnap.timelines["!r1:example.com"]).toHaveLength(120);
+  });
+
+  test("cross-chunk m.room.redaction in retainSync updates unloaded cold chunks on disk", async () => {
+    const events120 = Array.from({ length: 120 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+    // Put a prompt selector reaction in cold chunk 0 targeting $e4
+    events120.splice(6, 0, {
+      type: "m.reaction",
+      event_id: "$react-cold",
+      sender: "@bot:example.com",
+      origin_server_ts: 1055,
+      content: {
+        "m.relates_to": { rel_type: "m.annotation", event_id: "$e4", key: "1️⃣" },
+      },
+    } as never);
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [],
+          timelineEvents: events120,
+          readPositionEventId: "$e119",
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+    expect(client.rooms()["!r1:example.com"]!.timelineEvents).toHaveLength(TIMELINE_CHUNK_SIZE);
+
+    await client.retainSync({
+      result: {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-2",
+          rooms: {
+            join: {
+              "!r1:example.com": {
+                timeline: {
+                  events: [
+                    { type: "m.room.redaction", event_id: "$red-1", redacts: "$e5", sender: "@bot:example.com" },
+                    { type: "m.room.redaction", event_id: "$red-2", redacts: "$react-cold", sender: "@bot:example.com" },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      incremental: true,
+    });
+
+    const snap = await loadV2Snapshot();
+    const diskEvents = snap.timelines["!r1:example.com"]!;
+    expect(diskEvents.some((ev) => ev.event_id === "$e5")).toBe(false);
+    const preservedReact = diskEvents.find((ev) => ev.event_id === "$react-cold");
+    expect(preservedReact).toBeDefined();
+    expect((preservedReact!.unsigned as Record<string, unknown>)?.redacted_because).toBeDefined();
+  });
+
+  test("restore() stops cold-chunk unread scanning early and skips cold chunks when hot window suffices", async () => {
+    // 200 events -> 4 chunks (seq 0..3, 50 events each)
+    const rHotRead = Array.from({ length: 200 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$hr-${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `hr-${i}` },
+    }));
+    const rColdUnreadStop = Array.from({ length: 200 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$cu-${i}`,
+      // Put the only Agent message in chunk 2 (index 110); chunk 3 (150..199) is Owner only; readPos is $cu-10 in chunk 0
+      sender: i === 110 ? "@bot:example.com" : "@alice:example.com",
+      origin_server_ts: 2000 + i * 10,
+      content: { msgtype: "m.text", body: `cu-${i}` },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      accountData: {
+        "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com" }] },
+      },
+      rooms: {
+        "!r-hot:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: rHotRead,
+          readPositionEventId: "$hr-199",
+        },
+        "!r-stop:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: rColdUnreadStop,
+          readPositionEventId: "$cu-10",
+        },
+      },
+    });
+
+    const readChunkKeys: Array<[string, number]> = [];
+    const origOpenCursor = IDBObjectStore.prototype.openCursor;
+    const cursorSpy = vi.spyOn(IDBObjectStore.prototype, "openCursor").mockImplementation(function (
+      this: IDBObjectStore,
+      ...args: Parameters<IDBObjectStore["openCursor"]>
+    ) {
+      const req = origOpenCursor.apply(this, args);
+      if (this.name === TIMELINE_CHUNKS_STORE) {
+        const origSet = Object.getOwnPropertyDescriptor(IDBRequest.prototype, "onsuccess")?.set;
+        req.addEventListener("success", () => {
+          const val = req.result?.value as { roomId?: string; seq?: number } | undefined;
+          if (val?.roomId && typeof val.seq === "number") {
+            readChunkKeys.push([val.roomId, val.seq]);
+          }
+        });
+        void origSet;
+      }
+      return req;
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+    cursorSpy.mockRestore();
+
+    // !r-hot read ONLY chunk 3 (seq 3); !r-stop read chunk 3 (hot) and chunk 2 (cold) and stopped without reading seq 0 or 1
+    expect(readChunkKeys.filter(([r]) => r === "!r-hot:example.com").map(([, s]) => s)).toEqual([3]);
+    expect(readChunkKeys.filter(([r]) => r === "!r-stop:example.com").map(([, s]) => s)).toEqual([3, 2]);
+
+    const topics = deriveTopics(client.rooms(), [{ userId: "@bot:example.com" }], "@alice:example.com");
+    expect(topics.find((t) => t.roomId === "!r-hot:example.com")?.unread).toBe(false);
+    expect(topics.find((t) => t.roomId === "!r-stop:example.com")?.unread).toBe(true);
+  });
+
+  test("applyBackfillPage splits mid-timeline limited gap without rewriting unrelated chunks", async () => {
+    const events100 = Array.from({ length: 100 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$e${i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1000 + i * 10,
+      content: { msgtype: "m.text", body: `msg-${i}` },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [],
+          timelineEvents: events100,
+          reachedStart: true,
+          timelineGaps: [
+            { limited: true, prevBatch: "gap-mid", gapBeforeEventId: "$e55" },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+    await client.loadNextOlderLocalChunk("!r1:example.com");
+
+    const writtenSeqs: number[] = [];
+    const origPut = IDBObjectStore.prototype.put;
+    vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (
+      this: IDBObjectStore,
+      value: unknown,
+      ...rest: unknown[]
+    ) {
+      if (this.name === TIMELINE_CHUNKS_STORE && value && typeof value === "object") {
+        writtenSeqs.push((value as { seq: number }).seq);
+      }
+      return origPut.apply(this, [value, ...rest] as Parameters<IDBObjectStore["put"]>);
+    });
+
+    const gapFill = Array.from({ length: 30 }, (_, i) => ({
+      type: "m.room.message",
+      event_id: `$gap-${29 - i}`,
+      sender: "@bot:example.com",
+      origin_server_ts: 1545,
+      content: { msgtype: "m.text", body: `gap-${29 - i}` },
+    }));
+
+    const outcome = await client.applyBackfillPage("!r1:example.com", {
+      fromToken: "gap-mid",
+      gapIndex: 0,
+      body: { chunk: gapFill, end: "" },
+    });
+    expect(outcome.prependedCount).toBe(30);
+    // Chunk 0 ($e0..$e49) must NOT be rewritten; only the split target chunk (seq >= 1) is written
+    expect(writtenSeqs.every((s) => s >= 1)).toBe(true);
+
+    const snap = await loadV2Snapshot();
+    const ids = snap.timelines["!r1:example.com"]!.map((e) => e.event_id);
+    expect(ids).toHaveLength(130);
+    const idx54 = ids.indexOf("$e54");
+    const idxGap0 = ids.indexOf("$gap-0");
+    const idxGap29 = ids.indexOf("$gap-29");
+    const idx55 = ids.indexOf("$e55");
+    expect(idx54).toBe(54);
+    expect(idxGap0).toBe(55);
+    expect(idxGap29).toBe(84);
+    expect(idx55).toBe(85);
   });
 });

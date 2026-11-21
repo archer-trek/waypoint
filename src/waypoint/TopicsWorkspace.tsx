@@ -1455,6 +1455,19 @@ export function TopicsWorkspace({
     };
   }, [openFailedMenuId]);
 
+  const prevActiveTopicIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prevRoomId = prevActiveTopicIdRef.current;
+    prevActiveTopicIdRef.current = activeTopicId;
+    if (prevRoomId && prevRoomId !== activeTopicId) {
+      void client.unloadColdChunks(prevRoomId).then((changed) => {
+        if (changed && mountedRef.current) {
+          setRevision((value) => value + 1);
+        }
+      });
+    }
+  }, [activeTopicId, client]);
+
   useEffect(() => {
     const prevRoomId = visibleComposerRoomRef.current;
     visibleComposerRoomRef.current = visibleComposerRoomId;
@@ -1667,13 +1680,35 @@ export function TopicsWorkspace({
   }
 
   async function triggerScrollBackfill(roomId: string) {
-    if (
-      pausedRef.current ||
-      reauthRequiredRef.current ||
-      exiting ||
-      !client.hasToken ||
-      backfillInFlightRoomsRef.current.has(roomId)
-    ) {
+    if (exiting || backfillInFlightRoomsRef.current.has(roomId)) {
+      return;
+    }
+    if (client.hasOlderLocalChunks(roomId)) {
+      backfillInFlightRoomsRef.current.add(roomId);
+      const myEpoch = syncEpochRef.current;
+      try {
+        const el = timelineRef.current;
+        const shouldPreserve = el !== null && activeVisibleRoomRef.current === roomId;
+        const prevScrollHeight = el?.scrollHeight ?? 0;
+        const prevScrollTop = el?.scrollTop ?? 0;
+        const loaded = await client.loadNextOlderLocalChunk(roomId);
+        if (!mountedRef.current || syncEpochRef.current !== myEpoch) {
+          return;
+        }
+        if (loaded > 0 && shouldPreserve && el) {
+          pendingScrollPreserveRef.current = {
+            roomId,
+            prevScrollHeight,
+            prevScrollTop,
+          };
+        }
+        setRevision((value) => value + 1);
+      } finally {
+        backfillInFlightRoomsRef.current.delete(roomId);
+      }
+      return;
+    }
+    if (pausedRef.current || reauthRequiredRef.current || !client.hasToken) {
       return;
     }
     const target = nextBackfillTargetForScrollUp(client.rooms()[roomId]);
@@ -1747,17 +1782,18 @@ export function TopicsWorkspace({
     if (!visibleComposerRoomId || !activeTopicNeedsReadGapBackfill) {
       return;
     }
+    const hasLocalReadGap = client.needsLocalChunksForReadPosition(visibleComposerRoomId);
+    const hasServerReadGap =
+      !pausedRef.current &&
+      !reauthRequiredRef.current &&
+      client.hasToken &&
+      Boolean(nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId]));
     if (
-      pausedRef.current ||
-      reauthRequiredRef.current ||
       exiting ||
-      !client.hasToken ||
       backfillInFlightRoomsRef.current.has(visibleComposerRoomId) ||
-      openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId)
+      openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId) ||
+      (!hasLocalReadGap && !hasServerReadGap)
     ) {
-      return;
-    }
-    if (!nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId])) {
       return;
     }
     const roomId = visibleComposerRoomId;
@@ -1767,6 +1803,36 @@ export function TopicsWorkspace({
     let cancelled = false;
     void (async () => {
       try {
+        if (client.needsLocalChunksForReadPosition(roomId)) {
+          const el = timelineRef.current;
+          const shouldPreserve =
+            el !== null &&
+            activeVisibleRoomRef.current === roomId &&
+            userScrolledRoomRef.current === roomId;
+          const prevScrollHeight = el?.scrollHeight ?? 0;
+          const prevScrollTop = el?.scrollTop ?? 0;
+          await client.loadLocalChunksForReadPosition(roomId);
+          if (cancelled || !mountedRef.current || syncEpochRef.current !== myEpoch) {
+            return;
+          }
+          if (shouldPreserve && el) {
+            pendingScrollPreserveRef.current = {
+              roomId,
+              prevScrollHeight,
+              prevScrollTop,
+            };
+          }
+          setRevision((value) => value + 1);
+          const afterLocalRoom = client.rooms()[roomId];
+          if (
+            afterLocalRoom &&
+            (afterLocalRoom.readPositionEventId === undefined ||
+              timelineIndexOf(afterLocalRoom.timelineEvents, afterLocalRoom.readPositionEventId) !== -1) &&
+            !hasLimitedGapAfterReadPosition(afterLocalRoom)
+          ) {
+            return;
+          }
+        }
         while (
           !cancelled &&
           mountedRef.current &&
@@ -1871,10 +1937,7 @@ export function TopicsWorkspace({
       return;
     }
     if (
-      pausedRef.current ||
-      reauthRequiredRef.current ||
       exiting ||
-      !client.hasToken ||
       backfillInFlightRoomsRef.current.has(visibleComposerRoomId) ||
       openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId) ||
       viewportBackfillStoppedRoomsRef.current.has(visibleComposerRoomId)
@@ -1883,7 +1946,8 @@ export function TopicsWorkspace({
     }
     if (
       activeTopicNeedsReadGapBackfill &&
-      nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId])
+      (client.needsLocalChunksForReadPosition(visibleComposerRoomId) ||
+        nextBackfillTargetForReadPosition(client.rooms()[visibleComposerRoomId]))
     ) {
       return;
     }
@@ -1893,6 +1957,46 @@ export function TopicsWorkspace({
       container.clientHeight <= 0 ||
       container.scrollHeight > container.clientHeight + TOP_SCROLL_THRESHOLD_PX
     ) {
+      return;
+    }
+    if (client.hasOlderLocalChunks(visibleComposerRoomId)) {
+      const roomId = visibleComposerRoomId;
+      const myEpoch = syncEpochRef.current;
+      backfillInFlightRoomsRef.current.add(roomId);
+      let cancelled = false;
+      void (async () => {
+        try {
+          const el = timelineRef.current;
+          const shouldPreserve =
+            el !== null &&
+            activeVisibleRoomRef.current === roomId &&
+            userScrolledRoomRef.current === roomId;
+          const prevScrollHeight = el?.scrollHeight ?? 0;
+          const prevScrollTop = el?.scrollTop ?? 0;
+          await client.loadNextOlderLocalChunk(roomId);
+          if (cancelled || !mountedRef.current || syncEpochRef.current !== myEpoch) {
+            return;
+          }
+          if (shouldPreserve && el) {
+            pendingScrollPreserveRef.current = {
+              roomId,
+              prevScrollHeight,
+              prevScrollTop,
+            };
+          }
+          setRevision((value) => value + 1);
+        } finally {
+          backfillInFlightRoomsRef.current.delete(roomId);
+          if (mountedRef.current && activeVisibleRoomRef.current === roomId) {
+            setBackfillTick((value) => value + 1);
+          }
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (pausedRef.current || reauthRequiredRef.current || !client.hasToken) {
       return;
     }
     const target = nextBackfillTargetForScrollUp(client.rooms()[visibleComposerRoomId]);
@@ -2237,7 +2341,7 @@ export function TopicsWorkspace({
       container.scrollHeight <= container.clientHeight + TOP_SCROLL_THRESHOLD_PX &&
       !backfillInFlightRoomsRef.current.has(roomId) &&
       !viewportBackfillStoppedRoomsRef.current.has(roomId) &&
-      nextBackfillTargetForScrollUp(client.rooms()[roomId])
+      (client.hasOlderLocalChunks(roomId) || Boolean(nextBackfillTargetForScrollUp(client.rooms()[roomId])))
     ) {
       setBackfillTick((value) => value + 1);
     }
@@ -2270,9 +2374,9 @@ export function TopicsWorkspace({
       return;
     }
     const shouldWaitForBackfill =
-      !reauthRequired &&
       activeTopic.needsReadGapBackfill &&
-      Boolean(nextBackfillTargetForReadPosition(rooms[visibleComposerRoomId])) &&
+      (client.needsLocalChunksForReadPosition(visibleComposerRoomId) ||
+        (!reauthRequired && Boolean(nextBackfillTargetForReadPosition(rooms[visibleComposerRoomId])))) &&
       !openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId);
 
     if (lastLandedRoomRef.current !== visibleComposerRoomId) {
