@@ -176,6 +176,8 @@ export function TopicsWorkspace({
   const persistingSendRef = useRef(false);
   const [openFailedMenu, setOpenFailedMenu] = useState<{ roomId: string; id: string } | null>(null);
   const [overflowMenuOpen, setOverflowMenuOpen] = useState(false);
+  const [messageContextMenuOpen, setMessageContextMenuOpen] = useState(false);
+  const dismissContextMenuRef = useRef<(() => void) | null>(null);
   const [headerElevated, setHeaderElevated] = useState(false);
   const [pendingDiscardAction, setPendingDiscardAction] = useState<(() => void) | null>(null);
   const [swipeBackOffset, setSwipeBackOffset] = useState(0);
@@ -465,61 +467,112 @@ export function TopicsWorkspace({
     }
   }
 
-  backHandlerRef.current = () => {
+  function restoreNarrowNavDepthAfterIntercept() {
     if (viewportMode !== "narrow") {
-      return false;
+      return;
     }
-    if (pendingDiscardAction !== null) {
+    navDepthRef.current = Math.max(0, navDepthRef.current - 1);
+    syncNavigationDepth(targetDepth);
+  }
+
+  function handleSubViewBack(
+    isBusy: boolean,
+    isDirty: boolean,
+    onCleanClose: () => void,
+    onDirtyClose: () => void,
+  ): true {
+    if (viewportMode === "narrow") {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      syncNavigationDepth(targetDepth);
+    }
+    if (isBusy) {
+      if (viewportMode === "narrow") {
+        syncNavigationDepth(targetDepth);
+      }
+      return true;
+    }
+    if (isDirty) {
+      if (viewportMode === "narrow") {
+        syncNavigationDepth(targetDepth);
+      }
+      setPendingDiscardAction(() => onDirtyClose);
+      return true;
+    }
+    onCleanClose();
+    return true;
+  }
+
+  backHandlerRef.current = () => {
+    if (pendingDiscardAction !== null) {
+      restoreNarrowNavDepthAfterIntercept();
       setPendingDiscardAction(null);
       return true;
     }
-    if (settingsOpen) {
-      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (agentsSubmitting || exiting) {
-        syncNavigationDepth(targetDepth);
-        return true;
+    if (deleteConfirmOpen) {
+      restoreNarrowNavDepthAfterIntercept();
+      if (!deleting) {
+        cancelDeleteConfirm();
       }
-      if (settingsIsDirty) {
-        syncNavigationDepth(targetDepth);
-        setPendingDiscardAction(() => closeSettings);
-        return true;
-      }
-      setSettingsOpen(false);
-      resetAgentsForm();
-      setExitConfirmOpen(false);
       return true;
+    }
+    if (exitConfirmOpen) {
+      restoreNarrowNavDepthAfterIntercept();
+      if (!exiting) {
+        cancelExitConfirm();
+      }
+      return true;
+    }
+    if (agentsForm?.mode === "remove") {
+      restoreNarrowNavDepthAfterIntercept();
+      if (!agentsSubmitting) {
+        cancelAgentsAction();
+      }
+      return true;
+    }
+    if (messageContextMenuOpen) {
+      restoreNarrowNavDepthAfterIntercept();
+      dismissContextMenuRef.current?.();
+      setMessageContextMenuOpen(false);
+      return true;
+    }
+    if (overflowMenuOpen) {
+      restoreNarrowNavDepthAfterIntercept();
+      setOverflowMenuOpen(false);
+      return true;
+    }
+    if (openFailedMenuId !== null) {
+      restoreNarrowNavDepthAfterIntercept();
+      setOpenFailedMenu(null);
+      return true;
+    }
+    if (settingsOpen) {
+      return handleSubViewBack(
+        agentsSubmitting || exiting,
+        settingsIsDirty,
+        () => {
+          setSettingsOpen(false);
+          resetAgentsForm();
+          setExitConfirmOpen(false);
+        },
+        closeSettings,
+      );
     }
     if (creating) {
-      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (submitting || quickSubmitting) {
-        syncNavigationDepth(targetDepth);
-        return true;
-      }
-      if (createIsDirty) {
-        syncNavigationDepth(targetDepth);
-        setPendingDiscardAction(() => closeCreateForm);
-        return true;
-      }
-      resetCreateForm();
-      return true;
+      return handleSubViewBack(
+        submitting || quickSubmitting,
+        createIsDirty,
+        resetCreateForm,
+        closeCreateForm,
+      );
     }
     if (editing && activeTopic) {
-      navDepthRef.current = Math.max(0, navDepthRef.current - 1);
-      if (editSubmitting) {
-        syncNavigationDepth(targetDepth);
-        return true;
-      }
-      if (editIsDirty) {
-        syncNavigationDepth(targetDepth);
-        setPendingDiscardAction(() => closeEditForm);
-        return true;
-      }
-      resetEditForm();
-      return true;
+      return handleSubViewBack(
+        editSubmitting,
+        editIsDirty,
+        resetEditForm,
+        closeEditForm,
+      );
     }
-    if (activeTopic) {
+    if (viewportMode === "narrow" && activeTopic) {
       navDepthRef.current = Math.max(0, navDepthRef.current - 1);
       if (deleting) {
         syncNavigationDepth(targetDepth);
@@ -530,6 +583,23 @@ export function TopicsWorkspace({
     }
     return false;
   };
+
+  const canHandleSystemBack =
+    pendingDiscardAction !== null ||
+    deleteConfirmOpen ||
+    exitConfirmOpen ||
+    agentsForm?.mode === "remove" ||
+    messageContextMenuOpen ||
+    overflowMenuOpen ||
+    openFailedMenuId !== null ||
+    settingsOpen ||
+    creating ||
+    Boolean(editing && activeTopic) ||
+    (viewportMode === "narrow" && Boolean(activeTopic));
+
+  useEffect(() => {
+    platform?.setSystemBackEnabled?.(canHandleSystemBack);
+  }, [platform, canHandleSystemBack]);
 
   useEffect(() => {
     if (platform?.onSystemBack) {
@@ -2832,8 +2902,8 @@ export function TopicsWorkspace({
           showToastNotice("打开附件失败，请重试。");
           return;
         }
-      } catch {
-        showToastNotice("打开附件失败，请重试。");
+      } catch (error) {
+        showToastNotice(formatOpenMediaError(error));
         return;
       }
     }
@@ -2850,8 +2920,8 @@ export function TopicsWorkspace({
       let result: TransportResult;
       try {
         result = await client.downloadMedia(mxcUrl);
-      } catch {
-        showToastNotice("打开附件失败，请重试。");
+      } catch (error) {
+        showToastNotice(formatOpenMediaError(error));
         return;
       }
       if (!mountedRef.current || !client.hasToken) {
@@ -2890,8 +2960,8 @@ export function TopicsWorkspace({
         mimeType: media.mimeType || cached.mimeType,
         filename: media.filename,
       });
-    } catch {
-      showToastNotice("打开附件失败，请重试。");
+    } catch (error) {
+      showToastNotice(formatOpenMediaError(error));
     }
   }
 
@@ -3628,6 +3698,10 @@ export function TopicsWorkspace({
                 void handleSelectPromptOption(roomId, eventId, optionKey)
               }
               onCopyFeedback={showToastNotice}
+              onContextMenuOpenChange={setMessageContextMenuOpen}
+              onRegisterContextMenuDismiss={(dismiss) => {
+                dismissContextMenuRef.current = dismiss;
+              }}
             />
             <ComposerView
               safeInset={safeInset}
@@ -3868,6 +3942,14 @@ function createRenderableMediaUrl(
   return {
     url: `data:${safeMime};base64,${btoa(binary)}`,
   };
+}
+
+function formatOpenMediaError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (message.includes("NO_VIEWER_APP")) {
+    return "未找到可打开该附件的应用，请先安装对应的查看器后再试。";
+  }
+  return "打开附件失败，请重试。";
 }
 
 function extractDataTransferFiles(transfer: DataTransfer | null | undefined): File[] {

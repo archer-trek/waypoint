@@ -179,6 +179,32 @@ export function WaypointApp({
     return syncAppearanceLifecycle();
   }, []);
 
+  const appBackHandlerRef = useRef<() => boolean>(() => false);
+  const canHandleAppSystemBack =
+    phase.name === "restore-error" && phase.resetConfirmOpen;
+
+  appBackHandlerRef.current = () => {
+    if (phase.name === "restore-error" && phase.resetConfirmOpen) {
+      if (!phase.resetting) {
+        setPhase((prev) =>
+          prev.name === "restore-error"
+            ? { ...prev, resetConfirmOpen: false }
+            : prev,
+        );
+      }
+      return true;
+    }
+    return false;
+  };
+
+  useEffect(() => {
+    if (phase.name === "topics") {
+      return undefined;
+    }
+    platform.setSystemBackEnabled?.(canHandleAppSystemBack);
+    return platform.onSystemBack?.(() => appBackHandlerRef.current());
+  }, [phase.name, platform, canHandleAppSystemBack]);
+
   const unmountedRef = useRef(false);
   const [restoreAttempt, setRestoreAttempt] = useState(0);
 
@@ -1184,7 +1210,9 @@ export function WaypointApp({
                     id="waypoint-address"
                     className={authInputClassName}
                     name="address"
-                                        autoCapitalize="none"
+                    autoComplete="url"
+                    inputMode="url"
+                    autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
                     disabled={phase.submitting}
@@ -1259,7 +1287,8 @@ export function WaypointApp({
                     id="waypoint-user-id"
                     className={authInputClassName}
                     name="user-id"
-                                        autoCapitalize="none"
+                    autoComplete="username"
+                    autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
                     disabled={phase.submitting}
@@ -1274,6 +1303,7 @@ export function WaypointApp({
                     className={authInputClassName}
                     name="password"
                     type="password"
+                    autoComplete="current-password"
                     disabled={phase.submitting}
                     value={phase.password}
                     onChange={(event) => setPhase({ ...phase, password: event.target.value })}
@@ -1383,7 +1413,8 @@ export function WaypointApp({
                     id="waypoint-agent-user-id"
                     className={authInputClassName}
                     name="agent-user-id"
-                                        autoCapitalize="none"
+                    autoComplete="off"
+                    autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
                     value={phase.agentUserId}

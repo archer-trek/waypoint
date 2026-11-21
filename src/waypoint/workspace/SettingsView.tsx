@@ -216,6 +216,7 @@ export function SettingsView({
               <Input
                 id="agents-bot-user-id"
                 name="agents-bot-user-id"
+                autoComplete="off"
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
@@ -235,6 +236,7 @@ export function SettingsView({
               <Input
                 id="agents-bot-name"
                 name="agents-bot-name"
+                autoComplete="off"
                 value={agentsForm.handwrittenName}
                 disabled={agentsSubmitting}
                 onChange={(event) =>
@@ -294,6 +296,7 @@ export function SettingsView({
               <Input
                 id="agents-edit-name"
                 name="agents-edit-name"
+                autoComplete="off"
                 value={agentsForm.handwrittenName}
                 disabled={agentsSubmitting}
                 onChange={(event) =>

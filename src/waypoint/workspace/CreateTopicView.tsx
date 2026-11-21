@@ -120,6 +120,7 @@ export function CreateTopicView({
             <Input
               id="create-topic-name"
               name="topic-name"
+              autoComplete="off"
               value={nameInput}
               disabled={submitting}
               onChange={(event) => onNameInputChange(event.target.value)}
@@ -194,6 +195,7 @@ export function CreateTopicView({
                 <Input
                   id="quick-bot-user-id"
                   name="quick-bot-user-id"
+                  autoComplete="off"
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}
@@ -209,6 +211,7 @@ export function CreateTopicView({
                 <Input
                   id="quick-bot-name"
                   name="quick-bot-name"
+                  autoComplete="off"
                   value={quickHandwrittenName}
                   disabled={quickSubmitting}
                   onChange={(event) =>

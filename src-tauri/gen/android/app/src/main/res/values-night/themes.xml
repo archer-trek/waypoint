@@ -1,6 +1,7 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
+<resources>
     <!-- Base application theme. -->
     <style name="Theme.waypoint" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/waypoint_background_dark</item>
+        <item name="android:colorBackground">@color/waypoint_background_dark</item>
     </style>
 </resources>

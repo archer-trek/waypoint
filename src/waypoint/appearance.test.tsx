@@ -517,4 +517,116 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
     expect(screen.getByRole("main")).toHaveAttribute("data-viewport", "narrow");
     expect(screen.getByRole("button", { name: "继续" })).toBeInTheDocument();
   });
+
+  test("外观变更同步至 Android 原生桥接与 Tauri 命令，非 Tauri 浏览器无报错，且登录与登记表单具备标准 autoComplete 语义 (#139)", async () => {
+    const user = userEvent.setup();
+    const mm = installMatchMediaMock(false);
+    restoreMatchMedia = mm.restore;
+
+    const setSystemAppearance = vi.fn();
+    (window as Window & { WaypointAndroid?: { setSystemAppearance?: (a: string) => void } }).WaypointAndroid = {
+      setSystemAppearance,
+    };
+
+    try {
+      const homeserver = new FakeHomeserver();
+      homeserver.handler = async (input) => {
+        if (input.url.endsWith("/versions")) {
+          return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+        }
+        if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+          return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+        }
+        if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+          return {
+            type: "response",
+            status: 200,
+            body: { user_id: "@alice:example.com", access_token: "tok-1", device_id: "DEV1" },
+          };
+        }
+        if (input.url.includes("/sync")) {
+          return { type: "response", status: 200, body: { next_batch: "batch-1", account_data: validAgents } };
+        }
+        if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/logout")) {
+          return { type: "response", status: 200, body: {} };
+        }
+        throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+      };
+
+      const view = renderApp(homeserver);
+
+      // 1. 地址输入具备 url 语义，初始同步浅色至原生桥接
+      const addressInput = await screen.findByLabelText("Homeserver 地址");
+      expect(addressInput).toHaveAttribute("autocomplete", "url");
+      expect(addressInput).toHaveAttribute("inputmode", "url");
+      expect(setSystemAppearance).toHaveBeenCalledWith("system");
+
+      await user.type(addressInput, "https://matrix.example.com");
+      await user.click(screen.getByRole("button", { name: "继续" }));
+
+      // 2. 登录表单具备 username / current-password 语义
+      const userInput = await screen.findByLabelText("用户名");
+      const passwordInput = screen.getByLabelText("密码");
+      expect(userInput).toHaveAttribute("autocomplete", "username");
+      expect(passwordInput).toHaveAttribute("autocomplete", "current-password");
+
+      await user.type(userInput, "alice");
+      await user.type(passwordInput, "secret");
+      await user.click(screen.getByRole("button", { name: "用密码登录" }));
+      await screen.findByText("暂无 Topic");
+
+      // 3. 在「设置 → 这台设备」切换深浅色时同步到原生桥接
+      await user.click(screen.getByRole("button", { name: "设置" }));
+      const deviceSection = screen.getByRole("region", { name: "这台设备" });
+      const group = within(deviceSection).getByRole("radiogroup", { name: "外观" });
+      await user.click(within(group).getByRole("radio", { name: "深色" }));
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("dark");
+
+      await user.click(within(group).getByRole("radio", { name: "浅色" }));
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("light");
+
+      // 4. 跟随系统随 OS 切换实时同步
+      act(() => {
+        mm.setSystemDark(true);
+      });
+      await user.click(within(group).getByRole("radio", { name: "跟随系统" }));
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("system");
+
+      act(() => {
+        mm.setSystemDark(false);
+      });
+      expect(setSystemAppearance).toHaveBeenLastCalledWith("system");
+      view.unmount();
+    } finally {
+      delete (window as Window & { WaypointAndroid?: unknown }).WaypointAndroid;
+    }
+
+    // 5. 无 WaypointAndroid 但处于 Tauri 环境时，回退调用 sync_system_appearance 命令
+    globalThis.indexedDB = new IDBFactory();
+    localStorage.clear();
+    const prevIsTauri = (globalThis as { isTauri?: boolean }).isTauri;
+    const prevInternals = (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    const invokeSpy = vi.fn().mockResolvedValue(undefined);
+    try {
+      (globalThis as { isTauri?: boolean }).isTauri = true;
+      (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = {
+        invoke: (cmd: string, args?: unknown) => invokeSpy(cmd, args),
+      };
+      const tauriView = renderApp(makeConnectedHomeserver());
+      await screen.findByLabelText("Homeserver 地址");
+      expect(invokeSpy).toHaveBeenCalledWith("sync_system_appearance", { appearance: "system" });
+      tauriView.unmount();
+    } finally {
+      if (prevIsTauri === undefined) {
+        delete (globalThis as { isTauri?: boolean }).isTauri;
+      } else {
+        (globalThis as { isTauri?: boolean }).isTauri = prevIsTauri;
+      }
+      if (prevInternals === undefined) {
+        delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+      } else {
+        (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = prevInternals;
+      }
+    }
+  });
 });

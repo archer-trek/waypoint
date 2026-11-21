@@ -71,6 +71,7 @@ export function EditTopicView({
               <Input
                 id="edit-topic-name"
                 name="edit-topic-name"
+                autoComplete="off"
                 value={editNameInput}
                 disabled={editSubmitting}
                 onChange={(event) => onEditNameInputChange(event.target.value)}

@@ -255,4 +255,56 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(mainActivityKt).toContain("View.OVER_SCROLL_NEVER");
     expect(mainActivityKt).toContain("setOnScrollChangeListener");
   });
+
+  test("Android shell resources lock monochrome cold-start themes, remove template/TV leftovers, and clean app_name quotes (#139)", () => {
+    const stringsXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/values/strings.xml"),
+      "utf-8",
+    );
+    expect(stringsXml).toContain("<string name=\"app_name\">Waypoint</string>");
+    expect(stringsXml).toContain("<string name=\"main_activity_title\">Waypoint</string>");
+    expect(stringsXml).not.toContain("\"Waypoint\"");
+
+    expect(
+      existsSync(
+        resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/layout/activity_main.xml"),
+      ),
+    ).toBe(false);
+
+    const colorsXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/values/colors.xml"),
+      "utf-8",
+    );
+    expect(colorsXml).not.toMatch(/purple_|teal_|name="black"|name="white"/);
+    expect(colorsXml).toContain("#FFFFFF");
+    expect(colorsXml).toContain("#09090B");
+
+    const dayThemeXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/values/themes.xml"),
+      "utf-8",
+    );
+    expect(dayThemeXml).toContain("@color/waypoint_background_light");
+
+    const nightThemeXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/values-night/themes.xml"),
+      "utf-8",
+    );
+    expect(nightThemeXml).toContain("@color/waypoint_background_dark");
+
+    const manifestXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/AndroidManifest.xml"),
+      "utf-8",
+    );
+    expect(manifestXml).not.toMatch(/leanback/i);
+    expect(manifestXml).toContain("android:enableOnBackInvokedCallback=\"true\"");
+    expect(manifestXml).toContain("androidx.core.content.FileProvider");
+
+    const filePathsXml = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/xml/file_paths.xml"),
+      "utf-8",
+    );
+    expect(filePathsXml).not.toContain("<external-path");
+    expect(filePathsXml).toContain("<cache-path");
+    expect(filePathsXml).toContain("waypoint-media/");
+  });
 });

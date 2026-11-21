@@ -2307,4 +2307,185 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
       getBcrSpy.mockRestore();
     }
   });
+
+  test("narrow system back unwinds DeleteTopicDialog, RemoveBotDialog, ExitConfirmDialog, ActionSheet, and Android bridge without mutating history (#139)", async () => {
+    const user = userEvent.setup();
+    const clock = new ManualClock();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-next" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-initial",
+      deviceId: "DEV1",
+      syncCursor: "batch-init",
+      accountData: {
+        "im.waypoint.agents": {
+          agents: [
+            { user_id: "@bot:example.com", name: "Hermes" },
+            { user_id: "@bot2:example.com", name: "Atlas" },
+          ],
+        },
+      },
+      rooms: {
+        "!back-modals:example.com": makeStoredRoom({
+          name: "确认弹窗退栈",
+          messages: [makeTextEvent("$msg-1", "@bot:example.com", "可长按消息", 2000)],
+        }),
+      },
+    });
+    const client = new MatrixClient(homeserver);
+    expect(await client.restore()).toBe("sync");
+
+    const harness = makePlatformHarness("narrow");
+    const setSystemBackEnabled = vi.fn();
+    harness.platform.setSystemBackEnabled = setSystemBackEnabled;
+
+    const view = render(
+      <TopicsWorkspace
+        client={client}
+        clock={clock}
+        platform={harness.platform}
+        viewportMode="narrow"
+      />,
+    );
+
+    // 1. 顶层 Topic 列表无弹窗时不允许拦截系统返回
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(false);
+    expect(harness.triggerSystemBack()).toBe(false);
+
+    // 2. 进入 Topic 对话并触发 DeleteTopicDialog -> 系统返回先关弹窗，再退回列表
+    await user.click(screen.getByRole("button", { name: /确认弹窗退栈/ }));
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(true);
+
+    // 长按消息呼出 ActionSheet，系统返回先关 ActionSheet
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const messageEl = screen.getByText("可长按消息");
+    fireEvent.touchStart(messageEl, { touches: [{ clientX: 100, clientY: 200 }] });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(550);
+    });
+    vi.useRealTimers();
+    expect(await screen.findByRole("dialog", { name: "消息操作" })).toBeInTheDocument();
+
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "消息操作" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeInTheDocument();
+
+    // 打开删除 Topic 确认框，系统返回只关确认框，不退出 Topic
+    await user.click(screen.getByRole("button", { name: "话题操作" }));
+    await user.click(screen.getByRole("menuitem", { name: "删除" }));
+    expect(screen.getByRole("alertdialog", { name: "确认删除 Topic" })).toBeInTheDocument();
+
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "确认删除 Topic" })).not.toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "对话时间线" })).toBeInTheDocument();
+
+    // 再次系统返回回到 Topic 列表
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeInTheDocument();
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(false);
+
+    // 3. 在设置中打开移除 Bot / 退出设备确认框，系统返回先关确认框，再关闭设置
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    const settingsRegion = screen.getByRole("region", { name: "设置" });
+    await user.click(within(settingsRegion).getAllByRole("button", { name: "移除" })[0]!);
+    expect(screen.getByRole("alertdialog", { name: "确认移除 Bot" })).toBeInTheDocument();
+
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "确认移除 Bot" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "设置" })).toBeInTheDocument();
+
+    await user.click(within(settingsRegion).getByRole("button", { name: "退出这台设备" }));
+    expect(screen.getByRole("alertdialog", { name: "确认退出这台设备" })).toBeInTheDocument();
+
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    expect(screen.queryByRole("alertdialog", { name: "确认退出这台设备" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "设置" })).toBeInTheDocument();
+
+    act(() => {
+      expect(harness.triggerSystemBack()).toBe(true);
+    });
+    expect(screen.queryByRole("region", { name: "设置" })).not.toBeInTheDocument();
+    expect(setSystemBackEnabled).toHaveBeenLastCalledWith(false);
+    view.unmount();
+
+    // 4. 生产平台适配器在 WaypointAndroid 原生桥接下不污染 history 栈并同步启用状态
+    const { detectPlatform } = await import("../adapters/production");
+    const nativeBackEnabledCalls: boolean[] = [];
+    const pushStateSpy = vi.spyOn(window.history, "pushState");
+    const backSpy = vi.spyOn(window.history, "back");
+    const originalMatchMedia = window.matchMedia;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn((query: string) => ({
+        matches: query !== "(min-width: 48em)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        onchange: null,
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    (window as Window & { WaypointAndroid?: { setSystemBackEnabled?: (enabled: boolean) => void } }).WaypointAndroid = {
+      setSystemBackEnabled: (enabled: boolean) => {
+        nativeBackEnabledCalls.push(enabled);
+      },
+    };
+    try {
+      const nativePlatform = detectPlatform();
+      const nativeView = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={nativePlatform}
+          viewportMode="narrow"
+        />,
+      );
+      expect(nativeBackEnabledCalls.at(-1)).toBe(false);
+
+      await user.click(screen.getByRole("button", { name: /确认弹窗退栈/ }));
+      expect(screen.getByRole("log", { name: "对话时间线" })).toBeInTheDocument();
+      expect(nativeBackEnabledCalls.at(-1)).toBe(true);
+      expect(pushStateSpy).not.toHaveBeenCalled();
+
+      act(() => {
+        const handleNativeBack = (window as Window & { __waypointHandleSystemBack?: () => boolean })
+          .__waypointHandleSystemBack;
+        expect(handleNativeBack?.()).toBe(true);
+      });
+      expect(screen.getByRole("complementary", { name: "Topic 列表" })).toBeInTheDocument();
+      expect(nativeBackEnabledCalls.at(-1)).toBe(false);
+      expect(backSpy).not.toHaveBeenCalled();
+      nativeView.unmount();
+    } finally {
+      delete (window as Window & { WaypointAndroid?: unknown }).WaypointAndroid;
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        value: originalMatchMedia,
+      });
+      pushStateSpy.mockRestore();
+      backSpy.mockRestore();
+    }
+  });
 });

@@ -34,6 +34,7 @@ export interface PlatformAdapter {
   keyboardInsetBottom?: () => number;
   subscribeKeyboardInsetBottom?: (onChange: (insetBottom: number) => void) => () => void;
   onSystemBack?: (handler: () => boolean) => () => void;
+  setSystemBackEnabled?: (enabled: boolean) => void;
   pushNavigationEntry?: () => void;
   popNavigationEntry?: () => void;
   focusMainWindow?: () => void;

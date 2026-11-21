@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, type RefObject } from "react";
+import { useEffect, useEffectEvent, useState, useRef, type RefObject } from "react";
 import {
   canScrollVerticallyInDirection,
   installTouchScrollBoundaryLock,
@@ -44,6 +44,8 @@ export type TimelineViewProps = {
   onOpenExternalUrl: (url: string) => void;
   onSelectPromptOption: (eventId: string, optionKey: string) => void;
   onCopyFeedback?: (message: string) => void;
+  onContextMenuOpenChange?: (open: boolean) => void;
+  onRegisterContextMenuDismiss?: (dismiss: (() => void) | null) => void;
 };
 
 const BLOCK_TAG_NAMES = new Set([
@@ -160,6 +162,8 @@ export function TimelineView({
   onOpenExternalUrl,
   onSelectPromptOption,
   onCopyFeedback,
+  onContextMenuOpenChange,
+  onRegisterContextMenuDismiss,
 }: TimelineViewProps) {
   const longPressTimerRef = useRef<number | null>(null);
   const safeInsetRef = useRef(safeInset);
@@ -186,6 +190,24 @@ export function TimelineView({
     markdownText: string;
     codeSnippet?: string;
   } | null>(null);
+  const notifyContextMenuOpen = useEffectEvent((open: boolean) => {
+    onContextMenuOpenChange?.(open);
+  });
+  const registerContextMenuDismiss = useEffectEvent((dismiss: (() => void) | null) => {
+    onRegisterContextMenuDismiss?.(dismiss);
+  });
+
+  useEffect(() => {
+    registerContextMenuDismiss(() => setContextMenuItem(null));
+    return () => {
+      registerContextMenuDismiss(null);
+      notifyContextMenuOpen(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    notifyContextMenuOpen(contextMenuItem !== null);
+  }, [contextMenuItem]);
 
   function handleTouchStart(e: React.TouchEvent<HTMLDivElement>, item: TimelineItem) {
     if (isNarrow === false || e.touches.length !== 1 || item.kind !== "message") return;
@@ -490,60 +512,58 @@ export function TimelineView({
           </div>
         ),
       )}
-      <ActionSheet
-        open={contextMenuItem !== null}
-        onOpenChange={(open) => {
-          if (!open) setContextMenuItem(null);
-        }}
-      >
-        <ActionSheetContent
-          aria-label="消息操作"
-          title="消息操作"
-          onDismiss={() => setContextMenuItem(null)}
+      {contextMenuItem !== null ? (
+        <ActionSheet
+          open
+          onOpenChange={(open) => {
+            if (!open) setContextMenuItem(null);
+          }}
         >
-          <ActionSheetCard>
-            <div role="menu" aria-label="消息操作" className="flex flex-col">
-              <ActionSheetItem
-                icon={<Copy className="size-4" aria-hidden="true" />}
-                onClick={() => {
-                  if (contextMenuItem) {
-                    performCopy(contextMenuItem.plainText);
-                  }
-                }}
-              >
-                复制纯文本
-              </ActionSheetItem>
-              <ActionSheetItem
-                icon={<FileText className="size-4" aria-hidden="true" />}
-                onClick={() => {
-                  if (contextMenuItem) {
-                    performCopy(contextMenuItem.markdownText);
-                  }
-                }}
-              >
-                复制 Markdown
-              </ActionSheetItem>
-              {contextMenuItem?.codeSnippet ? (
+          <ActionSheetContent
+            aria-label="消息操作"
+            title="消息操作"
+            onDismiss={() => setContextMenuItem(null)}
+          >
+            <ActionSheetCard>
+              <div role="menu" aria-label="消息操作" className="flex flex-col">
                 <ActionSheetItem
-                  icon={<Code2 className="size-4" aria-hidden="true" />}
+                  icon={<Copy className="size-4" aria-hidden="true" />}
                   onClick={() => {
-                    if (contextMenuItem?.codeSnippet) {
-                      performCopy(contextMenuItem.codeSnippet);
-                    }
+                    performCopy(contextMenuItem.plainText);
                   }}
                 >
-                  复制代码
+                  复制纯文本
                 </ActionSheetItem>
-              ) : null}
-            </div>
-          </ActionSheetCard>
-          <ActionSheetCard>
-            <ActionSheetCancel onClick={() => setContextMenuItem(null)}>
-              取消
-            </ActionSheetCancel>
-          </ActionSheetCard>
-        </ActionSheetContent>
-      </ActionSheet>
+                <ActionSheetItem
+                  icon={<FileText className="size-4" aria-hidden="true" />}
+                  onClick={() => {
+                    performCopy(contextMenuItem.markdownText);
+                  }}
+                >
+                  复制 Markdown
+                </ActionSheetItem>
+                {contextMenuItem.codeSnippet ? (
+                  <ActionSheetItem
+                    icon={<Code2 className="size-4" aria-hidden="true" />}
+                    onClick={() => {
+                      if (contextMenuItem.codeSnippet) {
+                        performCopy(contextMenuItem.codeSnippet);
+                      }
+                    }}
+                  >
+                    复制代码
+                  </ActionSheetItem>
+                ) : null}
+              </div>
+            </ActionSheetCard>
+            <ActionSheetCard>
+              <ActionSheetCancel onClick={() => setContextMenuItem(null)}>
+                取消
+              </ActionSheetCancel>
+            </ActionSheetCard>
+          </ActionSheetContent>
+        </ActionSheet>
+      ) : null}
     </div>
   );
 }

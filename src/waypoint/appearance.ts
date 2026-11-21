@@ -1,4 +1,6 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { useSyncExternalStore } from "react";
+import { getAndroidBridge } from "../adapters/android-bridge";
 
 export type AppearanceMode = "system" | "light" | "dark";
 export type ResolvedAppearance = "light" | "dark";
@@ -163,6 +165,23 @@ function syncThemeColorMeta(resolved: ResolvedAppearance): void {
   }
 }
 
+function syncNativeAppearance(mode: AppearanceMode): void {
+  const bridge = getAndroidBridge();
+  if (typeof bridge?.setSystemAppearance === "function") {
+    try {
+      bridge.setSystemAppearance(mode);
+    } catch {
+      // Ignore bridge errors when WebView is tearing down.
+    }
+    return;
+  }
+  if (isTauri()) {
+    void Promise.resolve(
+      invoke("sync_system_appearance", { appearance: mode }),
+    ).catch(() => undefined);
+  }
+}
+
 /** Apply the resolved theme class, data-theme attribute, and theme-color meta tag. */
 export function applyAppearanceToDocument(mode: AppearanceMode): ResolvedAppearance {
   const resolved = resolveAppearance(mode);
@@ -172,6 +191,7 @@ export function applyAppearanceToDocument(mode: AppearanceMode): ResolvedAppeara
     root.dataset.theme = resolved;
     syncThemeColorMeta(resolved);
   }
+  syncNativeAppearance(mode);
   return resolved;
 }
 

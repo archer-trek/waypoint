@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { installViewportScrollLock } from "../lib/viewport-lock";
+import { getAndroidBridge, type WaypointAndroidWindow } from "./android-bridge";
 import { normalizeInset } from "./inset";
 import type { Clock, HomeserverTransport, PlatformAdapter, ViewportMode } from "./types";
 
@@ -262,6 +263,9 @@ export function detectPlatform(): PlatformAdapter {
     subscribeKeyboardInsetBottom,
     pushNavigationEntry() {
       navDepth += 1;
+      if (typeof getAndroidBridge()?.setSystemBackEnabled === "function") {
+        return;
+      }
       if (hasSystemBackListener && queuedBacks > 0) {
         queuedBacks -= 1;
         suppressedPopCount = Math.max(0, suppressedPopCount - 1);
@@ -280,6 +284,9 @@ export function detectPlatform(): PlatformAdapter {
         return;
       }
       navDepth -= 1;
+      if (typeof getAndroidBridge()?.setSystemBackEnabled === "function") {
+        return;
+      }
       if (hasSystemBackListener && queuedPushes > 0) {
         queuedPushes -= 1;
         return;
@@ -296,11 +303,21 @@ export function detectPlatform(): PlatformAdapter {
         window.history.back();
       }
     },
+    setSystemBackEnabled(enabled: boolean) {
+      try {
+        getAndroidBridge()?.setSystemBackEnabled?.(enabled);
+      } catch {
+        /* ignore */
+      }
+    },
     onSystemBack(handler) {
       if (typeof window === "undefined") {
         return () => undefined;
       }
       hasSystemBackListener = true;
+      const win = window as WaypointAndroidWindow;
+      const nativeHandler = () => handler();
+      win.__waypointHandleSystemBack = nativeHandler;
       const handlePopState = () => {
         backInFlight = false;
         if (suppressedPopCount > 0) {
@@ -330,6 +347,9 @@ export function detectPlatform(): PlatformAdapter {
       window.addEventListener("popstate", handlePopState);
       return () => {
         window.removeEventListener("popstate", handlePopState);
+        if (win.__waypointHandleSystemBack === nativeHandler) {
+          delete win.__waypointHandleSystemBack;
+        }
         hasSystemBackListener = false;
         backInFlight = false;
         queuedBacks = 0;
@@ -369,6 +389,7 @@ export function detectPlatform(): PlatformAdapter {
         await invoke("open_media_file", {
           bytes: Array.from(bytes),
           filename,
+          mimeType,
         });
         return;
       }
