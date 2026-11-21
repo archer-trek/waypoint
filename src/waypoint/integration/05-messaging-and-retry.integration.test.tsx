@@ -3040,6 +3040,169 @@ test("Owner 向上滚到顶部时按每页50条再要一页，反序前置并保
   });
 });
 
+test("窄屏进入 Topic 详情时若初始同步消息未填满视口（无法上滚），自动向后补页填满视口并停在底部，随后仍可继续上滚翻页", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const messagesRequests: string[] = [];
+
+  function makeMsgs(from: number, to: number, baseTs = 1000) {
+    const out = [];
+    for (let n = from; n <= to; n += 1) {
+      out.push({
+        type: "m.room.message",
+        event_id: `$g${n}`,
+        sender: n % 2 === 1 ? "@alice:example.com" : "@bot:example.com",
+        origin_server_ts: baseTs + n * 100,
+        content: { msgtype: "m.text", body: `消息-${n}` },
+      });
+    }
+    return out;
+  }
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!general:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "general" } },
+                  ],
+                },
+                account_data: {
+                  events: [{ type: "m.fully_read", content: { event_id: "$g54" } }],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-g1",
+                  events: makeMsgs(51, 54),
+                },
+              },
+              "!sparse:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 500, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "稀疏历史" } },
+                  ],
+                },
+                timeline: {
+                  limited: true,
+                  prev_batch: "pb-s1",
+                  events: makeMsgs(99, 100).map((ev) => ({ ...ev, event_id: `$sp${ev.event_id.slice(2)}` })),
+                },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "GET" && input.url.includes("/messages")) {
+      messagesRequests.push(input.url);
+      const u = new URL(input.url);
+      const from = u.searchParams.get("from");
+      if (from === "pb-g1") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-g1",
+            end: "pb-g2",
+            chunk: makeMsgs(41, 50).reverse(),
+          },
+        };
+      }
+      if (from === "pb-g2") {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-g2",
+            chunk: makeMsgs(1, 40).reverse(),
+          },
+        };
+      }
+      if (from === "pb-s1") {
+        // 第一页只有 2 条可见消息（累计 400px <= 760px），应继续补下一页；下一页失败则止损不再循环
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            start: "pb-s1",
+            end: "pb-s2",
+            chunk: makeMsgs(97, 98)
+              .map((ev) => ({ ...ev, event_id: `$sp${ev.event_id.slice(2)}` }))
+              .reverse(),
+          },
+        };
+      }
+      if (from === "pb-s2") {
+        return {
+          type: "response",
+          status: 500,
+          body: { errcode: "M_UNKNOWN", error: "Server error" },
+        };
+      }
+      throw new Error(`不应请求：${input.url}`);
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  await withMockedTimelineLayout(100, 760, async () => {
+    renderApp(homeserver, "Waypoint Android", { viewportMode: () => "narrow" });
+    await login(user);
+
+    // 1. 打开 general：初始只有 4 条消息 (400px <= 760px)，自动补一页 pb-g1 (1400px > 760px) 即停并留在底部
+    await user.click(await screen.findByRole("button", { name: "general" }));
+    const timeline = await screen.findByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(14);
+    });
+    expect(messagesRequests).toEqual([
+      "https://matrix.example.com/_matrix/client/v3/rooms/!general%3Aexample.com/messages?dir=b&limit=50&from=pb-g1",
+    ]);
+    // 14 * 100 - 760 = 640
+    expect(timeline.scrollTop).toBe(640);
+
+    // 2. 用户上滚到顶部可继续翻出 pb-g2
+    await act(async () => {
+      timeline.scrollTop = 0;
+      fireEvent.scroll(timeline);
+    });
+    await waitFor(() => {
+      expect(timeline.querySelectorAll("[data-side]")).toHaveLength(54);
+    });
+    expect(messagesRequests).toHaveLength(2);
+    expect(timeline.scrollTop).toBe(4000);
+
+    // 3. 返回列表打开“稀疏历史”：pb-s1 仅返回 2 条 (400px <= 760px) 会继续请求 pb-s2，500 后止损不死循环
+    await user.click(screen.getByRole("button", { name: "返回" }));
+    await user.click(await screen.findByRole("button", { name: "稀疏历史" }));
+    const sparseTimeline = await screen.findByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(sparseTimeline.querySelectorAll("[data-side]")).toHaveLength(4);
+    });
+    await waitFor(() => {
+      expect(messagesRequests).toHaveLength(4);
+    });
+    expect(messagesRequests.slice(2)).toEqual([
+      "https://matrix.example.com/_matrix/client/v3/rooms/!sparse%3Aexample.com/messages?dir=b&limit=50&from=pb-s1",
+      "https://matrix.example.com/_matrix/client/v3/rooms/!sparse%3Aexample.com/messages?dir=b&limit=50&from=pb-s2",
+    ]);
+  });
+});
+
 test("多个中间limited缺口均不在后台补完且绝不越过缺口标为已读；已读位置落在中间缺口里时打开才补该缺口、插在正确位置并停在第一条未读", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
