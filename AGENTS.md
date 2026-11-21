@@ -19,3 +19,7 @@ Cut `<type>/<issue>-<slug>` (or `<type>/<slug>` for standalone changes) branches
 ### Coding standards
 
 Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `src/lib/overlay-scrollbars.ts`, updating icons/assets, or modifying UI components and integration tests.
+
+### Android build
+
+Build single-ABI (`arm64-v8a`) signed test APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`). Default Android SDK/NDK and Java 17 paths are pre-configured in `Makefile` and `scripts/build-android-apk.mjs`.

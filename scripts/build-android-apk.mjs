@@ -108,8 +108,29 @@ function main() {
 
   cleanOtherAbiJniLibs();
 
+  const androidHome =
+    process.env.ANDROID_HOME?.trim() ||
+    process.env.ANDROID_SDK_ROOT?.trim() ||
+    resolve(homedir(), "Android/Sdk");
+  const ndkHome =
+    process.env.NDK_HOME?.trim() ||
+    process.env.ANDROID_NDK_HOME?.trim() ||
+    resolve(androidHome, "ndk/27.3.13750724");
+  const javaHome =
+    process.env.JAVA_HOME?.trim() ||
+    (existsSync("/usr/lib/jvm/java-17-openjdk-arm64")
+      ? "/usr/lib/jvm/java-17-openjdk-arm64"
+      : undefined);
+
   const env = {
     ...process.env,
+    ...(androidHome && existsSync(androidHome)
+      ? { ANDROID_HOME: androidHome, ANDROID_SDK_ROOT: androidHome }
+      : {}),
+    ...(ndkHome && existsSync(ndkHome)
+      ? { NDK_HOME: ndkHome, ANDROID_NDK_HOME: ndkHome }
+      : {}),
+    ...(javaHome ? { JAVA_HOME: javaHome } : {}),
     WAYPOINT_ANDROID_ABI_FILTERS: "arm64-v8a",
     WAYPOINT_ANDROID_VERSION_CODE: versionCode,
     WAYPOINT_ANDROID_VERSION_NAME: versionName,
