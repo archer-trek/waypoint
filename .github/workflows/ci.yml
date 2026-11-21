@@ -14,6 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  ANDROID_BUILD_TOOLS_VERSION: "36.1.0"
+  ANDROID_COMPILE_SDK_VERSION: "37"
+  ANDROID_NDK_VERSION: "27.3.13750724"
+
 jobs:
   test:
     name: Test and build
@@ -61,6 +66,7 @@ jobs:
       - name: Check native path changes
         id: filter
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run_native=true" >> "$GITHUB_OUTPUT"
             exit 0
@@ -68,15 +74,16 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_SHA="${{ github.event.pull_request.base.sha }}"
             HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            CHANGED=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
           else
             BASE_SHA="${{ github.event.before }}"
             HEAD_SHA="${{ github.sha }}"
+            if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              echo "run_native=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
-          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-            echo "run_native=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" || true)
           if echo "$CHANGED" | grep -Eq '^(src-tauri/|\.github/workflows/)'; then
             echo "run_native=true" >> "$GITHUB_OUTPUT"
           else
@@ -117,13 +124,13 @@ jobs:
 
       - name: Setup Android SDK & NDK
         run: |
-          echo "NDK_HOME=${ANDROID_HOME}/ndk/27.3.13750724" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/27.3.13750724" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
           yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
-            "platforms;android-37" \
-            "build-tools;36.1.0" \
-            "ndk;27.3.13750724"
+            "platforms;android-${ANDROID_COMPILE_SDK_VERSION}" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -160,3 +167,34 @@ jobs:
 
       - name: Build Android Release APK (aarch64, R8 enabled)
         run: npx tauri android build --apk --target aarch64 --ci
+
+      - name: Verify R8-kept bridge classes in Release APK
+        run: |
+          set -euo pipefail
+          APK_DIR="src-tauri/gen/android/app/build/outputs/apk/universal/release"
+          APK_PATH="${APK_DIR}/app-universal-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            APK_PATH="${APK_DIR}/app-universal-release-unsigned.apk"
+          fi
+          test -f "$APK_PATH"
+          if [ "${APK_PATH##*-}" != "unsigned.apk" ]; then
+            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" verify --verbose "$APK_PATH"
+          fi
+          DEX_TMP="$(mktemp -d)"
+          unzip -qo "$APK_PATH" 'classes*.dex' -d "$DEX_TMP"
+          DEX_DUMP="$("${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/dexdump" "${DEX_TMP}"/classes*.dex)"
+          rm -rf "$DEX_TMP"
+          for symbol in \
+            "Lapp/waypoint/client/MainActivity;" \
+            "Lapp/waypoint/client/MainActivity\$WaypointAndroidBridge;" \
+            "getMediaCacheDirPath" \
+            "openMediaFile" \
+            "setSystemAppearance" \
+            "setSystemBackEnabled" \
+            "Lapp/tauri/opener/OpenerPlugin;" \
+            "Lapp/waypoint/client/Rust;"; do
+            echo "$DEX_DUMP" | grep -Fq "$symbol" || {
+              echo "Missing R8-kept symbol in DEX: $symbol"
+              exit 1
+            }
+          done

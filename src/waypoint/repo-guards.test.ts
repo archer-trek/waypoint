@@ -177,8 +177,10 @@ describe("Repository, asset, and error-copy guards", () => {
       resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
       "utf-8",
     );
-    const debugBlock = gradleKts.match(/getByName\("debug"\)\s*\{([\s\S]*?)\n\s{8}\}/)?.[1] ?? "";
-    const releaseBlock = gradleKts.match(/getByName\("release"\)\s*\{([\s\S]*?)\n\s{8}\}/)?.[1] ?? "";
+    const extractBuildTypeBlock = (name: "debug" | "release") =>
+      gradleKts.match(new RegExp(`getByName\\("${name}"\\)\\s*\\{([\\s\\S]*?)\\n\\s{8}\\}`))?.[1] ?? "";
+    const debugBlock = extractBuildTypeBlock("debug");
+    const releaseBlock = extractBuildTypeBlock("release");
     expect(debugBlock).toContain("isMinifyEnabled = false");
     expect(debugBlock).toContain('manifestPlaceholders["usesCleartextTraffic"] = "true"');
     expect(releaseBlock).toContain("isMinifyEnabled = true");
@@ -347,15 +349,17 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(proguardRules).toContain("setSystemAppearance(java.lang.String)");
     expect(proguardRules).toContain("MainActivity$WaypointAndroidBridge");
     expect(proguardRules).toContain("app.waypoint.client.Rust");
-    expect(proguardRules).toContain("app.tauri.**");
+    expect(proguardRules).toContain("app.tauri.plugin.**");
     expect(proguardRules).toContain("app.tauri.opener.**");
 
     const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf-8");
     expect(ciYml).toContain("workflow_dispatch:");
+    expect(ciYml).toContain("${BASE_SHA}...${HEAD_SHA}");
     expect(ciYml).toContain("src-tauri/");
     expect(ciYml).toContain(".github/workflows/");
     expect(ciYml).toContain("cargo test");
     expect(ciYml).toContain("./gradlew :app:testUniversalDebugUnitTest");
     expect(ciYml).toContain("npx tauri android build --apk --target aarch64 --ci");
+    expect(ciYml).toContain("dexdump");
   });
 });

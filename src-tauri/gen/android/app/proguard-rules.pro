@@ -15,8 +15,7 @@
 }
 
 -keep class app.waypoint.client.MainActivity$WaypointAndroidBridge {
-    public <init>(...);
-    @android.webkit.JavascriptInterface <methods>;
+    <init>(...);
 }
 
 # Tauri & Wry generated native bindings & activity classes
@@ -41,7 +40,19 @@
 }
 
 # Tauri runtime & plugins (including tauri-plugin-opener)
--keep class app.tauri.** {
+-keep class app.tauri.AppPlugin {
+    *;
+}
+
+-keep class app.tauri.PathPlugin {
+    *;
+}
+
+-keep class app.tauri.plugin.** {
+    *;
+}
+
+-keep class app.tauri.annotation.** {
     *;
 }
 
