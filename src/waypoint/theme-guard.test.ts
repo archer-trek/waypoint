@@ -354,4 +354,64 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     expect(ptViolations).toEqual([]);
     expect(fractionalRemViolations).toEqual([]);
   });
+
+  test("src/App.css wraps Markdown blocks and inline code via overflow-wrap: anywhere while keeping wide blocks independently scrollable (#145)", () => {
+    const css = readFileSync(resolve(ROOT_DIR, "src/App.css"), "utf-8");
+
+    const markdownRule = css.match(/\.waypoint-markdown \{[^}]+\}/)?.[0] ?? "";
+    expect(markdownRule).toContain("min-width: 0;");
+    expect(markdownRule).toContain("max-width: 100%;");
+    expect(markdownRule).toContain("overflow-wrap: anywhere;");
+
+    const inlineCodeRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="inline-code"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(inlineCodeRule).toContain("overflow-wrap: anywhere;");
+
+    const paragraphRule = css.match(/\.waypoint-md-p \{[^}]+\}/)?.[0] ?? "";
+    expect(paragraphRule).toContain("overflow-wrap: anywhere;");
+
+    const listItemRule = css.match(/\.waypoint-markdown li \{[^}]+\}/)?.[0] ?? "";
+    expect(listItemRule).toContain("min-width: 0;");
+    expect(listItemRule).toContain("max-width: 100%;");
+    expect(listItemRule).toContain("overflow-wrap: anywhere;");
+
+    const headingRule =
+      css.match(/\.waypoint-markdown h1,\s*\.waypoint-markdown h2[\s\S]*?\{[^}]+\}/)?.[0] ?? "";
+    expect(headingRule).toContain("overflow-wrap: anywhere;");
+
+    const blockquoteRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="blockquote"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(blockquoteRule).toContain("min-width: 0;");
+    expect(blockquoteRule).toContain("max-width: 100%;");
+    expect(blockquoteRule).toContain("overflow-wrap: anywhere;");
+
+    const calloutRule = css.match(/\.waypoint-markdown \.waypoint-callout \{[^}]+\}/)?.[0] ?? "";
+    expect(calloutRule).toContain("min-width: 0;");
+    expect(calloutRule).toContain("max-width: 100%;");
+    expect(calloutRule).toContain("overflow-wrap: anywhere;");
+
+    // Wide block containers keep independent horizontal scroll without wrapping code lines by default
+    const codeBodyRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="code-block-body"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(codeBodyRule).toContain("overflow-x: auto;");
+    expect(codeBodyRule).toContain("max-width: 100%;");
+
+    const codePreRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="code-block-body"\] pre \{[^}]+\}/)?.[0] ?? "";
+    expect(codePreRule).toContain("overflow-wrap: normal;");
+
+    const tableScrollRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="table-wrapper"\] > div:last-child \{[^}]+\}/)?.[0] ?? "";
+    expect(tableScrollRule).toContain("overflow-x: auto;");
+    expect(tableScrollRule).toContain("max-width: 100%;");
+
+    const tableInlineCodeRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="table"\] \[data-streamdown="inline-code"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(tableInlineCodeRule).toContain("white-space: nowrap;");
+    expect(tableInlineCodeRule).toContain("overflow-wrap: normal;");
+
+    const katexRule = css.match(/\.waypoint-markdown \.katex-display \{[^}]+\}/)?.[0] ?? "";
+    expect(katexRule).toContain("overflow-x: auto;");
+    expect(katexRule).toContain("max-width: 100%;");
+  });
 });

@@ -383,6 +383,120 @@ describe("TimelineView (#89)", () => {
     expect(onDiscardFailed).toHaveBeenCalledWith("local-failed");
   });
 
+  test("disables horizontal timeline scroll and constrains message rows, bubbles, and media filenames (#145)", () => {
+    const mediaAndLongTokens: TimelineItem[] = [
+      {
+        kind: "message",
+        key: "msg-agent-long",
+        eventId: "$agent-long",
+        side: "left",
+        body: [
+          "# 标题 `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "",
+          "- `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "  - `nested_long_unbroken_identifier_without_any_whitespace_1234567890`",
+          "",
+          "> 引用 `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "",
+          "> [!NOTE]",
+          "> Callout `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+        ].join("\n"),
+        status: "confirmed",
+      },
+      {
+        kind: "message",
+        key: "msg-owner-long",
+        eventId: "$owner-long",
+        side: "right",
+        body: "`hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+        status: "confirmed",
+      },
+      {
+        kind: "message",
+        key: "msg-media-long",
+        eventId: "$media-long",
+        side: "right",
+        body: "",
+        status: "confirmed",
+        media: {
+          kind: "file",
+          msgtype: "m.file",
+          filename: "very_long_unbroken_attachment_filename_without_spaces_1234567890.tar.gz",
+          mxcUrl: "mxc://example.com/file1",
+        },
+      },
+      {
+        kind: "message",
+        key: "msg-image-fallback-long",
+        eventId: "$image-fallback-long",
+        side: "left",
+        body: "",
+        status: "confirmed",
+        media: {
+          kind: "image",
+          msgtype: "m.image",
+          filename: "very_long_unbroken_image_filename_without_spaces_1234567890.png",
+          mxcUrl: "mxc://example.com/img1",
+        },
+      },
+    ];
+
+    render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={mediaAndLongTokens}
+        isNarrow
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        getLocalImageUrl={() => ""}
+        getDownloadedImageUrl={() => undefined}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+      />,
+    );
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    expect(timeline).toHaveClass("overflow-x-hidden", "overflow-y-auto");
+
+    const agentRow = timeline.querySelector('[data-event-id="$agent-long"]') as HTMLElement;
+    expect(agentRow).toHaveClass("min-w-0", "max-w-full");
+    const agentBubble = agentRow.querySelector(".waypoint-bubble") as HTMLElement;
+    expect(agentBubble).toHaveClass("min-w-0", "max-w-[min(42rem,100%)]", "wrap-anywhere");
+    expect(agentBubble.querySelector('[data-streamdown="heading-1"]')).not.toBeNull();
+    expect(agentBubble.querySelectorAll('[data-streamdown="list-item"]')).toHaveLength(2);
+    expect(agentBubble.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
+    expect(agentBubble.querySelector(".waypoint-callout")).not.toBeNull();
+    expect(agentBubble.querySelectorAll('[data-streamdown="inline-code"]')).toHaveLength(5);
+
+    const ownerRow = timeline.querySelector('[data-event-id="$owner-long"]') as HTMLElement;
+    expect(ownerRow).toHaveClass("min-w-0", "max-w-full");
+    const ownerContent = ownerRow.querySelector(".waypoint-message-content") as HTMLElement;
+    expect(ownerContent).toHaveClass("min-w-0", "max-w-[min(38rem,85%)]");
+    const ownerBubble = ownerRow.querySelector(".waypoint-bubble") as HTMLElement;
+    expect(ownerBubble).toHaveClass("min-w-0", "max-w-full", "wrap-anywhere");
+
+    const mediaRow = timeline.querySelector('[data-event-id="$media-long"]') as HTMLElement;
+    const mediaBubble = mediaRow.querySelector(".waypoint-media-bubble") as HTMLElement;
+    const mediaBtn = mediaRow.querySelector(".waypoint-media-file-button") as HTMLElement;
+    const mediaFilename = mediaRow.querySelector(".waypoint-media-filename") as HTMLElement;
+    expect(mediaBubble).toHaveClass("min-w-0", "max-w-full");
+    expect(mediaBtn).toHaveClass("min-w-0", "max-w-full");
+    expect(mediaFilename).toHaveClass("min-w-0", "max-w-full", "wrap-anywhere");
+
+    const imgRow = timeline.querySelector('[data-event-id="$image-fallback-long"]') as HTMLElement;
+    const imgBtn = imgRow.querySelector(".waypoint-media-image-button") as HTMLElement;
+    const imgFilename = imgRow.querySelector(".waypoint-media-filename") as HTMLElement;
+    expect(imgBtn).toHaveClass("min-w-0", "max-w-full");
+    expect(imgFilename).toHaveClass("block", "min-w-0", "max-w-full", "wrap-anywhere");
+  });
+
   test("narrow TimelineView opens long-press message context menu with copy actions (ADR-0028)", async () => {
     render(
       <TimelineView
