@@ -390,7 +390,17 @@ describe("TimelineView (#89)", () => {
         key: "msg-agent-long",
         eventId: "$agent-long",
         side: "left",
-        body: "- `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+        body: [
+          "# 标题 `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "",
+          "- `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "  - `nested_long_unbroken_identifier_without_any_whitespace_1234567890`",
+          "",
+          "> 引用 `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+          "",
+          "> [!NOTE]",
+          "> Callout `hermes-agent/plugins/platforms/matrix/adapter_hint.py`",
+        ].join("\n"),
         status: "confirmed",
       },
       {
@@ -413,6 +423,20 @@ describe("TimelineView (#89)", () => {
           msgtype: "m.file",
           filename: "very_long_unbroken_attachment_filename_without_spaces_1234567890.tar.gz",
           mxcUrl: "mxc://example.com/file1",
+        },
+      },
+      {
+        kind: "message",
+        key: "msg-image-fallback-long",
+        eventId: "$image-fallback-long",
+        side: "left",
+        body: "",
+        status: "confirmed",
+        media: {
+          kind: "image",
+          msgtype: "m.image",
+          filename: "very_long_unbroken_image_filename_without_spaces_1234567890.png",
+          mxcUrl: "mxc://example.com/img1",
         },
       },
     ];
@@ -445,6 +469,11 @@ describe("TimelineView (#89)", () => {
     expect(agentRow).toHaveClass("min-w-0", "max-w-full");
     const agentBubble = agentRow.querySelector(".waypoint-bubble") as HTMLElement;
     expect(agentBubble).toHaveClass("min-w-0", "max-w-[min(42rem,100%)]", "wrap-anywhere");
+    expect(agentBubble.querySelector('[data-streamdown="heading-1"]')).not.toBeNull();
+    expect(agentBubble.querySelectorAll('[data-streamdown="list-item"]')).toHaveLength(2);
+    expect(agentBubble.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
+    expect(agentBubble.querySelector(".waypoint-callout")).not.toBeNull();
+    expect(agentBubble.querySelectorAll('[data-streamdown="inline-code"]')).toHaveLength(5);
 
     const ownerRow = timeline.querySelector('[data-event-id="$owner-long"]') as HTMLElement;
     expect(ownerRow).toHaveClass("min-w-0", "max-w-full");
@@ -460,6 +489,12 @@ describe("TimelineView (#89)", () => {
     expect(mediaBubble).toHaveClass("min-w-0", "max-w-full");
     expect(mediaBtn).toHaveClass("min-w-0", "max-w-full");
     expect(mediaFilename).toHaveClass("min-w-0", "max-w-full", "wrap-anywhere");
+
+    const imgRow = timeline.querySelector('[data-event-id="$image-fallback-long"]') as HTMLElement;
+    const imgBtn = imgRow.querySelector(".waypoint-media-image-button") as HTMLElement;
+    const imgFilename = imgRow.querySelector(".waypoint-media-filename") as HTMLElement;
+    expect(imgBtn).toHaveClass("min-w-0", "max-w-full");
+    expect(imgFilename).toHaveClass("block", "min-w-0", "max-w-full", "wrap-anywhere");
   });
 
   test("narrow TimelineView opens long-press message context menu with copy actions (ADR-0028)", async () => {

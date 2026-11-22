@@ -405,6 +405,11 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     expect(tableScrollRule).toContain("overflow-x: auto;");
     expect(tableScrollRule).toContain("max-width: 100%;");
 
+    const tableInlineCodeRule =
+      css.match(/\.waypoint-markdown \[data-streamdown="table"\] \[data-streamdown="inline-code"\] \{[^}]+\}/)?.[0] ?? "";
+    expect(tableInlineCodeRule).toContain("white-space: nowrap;");
+    expect(tableInlineCodeRule).toContain("overflow-wrap: normal;");
+
     const katexRule = css.match(/\.waypoint-markdown \.katex-display \{[^}]+\}/)?.[0] ?? "";
     expect(katexRule).toContain("overflow-x: auto;");
     expect(katexRule).toContain("max-width: 100%;");

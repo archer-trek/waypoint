@@ -761,6 +761,11 @@ a {
   overflow-wrap: normal;
 }
 
+.waypoint-markdown [data-streamdown="table"] [data-streamdown="inline-code"] {
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
 .waypoint-markdown [data-streamdown="table-header"] {
   background: var(--muted);
   font-weight: 600;

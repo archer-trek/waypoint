@@ -403,7 +403,7 @@ export function TimelineView({
                               className="waypoint-bubble-image block max-w-full h-auto rounded-lg"
                             />
                           ) : (
-                            <span className="waypoint-media-filename min-w-0 max-w-full wrap-anywhere">
+                            <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere">
                               {item.media.filename}
                             </span>
                           );
