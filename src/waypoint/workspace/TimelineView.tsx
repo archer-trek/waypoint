@@ -266,7 +266,7 @@ export function TimelineView({
       ref={timelineRef}
       role="log"
       aria-label="对话时间线"
-      className="waypoint-timeline relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 flex flex-col gap-4"
+      className="waypoint-timeline relative flex-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 flex flex-col gap-4"
       onScroll={onScroll}
     >
       {items.map((item) =>
@@ -283,7 +283,7 @@ export function TimelineView({
           <div
             key={item.key}
             className={cn(
-              "waypoint-message-row flex items-start gap-2 w-full box-border",
+              "waypoint-message-row flex items-start gap-2 w-full min-w-0 max-w-full box-border",
               item.side,
               item.side === "right" ? "justify-end" : "justify-start",
             )}
@@ -363,9 +363,9 @@ export function TimelineView({
             >
               <div
                 className={cn(
-                  "waypoint-bubble",
+                  "waypoint-bubble min-w-0 wrap-anywhere",
                   item.side === "right"
-                    ? "bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal break-words shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
+                    ? "max-w-full bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
                     : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] text-[16px] leading-[1.5] text-foreground",
                 )}
                 onTouchStart={(e) => handleTouchStart(e, item)}
@@ -382,12 +382,12 @@ export function TimelineView({
                 }
               >
                 {item.media ? (
-                  <div className="waypoint-media-bubble flex flex-col gap-1.5 max-w-full">
+                  <div className="waypoint-media-bubble flex flex-col gap-1.5 min-w-0 max-w-full">
                     {item.media.kind === "image" ? (
                       <button
                         type="button"
                         aria-label={`查看图片 ${item.media.filename}`}
-                        className="waypoint-media-image-button m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer max-w-full rounded-lg overflow-hidden"
+                        className="waypoint-media-image-button m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer min-w-0 max-w-full rounded-lg overflow-hidden"
                         onClick={() => onOpenMedia(item.media!)}
                       >
                         {(() => {
@@ -403,7 +403,7 @@ export function TimelineView({
                               className="waypoint-bubble-image block max-w-full h-auto rounded-lg"
                             />
                           ) : (
-                            <span className="waypoint-media-filename break-words">
+                            <span className="waypoint-media-filename min-w-0 max-w-full wrap-anywhere">
                               {item.media.filename}
                             </span>
                           );
@@ -412,11 +412,11 @@ export function TimelineView({
                     ) : (
                       <button
                         type="button"
-                        className="waypoint-media-file-button inline-flex items-center gap-1.5 m-0 px-2.5 py-1.5 rounded-md border border-border bg-secondary text-secondary-foreground text-left cursor-pointer max-w-full hover:bg-accent"
+                        className="waypoint-media-file-button inline-flex items-center gap-1.5 m-0 px-2.5 py-1.5 rounded-md border border-border bg-secondary text-secondary-foreground text-left cursor-pointer min-w-0 max-w-full hover:bg-accent"
                         onClick={() => onOpenMedia(item.media!)}
                       >
                         <FileText aria-hidden="true" className="size-3.5 shrink-0" />
-                        <span className="waypoint-media-filename break-words">
+                        <span className="waypoint-media-filename min-w-0 max-w-full wrap-anywhere">
                           {item.media.filename}
                         </span>
                       </button>

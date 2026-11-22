@@ -315,7 +315,9 @@ a {
 /* Streamdown Markdown document typography (ADR-0024 / ADR-0026) */
 .waypoint-markdown {
   min-width: 0;
+  max-width: 100%;
   white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown > *:first-child {
@@ -329,13 +331,18 @@ a {
 .waypoint-markdown h1,
 .waypoint-markdown h2,
 .waypoint-markdown h3,
-.waypoint-markdown h4 {
+.waypoint-markdown h4,
+.waypoint-markdown h5,
+.waypoint-markdown h6 {
   color: var(--foreground);
   font-weight: 700;
   line-height: 1.35;
   margin-top: 1.15rem;
   margin-bottom: 0.45rem;
   letter-spacing: -0.01em;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown h1 {
@@ -361,12 +368,18 @@ a {
   list-style-position: outside;
   line-height: 1.5;
   color: var(--foreground);
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown li {
   margin: 0.25rem 0;
   padding-top: 0;
   padding-bottom: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown li > [data-streamdown="ordered-list"],
@@ -384,8 +397,10 @@ a {
 
 .waypoint-md-p {
   margin: 0.5rem 0;
+  min-width: 0;
+  max-width: 100%;
   white-space: pre-wrap;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-md-p:first-child {
@@ -398,11 +413,13 @@ a {
 
 .waypoint-message-row.left .waypoint-md-p,
 .waypoint-message-row.left p {
+  min-width: 0;
   max-width: min(42rem, 100%);
   margin: 0.5rem 0;
   line-height: 1.5;
   font-size: 16px;
   color: var(--foreground);
+  overflow-wrap: anywhere;
 }
 
 .waypoint-message-row .waypoint-markdown li > .waypoint-md-p,
@@ -442,6 +459,9 @@ a {
   background: color-mix(in srgb, currentColor 12%, transparent);
   font-family: var(--font-mono);
   font-size: 0.875em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
 }
 
 .waypoint-message-row.right [data-streamdown="inline-code"] {
@@ -719,6 +739,7 @@ a {
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
+  min-width: 0;
   max-width: 100%;
   background: transparent;
   scrollbar-width: none;
@@ -737,6 +758,7 @@ a {
   min-width: 100%;
   font-size: 13.5px;
   line-height: 1.5;
+  overflow-wrap: normal;
 }
 
 .waypoint-markdown [data-streamdown="table-header"] {
@@ -790,6 +812,9 @@ a {
   font-size: 0.9375em;
   font-style: normal;
   line-height: 1.55;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown [data-streamdown="blockquote"] > *:first-child {
@@ -810,12 +835,16 @@ a {
   color: var(--foreground);
   font-size: 0.9375em;
   line-height: 1.55;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown .waypoint-callout-title {
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
+  max-width: 100%;
   font-size: 0.875rem;
   font-weight: 600;
   line-height: 1.35;
@@ -823,6 +852,9 @@ a {
 
 .waypoint-markdown .waypoint-callout-body {
   margin-top: 0.4rem;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .waypoint-markdown .waypoint-callout-body > *:first-child {
@@ -882,8 +914,10 @@ a {
 .waypoint-markdown .katex-display {
   overflow-x: auto;
   overflow-y: hidden;
+  min-width: 0;
   max-width: 100%;
   margin: 0.75rem 0;
+  overflow-wrap: normal;
 }
 
 .waypoint-markdown .katex-error {

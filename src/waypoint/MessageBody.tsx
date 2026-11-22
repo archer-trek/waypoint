@@ -415,11 +415,11 @@ class RichMessageErrorBoundary extends Component<BoundaryProps, BoundaryState> {
 
 function RawFallbackBody({ body }: { body: string }) {
   return (
-    <div className="waypoint-bubble-fallback whitespace-normal">
+    <div className="waypoint-bubble-fallback min-w-0 max-w-full whitespace-normal">
       <div role="note" className="waypoint-render-fallback-hint mb-1.5 text-xs text-warning-foreground">
         渲染异常，已显示原文
       </div>
-      <div className="waypoint-bubble-raw whitespace-pre-wrap break-words">{body}</div>
+      <div className="waypoint-bubble-raw min-w-0 max-w-full whitespace-pre-wrap wrap-anywhere">{body}</div>
     </div>
   );
 }
