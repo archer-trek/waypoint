@@ -302,7 +302,6 @@ test("跨 chunk 的 m.replace 与 m.reaction 在冷块按需加载后准确合�
 });
 
 test("热窗口无有效消息时按需逆序回溯本地冷块恢复最新预览，并在同步撤回冷块消息后刷新预览", async () => {
-  const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncCalls = 0;
 
@@ -395,6 +394,5 @@ test("热窗口无有效消息时按需逆序回溯本地冷块恢复最新预�
   await waitFor(() => {
     expect(row.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("更早的 冷块消息");
   });
-  void user;
   app.unmount();
 });

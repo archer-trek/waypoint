@@ -1386,21 +1386,43 @@ export function formatMessagePreviewText(rawBody: string): string {
 
 function formatMediaPreview(media: TimelineMedia): string {
   const caption = media.caption ? formatMessagePreviewText(media.caption) : "";
+  if (media.msgtype === "m.image") {
+    return caption ? `[图片] ${caption}` : "[图片]";
+  }
+  if (media.msgtype === "m.file") {
+    return media.filename ? `[文件] ${media.filename}` : "[文件]";
+  }
   const explicitFilename =
     media.filename && media.filename !== "file" && media.filename !== "image"
       ? media.filename
       : "";
-  if (media.msgtype === "m.image") {
-    return caption ? `[图片] ${caption}` : "[图片]";
-  }
-  const label =
-    media.msgtype === "m.audio"
-      ? "[音频]"
-      : media.msgtype === "m.video"
-        ? "[视频]"
-        : "[文件]";
+  const label = media.msgtype === "m.audio" ? "[音频]" : "[视频]";
   const detail = caption || explicitFilename;
   return detail ? `${label} ${detail}` : label;
+}
+
+function extractLocalEventPreview(
+  content: unknown,
+  attachmentSource: {
+    attachmentId?: string;
+    attachmentMeta?: { name: string; mimeType: string; size: number };
+  },
+): string | undefined {
+  if (!isRecord(content)) {
+    return undefined;
+  }
+  const media = extractMediaFromContent(content, buildLocalAttachmentRef(attachmentSource));
+  if (media) {
+    return formatMediaPreview(media);
+  }
+  if (
+    content.msgtype === "m.text" &&
+    typeof content.body === "string" &&
+    content.body.trim() !== ""
+  ) {
+    return formatMessagePreviewText(content.body);
+  }
+  return undefined;
 }
 
 /** Derives the single-line plain-text preview of the latest renderable message on a room's local timeline. */
@@ -1425,16 +1447,9 @@ export function deriveLatestMessagePreview(
     if (seenLocalTxnIds.has(pending.txnId) || pending.type !== "m.room.message") {
       continue;
     }
-    const media = extractMediaFromContent(pending.content, buildLocalAttachmentRef(pending));
-    if (media) {
-      return formatMediaPreview(media);
-    }
-    if (
-      pending.content.msgtype === "m.text" &&
-      typeof pending.content.body === "string" &&
-      pending.content.body.trim() !== ""
-    ) {
-      return formatMessagePreviewText(pending.content.body);
+    const preview = extractLocalEventPreview(pending.content, pending);
+    if (preview !== undefined) {
+      return preview;
     }
   }
 
@@ -1456,19 +1471,9 @@ export function deriveLatestMessagePreview(
     }
     const local = localPlaceholderOf(event);
     if (local) {
-      if (!isRecord(event.content)) {
-        continue;
-      }
-      const media = extractMediaFromContent(event.content, buildLocalAttachmentRef(local));
-      if (media) {
-        return formatMediaPreview(media);
-      }
-      if (
-        event.content.msgtype === "m.text" &&
-        typeof event.content.body === "string" &&
-        event.content.body.trim() !== ""
-      ) {
-        return formatMessagePreviewText(event.content.body);
+      const preview = extractLocalEventPreview(event.content, local);
+      if (preview !== undefined) {
+        return preview;
       }
       continue;
     }

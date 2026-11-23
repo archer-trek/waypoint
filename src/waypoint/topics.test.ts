@@ -190,6 +190,28 @@ describe("deriveLatestMessagePreview & deriveTopics", () => {
         makeRoom([
           {
             type: "m.room.message",
+            event_id: "$file-2",
+            sender: owner,
+            origin_server_ts: 2250,
+            content: {
+              msgtype: "m.file",
+              url: "mxc://example.com/3b",
+              filename: "file",
+              body: "附带说明",
+            },
+          },
+        ]),
+        [],
+        owner,
+        agent,
+      ),
+    ).toBe("[文件] file");
+
+    expect(
+      deriveLatestMessagePreview(
+        makeRoom([
+          {
+            type: "m.room.message",
             event_id: "$audio-1",
             sender: agent,
             origin_server_ts: 2300,

@@ -140,7 +140,7 @@ function TopicRow({
               <span
                 className={cn(
                   "waypoint-topic-row-preview min-w-0 flex-1 truncate font-normal text-muted-foreground",
-                  isNarrow ? "text-[13.5px] leading-snug" : "text-[13px] leading-snug",
+                  isNarrow ? "text-[14px] leading-snug" : "text-[13px] leading-snug",
                 )}
               >
                 {topic.lastMessagePreview}

@@ -615,21 +615,12 @@ export class MatrixClient {
       const coldResolution = stillHasOlder
         ? await resolveColdUnreadForRoom(roomId, metaBase, nextState.loadedChunks, true)
         : { coldUnreadState: undefined };
-      const nextColdLatestPreview = stillHasOlder
-        ? deriveLatestMessagePreview(
-            {
-              timelineEvents: [
-                ...nextState.coldPlaceholders.map((p) => p.event),
-                ...allLoadedEvents,
-              ],
-            },
-            [],
-            this.userId,
-            boundAgentUserIdFromState(metaBase.stateEvents),
-          ) === undefined
-          ? room.coldLatestPreview
-          : undefined
-        : undefined;
+      const nextColdLatestPreview = deriveRemainingColdPreview(
+        room,
+        nextState,
+        stillHasOlder,
+        this.userId,
+      );
       const nextRoom = buildRoomFromChunkState(
         metaBase,
         nextState,
@@ -708,21 +699,12 @@ export class MatrixClient {
       } else if (!stillHasOlder && readPos !== undefined) {
         metaBase.readPositionInLocal = false;
       }
-      const nextColdLatestPreview = stillHasOlder
-        ? deriveLatestMessagePreview(
-            {
-              timelineEvents: [
-                ...nextState.coldPlaceholders.map((p) => p.event),
-                ...nextState.loadedChunks.flatMap((c) => c.events),
-              ],
-            },
-            [],
-            this.userId,
-            boundAgentUserIdFromState(metaBase.stateEvents),
-          ) === undefined
-          ? room.coldLatestPreview
-          : undefined
-        : undefined;
+      const nextColdLatestPreview = deriveRemainingColdPreview(
+        room,
+        nextState,
+        stillHasOlder,
+        this.userId,
+      );
       const nextRoom = buildRoomFromChunkState(
         metaBase,
         nextState,
@@ -1206,6 +1188,7 @@ export class MatrixClient {
         options.fromToken,
         options.body,
         options.gapIndex,
+        this.userId,
       );
       if (!applied.changed) {
         outcome = {
@@ -2000,6 +1983,31 @@ export class MatrixClient {
         chunkWrite = res.chunkWrite;
       }
 
+      let nextColdLatestPreview = existingRoom.coldLatestPreview;
+      if (chunkWrite || isNewRoom) {
+        if (!existingRoom.hasOlderLocalChunks) {
+          nextColdLatestPreview = undefined;
+        } else {
+          const agentUserId = boundAgentUserIdFromState(existingRoom.stateEvents);
+          const hasLoadedPreview =
+            deriveLatestMessagePreview(
+              { timelineEvents: loadedTimelineOfState(nextChunkState) },
+              [],
+              this.userId,
+              agentUserId,
+            ) !== undefined;
+          nextColdLatestPreview = hasLoadedPreview
+            ? undefined
+            : (existingRoom.coldLatestPreview ??
+              (await resolveColdLatestPreviewForRoom(
+                roomId,
+                extractRoomMeta(existingRoom),
+                nextChunkState,
+                true,
+                this.userId,
+              )));
+        }
+      }
       const nextRoom: StoredRoomEvents =
         chunkWrite || isNewRoom
           ? buildRoomFromChunkState(
@@ -2007,7 +2015,7 @@ export class MatrixClient {
               nextChunkState,
               Boolean(existingRoom.hasOlderLocalChunks),
               existingRoom.coldUnreadState,
-              existingRoom.coldLatestPreview,
+              nextColdLatestPreview,
             )
           : existingRoom;
       const roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
@@ -2820,6 +2828,33 @@ function syncChunkBounds(state: RoomChunkState, hasOlderLocalChunks: boolean): v
   state.chunkMaxSeq = maxLoaded;
 }
 
+function loadedTimelineOfState(state: RoomChunkState): RawMatrixEvent[] {
+  return [
+    ...state.coldPlaceholders.map((p) => p.event),
+    ...state.loadedChunks.flatMap((c) => c.events),
+  ];
+}
+
+function deriveRemainingColdPreview(
+  room: StoredRoomEvents,
+  state: RoomChunkState,
+  stillHasOlder: boolean,
+  ownerUserId: string,
+): string | undefined {
+  if (!stillHasOlder) {
+    return undefined;
+  }
+  const agentUserId = boundAgentUserIdFromState(room.stateEvents);
+  const hasLoadedPreview =
+    deriveLatestMessagePreview(
+      { timelineEvents: loadedTimelineOfState(state) },
+      [],
+      ownerUserId,
+      agentUserId,
+    ) !== undefined;
+  return hasLoadedPreview ? undefined : room.coldLatestPreview;
+}
+
 function buildRoomFromChunkState(
   roomMeta: StoredRoomMeta,
   state: RoomChunkState,
@@ -2828,10 +2863,7 @@ function buildRoomFromChunkState(
   coldLatestPreview?: string,
 ): StoredRoomEvents {
   syncChunkBounds(state, hasOlderLocalChunks);
-  const timelineEvents: RawMatrixEvent[] = [
-    ...state.coldPlaceholders.map((p) => p.event),
-    ...state.loadedChunks.flatMap((c) => c.events),
-  ];
+  const timelineEvents = loadedTimelineOfState(state);
   const next: StoredRoomEvents = {
     ...roomMeta,
     timelineEvents,
@@ -3141,13 +3173,13 @@ async function resolveColdLatestPreviewForRoom(
     return undefined;
   }
   const agentUserId = boundAgentUserIdFromState(roomMeta.stateEvents);
-  const loadedTimeline = [
-    ...chunkState.coldPlaceholders.map((p) => p.event),
-    ...chunkState.loadedChunks.flatMap((c) => c.events),
-  ];
   if (
-    deriveLatestMessagePreview({ timelineEvents: loadedTimeline }, [], ownerUserId, agentUserId) !==
-    undefined
+    deriveLatestMessagePreview(
+      { timelineEvents: loadedTimelineOfState(chunkState) },
+      [],
+      ownerUserId,
+      agentUserId,
+    ) !== undefined
   ) {
     return undefined;
   }
@@ -3958,6 +3990,7 @@ async function applyRoomBackfillPageChunked(
   fromToken: string,
   body: unknown,
   gapIndex?: number,
+  ownerUserId?: string,
 ): Promise<{
   changed: boolean;
   room: StoredRoomEvents;
@@ -4400,12 +4433,35 @@ async function applyRoomBackfillPageChunked(
     ...(nextReadPositionInLocal !== undefined ? { readPositionInLocal: nextReadPositionInLocal } : {}),
   };
 
+  let nextColdLatestPreview: string | undefined;
+  if (stillHasOlder) {
+    const agentUserId = boundAgentUserIdFromState(nextStateEvents);
+    const hasLoadedPreview =
+      ownerUserId !== undefined &&
+      deriveLatestMessagePreview(
+        { timelineEvents: mergedTimeline },
+        [],
+        ownerUserId,
+        agentUserId,
+      ) !== undefined;
+    nextColdLatestPreview = hasLoadedPreview
+      ? undefined
+      : (room.coldLatestPreview ??
+        (await resolveColdLatestPreviewForRoom(
+          roomId,
+          nextMeta,
+          nextState,
+          true,
+          ownerUserId,
+        )));
+  }
+
   const nextRoom = buildRoomFromChunkState(
     nextMeta,
     nextState,
     stillHasOlder,
     stillHasOlder ? room.coldUnreadState : undefined,
-    stillHasOlder ? room.coldLatestPreview : undefined,
+    nextColdLatestPreview,
   );
 
   return {
