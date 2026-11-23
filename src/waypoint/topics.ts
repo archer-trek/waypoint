@@ -20,6 +20,7 @@ export type TopicSummary = {
   agentUserId?: string;
   botDisplayName?: string;
   lastActivityTs?: number;
+  lastMessagePreview?: string;
   pinned: boolean;
   unread: boolean;
   firstUnreadEventId?: string;
@@ -392,6 +393,15 @@ export function deriveTopics(
 ): TopicSummary[] {
   const topics: TopicSummary[] = [];
   const allRooms = Object.values(rooms);
+  const pendingByRoom = new Map<string, PendingRoomEvent[]>();
+  for (const pending of pendingEvents) {
+    const list = pendingByRoom.get(pending.roomId);
+    if (list) {
+      list.push(pending);
+    } else {
+      pendingByRoom.set(pending.roomId, [pending]);
+    }
+  }
 
   for (const [roomId, room] of Object.entries(rooms)) {
     let hasTopicMarker = false;
@@ -466,8 +476,9 @@ export function deriveTopics(
         }
       }
     }
-    for (const pending of pendingEvents) {
-      if (pending.roomId === roomId && pending.type === "m.room.message") {
+    const roomPending = pendingByRoom.get(roomId) ?? [];
+    for (const pending of roomPending) {
+      if (pending.type === "m.room.message") {
         hasUnconfirmedMessage = true;
         break;
       }
@@ -495,6 +506,9 @@ export function deriveTopics(
     const pinned = isRecord(room.tags) && isRecord(room.tags["im.waypoint.pinned"]);
     const unreadState = deriveTopicUnreadState(room, agentUserId);
     const responding = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId).size > 0;
+    const lastMessagePreview =
+      deriveLatestMessagePreview(room, roomPending, ownerUserId, agentUserId, redactedIds) ??
+      room.coldLatestPreview;
 
     topics.push({
       roomId,
@@ -503,6 +517,7 @@ export function deriveTopics(
       agentUserId,
       botDisplayName,
       lastActivityTs,
+      ...(lastMessagePreview !== undefined ? { lastMessagePreview } : {}),
       pinned,
       unread: unreadState.unread,
       firstUnreadEventId: unreadState.firstUnreadEventId,
@@ -1287,6 +1302,202 @@ export function extractMediaFromContent(
 
 function stripStreamingCursor(body: string): string {
   return body.replace(/ ?▉$/, "");
+}
+
+function buildLocalAttachmentRef(source: {
+  attachmentId?: string;
+  attachmentMeta?: { name: string; mimeType: string; size: number };
+}): LocalAttachmentRef | undefined {
+  if (!source.attachmentId || !source.attachmentMeta) {
+    return undefined;
+  }
+  return {
+    attachmentId: source.attachmentId,
+    name: source.attachmentMeta.name,
+    mimeType: source.attachmentMeta.mimeType,
+    size: source.attachmentMeta.size,
+  };
+}
+
+const INLINE_PREVIEW_HTML_TAG_RE =
+  /<\/?(?:span|font|b|strong|i|em|u|s|del|code|kbd|sub|sup|mark)\b[^>]*>/gi;
+const CALLOUT_HEADER_RE = /^\[!(?:NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*/i;
+
+/** Formats message body text into a single-line plain-text summary for the Topic list. */
+export function formatMessagePreviewText(rawBody: string): string {
+  const normalized = rawBody
+    .replace(/\r\n?/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(INLINE_PREVIEW_HTML_TAG_RE, "");
+
+  const keptLines: string[] = [];
+  for (const rawLine of normalized.split("\n")) {
+    const trimmed = rawLine.trim();
+    if (!trimmed) {
+      continue;
+    }
+    if (
+      /^(?:```|~~~).*$/.test(trimmed) ||
+      /^:::\s*[\w-]*$/.test(trimmed) ||
+      /^([-*_])(?:\s*\1){2,}$/.test(trimmed) ||
+      /^\[[^\]]+\]:\s+\S+/.test(trimmed)
+    ) {
+      continue;
+    }
+    const line = rawLine
+      .replace(/^(?:\s*>\s?)+/, "")
+      .replace(CALLOUT_HEADER_RE, "")
+      .replace(/^\s{0,3}#{1,6}\s+/, "")
+      .replace(/\s+#+\s*$/, "")
+      .replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, "")
+      .trim();
+    if (line) {
+      keptLines.push(line);
+    }
+  }
+
+  let text = keptLines.join(" ");
+  text = text
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, (_m, alt: string) =>
+      alt.trim() ? alt.trim() : "[图片]",
+    )
+    .replace(/!\[([^\]]*)\]\[[^\]]*\]/g, (_m, alt: string) =>
+      alt.trim() ? alt.trim() : "[图片]",
+    )
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
+    .replace(/`+([^`]+)`+/g, "$1")
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/\*\*\*([^*]+)\*\*\*/g, "$1")
+    .replace(/___([^_]+)___/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/\*([^*\s][^*]*?)\*/g, "$1")
+    .replace(/(^|\s)_([^_\s][^_]*?)_(?=\s|$|[.,!?;:)"'\]])/g, "$1$2")
+    .replace(/\\([\\`*_{}[\]()#+\-.!~>])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (text) {
+    return text;
+  }
+  return rawBody.replace(/\s+/g, " ").trim();
+}
+
+function formatMediaPreview(media: TimelineMedia): string {
+  const caption = media.caption ? formatMessagePreviewText(media.caption) : "";
+  const explicitFilename =
+    media.filename && media.filename !== "file" && media.filename !== "image"
+      ? media.filename
+      : "";
+  if (media.msgtype === "m.image") {
+    return caption ? `[图片] ${caption}` : "[图片]";
+  }
+  const label =
+    media.msgtype === "m.audio"
+      ? "[音频]"
+      : media.msgtype === "m.video"
+        ? "[视频]"
+        : "[文件]";
+  const detail = caption || explicitFilename;
+  return detail ? `${label} ${detail}` : label;
+}
+
+/** Derives the single-line plain-text preview of the latest renderable message on a room's local timeline. */
+export function deriveLatestMessagePreview(
+  room: Pick<StoredRoomEvents, "timelineEvents"> | undefined,
+  pendingEvents: PendingRoomEvent[],
+  ownerUserId: string,
+  agentUserId: string | undefined,
+  precomputedRedactedIds?: Set<string>,
+): string | undefined {
+  const events = room?.timelineEvents ?? [];
+  const seenLocalTxnIds = new Set<string>();
+  for (const event of events) {
+    const local = localPlaceholderOf(event);
+    if (local) {
+      seenLocalTxnIds.add(local.txnId);
+    }
+  }
+
+  for (let i = pendingEvents.length - 1; i >= 0; i -= 1) {
+    const pending = pendingEvents[i]!;
+    if (seenLocalTxnIds.has(pending.txnId) || pending.type !== "m.room.message") {
+      continue;
+    }
+    const media = extractMediaFromContent(pending.content, buildLocalAttachmentRef(pending));
+    if (media) {
+      return formatMediaPreview(media);
+    }
+    if (
+      pending.content.msgtype === "m.text" &&
+      typeof pending.content.body === "string" &&
+      pending.content.body.trim() !== ""
+    ) {
+      return formatMessagePreviewText(pending.content.body);
+    }
+  }
+
+  if (events.length === 0) {
+    return undefined;
+  }
+
+  const redactedIds = precomputedRedactedIds ?? collectRedactedEventIds(events);
+  const latestEdits = collectLatestEdits(events, redactedIds);
+
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (
+      typeof event.state_key === "string" ||
+      isRedactedEvent(event, redactedIds) ||
+      !isActivityMessageEvent(event)
+    ) {
+      continue;
+    }
+    const local = localPlaceholderOf(event);
+    if (local) {
+      if (!isRecord(event.content)) {
+        continue;
+      }
+      const media = extractMediaFromContent(event.content, buildLocalAttachmentRef(local));
+      if (media) {
+        return formatMediaPreview(media);
+      }
+      if (
+        event.content.msgtype === "m.text" &&
+        typeof event.content.body === "string" &&
+        event.content.body.trim() !== ""
+      ) {
+        return formatMessagePreviewText(event.content.body);
+      }
+      continue;
+    }
+    const sender = typeof event.sender === "string" ? event.sender : undefined;
+    if (sender !== ownerUserId && !(agentUserId && sender === agentUserId)) {
+      continue;
+    }
+    if (!isRecord(event.content)) {
+      continue;
+    }
+    const media = extractMediaFromContent(event.content);
+    if (media) {
+      return formatMediaPreview(media);
+    }
+    if (event.content.msgtype !== "m.text" || typeof event.content.body !== "string") {
+      continue;
+    }
+    const rawEventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+    const edit = rawEventId ? latestEdits.get(rawEventId) : undefined;
+    const rawBody = edit ? edit.body : event.content.body;
+    const body = edit || sender === agentUserId ? stripStreamingCursor(rawBody) : rawBody;
+    if (body.trim() === "") {
+      continue;
+    }
+    return formatMessagePreviewText(body);
+  }
+
+  return undefined;
 }
 
 function collectLatestEdits(

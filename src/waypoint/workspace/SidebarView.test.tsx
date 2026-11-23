@@ -27,7 +27,6 @@ function renderSidebar(overrides: Partial<SidebarViewProps> = {}) {
     reauthBanner: null,
     topics: [makeTopic()],
     activeTopicId: undefined,
-    registeredAgentsCount: 1,
     nowMs: Date.UTC(2026, 10, 14, 12, 5, 0),
     isNarrow: false,
     onOpenSettings: vi.fn(),
@@ -100,16 +99,16 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(createBtn).toBeDisabled();
   });
 
-  test("renders avatar-free monochrome active, unread, pinned, unavailable, and status states while preserving hooks", () => {
+  test("renders avatar-free monochrome active, unread, pinned, unavailable, preview, and status states while omitting bot name", () => {
     const onOpenTopic = vi.fn();
     renderSidebar({
       activeTopicId: "!active:example.com",
-      registeredAgentsCount: 2,
       onOpenTopic,
       topics: [
         makeTopic({
           roomId: "!active:example.com",
           name: "活跃未读置顶",
+          lastMessagePreview: "最新一条消息单行摘要",
           unread: true,
           pinned: true,
           sendStatus: "failed",
@@ -118,6 +117,7 @@ describe("SidebarView & EmptyDetailView", () => {
         makeTopic({
           roomId: "!unconfirmed:example.com",
           name: "发送中话题",
+          lastMessagePreview: "[图片] 架构草图",
           sendStatus: "unconfirmed",
           unavailable: true,
         }),
@@ -137,9 +137,11 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(activeRow.querySelector(".waypoint-topic-row-time")).toHaveClass("font-sans", "tabular-nums");
     expect(activeRow.querySelector(".waypoint-topic-row-time")).not.toHaveClass("font-mono");
 
-    const botLabel = activeRow.querySelector(".waypoint-topic-row-bot");
-    expect(botLabel).toHaveTextContent("Hermes");
-    expect(botLabel).not.toHaveAttribute("data-slot", "badge");
+    expect(activeRow.querySelector(".waypoint-topic-row-bot")).toBeNull();
+    expect(activeRow).not.toHaveTextContent("Hermes");
+    const preview = activeRow.querySelector(".waypoint-topic-row-preview");
+    expect(preview).toHaveTextContent("最新一条消息单行摘要");
+    expect(preview).toHaveClass("truncate", "text-muted-foreground", "leading-snug");
     expect(activeRow.querySelector(".waypoint-topic-row-responding")).toHaveTextContent("正在回应");
 
     const secondRow = screen.getByRole("button", { name: "发送中话题" });
@@ -148,18 +150,19 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(secondRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "500" });
     expect(secondRow.querySelector(".waypoint-topic-row-unavailable")).toHaveAttribute("data-slot", "badge");
     expect(within(secondRow).getByRole("img", { name: "未确认" })).toHaveClass("animate-spin");
+    expect(secondRow.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("[图片] 架构草图");
 
     fireEvent.click(activeRow);
     expect(onOpenTopic).toHaveBeenCalledWith("!active:example.com");
   });
 
-  test("omits secondary row for single bot when not responding", () => {
+  test("omits secondary row when topic has neither preview nor responding state", () => {
     renderSidebar({
-      registeredAgentsCount: 1,
-      topics: [makeTopic({ responding: false })],
+      topics: [makeTopic({ lastMessagePreview: undefined, responding: false })],
     });
     const row = screen.getByRole("button", { name: "架构讨论" });
     expect(row.querySelector(".waypoint-topic-row-secondary")).toBeNull();
+    expect(row.querySelector(".waypoint-topic-row-preview")).toBeNull();
     expect(row.querySelector(".waypoint-topic-row-bot")).toBeNull();
   });
 
@@ -172,7 +175,6 @@ describe("SidebarView & EmptyDetailView", () => {
         showDetail={false}
         reauthBanner={null}
         topics={[]}
-        registeredAgentsCount={1}
         nowMs={Date.UTC(2026, 10, 14, 12, 0, 0)}
         isNarrow={true}
         onOpenSettings={vi.fn()}

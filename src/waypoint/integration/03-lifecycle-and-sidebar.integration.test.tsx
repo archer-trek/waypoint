@@ -2005,7 +2005,7 @@ test("新建 Topic 内可直接登记新 Bot：单 Bot 时不显示选择器，�
   });
   expect(screen.getByRole("banner")).toHaveTextContent("需要二号 Bot 协助");
   expect(screen.getByRole("banner")).not.toHaveTextContent("协作二号");
-  expect(screen.getByRole("button", { name: /跨项目协作/ })).toHaveTextContent("协作二号");
+  expect(screen.getByRole("button", { name: /跨项目协作/ })).not.toHaveTextContent("协作二号");
   expect(createdBody).toMatchObject({
     name: "跨项目协作",
     topic: "需要二号 Bot 协助",
@@ -2902,7 +2902,7 @@ test("发出文字后输入区清空，消息出现在时间线末尾靠右且�
 
   // 气泡上不显示时刻，也不能点开看时刻
   expect(rows[1]).not.toHaveTextContent(/\d{1,2}:\d{2}/);
-  await user.click(screen.getByText("你好，帮我查一下"));
+  await user.click(within(timeline).getByText("你好，帮我查一下"));
   await user.click(spinner);
   expect(document.querySelector(".waypoint-detail")).not.toHaveTextContent(/\d{1,2}:\d{2}/);
   expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
@@ -3515,24 +3515,24 @@ test("新建尚未加入的 Topic 顶栏可从其他房间解析 Bot 的 Matrix 
     expect(screen.getByRole("banner")).toHaveTextContent("新主题");
   });
   expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
-  expect(screen.getByRole("button", { name: /新主题/ })).toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("二号矩阵显示名");
 
-  // 同步带来更新时间戳的 m.room.member 清空 displayname：覆盖旧房间显示名，回退为 localpart
+  // 同步带来更新时间戳的 m.room.member 清空 displayname：覆盖旧房间显示名，名册中回退为 localpart，列表与顶栏仍不显示 Bot 名字
   shouldClearDisplayName = true;
   await act(async () => {
     clock.advance(1000);
   });
-  await waitFor(() => {
-    expect(screen.getByRole("button", { name: /新主题/ })).toHaveTextContent("bot2");
-  });
-  expect(screen.getByRole("banner")).not.toHaveTextContent("bot2");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
-  expect(screen.getByRole("button", { name: /新主题/ })).toHaveTextContent("bot2");
-
   await user.click(screen.getByRole("button", { name: "设置" }));
   const agentsSection = screen.getByRole("region", { name: "Bot 名册" });
-  expect(agentsSection).toHaveTextContent("bot2");
-  expect(agentsSection).not.toHaveTextContent("二号矩阵显示名");
+  await waitFor(() => {
+    expect(agentsSection).toHaveTextContent("bot2");
+    expect(agentsSection).not.toHaveTextContent("二号矩阵显示名");
+  });
+  await user.click(screen.getByRole("button", { name: "关闭" }));
+  expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("bot2");
+  expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("banner")).not.toHaveTextContent("bot2");
+  expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
 });
 
 test("跨设备同时编辑与移除 Bot 时，另一设备同步移除后重试保存仍写回被编辑的 Bot（最后写入为准）", async () => {

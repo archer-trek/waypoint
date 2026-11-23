@@ -335,10 +335,11 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     await screen.findByRole("status", { name: "未确认" });
 
     // 未确认消息和已确认消息都没有菜单，右键也不能打开丢掉菜单
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
     const menuTriggers = screen.getAllByRole("button", { name: "更多操作" });
     expect(menuTriggers).toHaveLength(1);
-    fireEvent.contextMenu(screen.getByText("还在转圈的未确认消息"));
-    fireEvent.contextMenu(screen.getByText("已确认的Bot消息"));
+    fireEvent.contextMenu(within(timeline).getByText("还在转圈的未确认消息"));
+    fireEvent.contextMenu(within(timeline).getByText("已确认的Bot消息"));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "丢掉" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
@@ -363,7 +364,7 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     expect(screen.queryByText(/撤销/)).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
-    expect(screen.getByText("还在转圈的未确认消息")).toBeInTheDocument();
+    expect(within(timeline).getByText("还在转圈的未确认消息")).toBeInTheDocument();
 
     // 重启后失败消息仍已彻底消失，未确认消息仍在
     view.unmount();
@@ -487,7 +488,7 @@ test("未确认和失败消息不推进已读位置、不重排 Topic 列表、�
   device2.unmount();
 });
 
-test("Topic 列表行最多显示一个发送状态标记且失败优先于未确认，不计条数、不预览正文、点列表红叹号只打开 Topic 不重发，非消息待重放项不触发标记", async () => {
+test("Topic 列表行最多显示一个发送状态标记且失败优先于未确认，不计条数、预览最新本地消息、点列表红叹号只打开 Topic 不重发，非消息待重放项不触发标记", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let sendBehavior: "offline" | "first-403-rest-offline" | "200" = "offline";
@@ -551,7 +552,7 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
   expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
 
-  // 打开列表标记话题，离线连发两条消息 -> 列表行最多一个转圈，不显示条数与消息正文预览
+  // 打开列表标记话题，离线连发两条消息 -> 列表行最多一个转圈，不显示条数，预览最新一条本地消息
   await user.click(within(sidebar).getByRole("button", { name: "列表标记话题" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条秘密正文");
   await user.click(screen.getByRole("button", { name: "发送" }));
@@ -568,7 +569,8 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   };
   expect(within(row1).getAllByRole("img", { name: "未确认" })).toHaveLength(1);
   expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
-  expect(rowTextWithoutTime(row1)).not.toMatch(/2|第一条秘密正文|第二条秘密正文/);
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("第二条秘密正文");
+  expect(rowTextWithoutTime(row1)).not.toMatch(/2|第一条秘密正文/);
 
   // 第一条被 403 永久拒绝，第二条仍未确认 -> 同一行既有失败又有未确认，优先显示红叹号（最多一个）
   sendBehavior = "first-403-rest-offline";
@@ -578,7 +580,8 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   expect(within(row1).getAllByRole("img", { name: "失败" })).toHaveLength(1);
   expect(within(row1).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
   expect(row1).toHaveTextContent("!");
-  expect(rowTextWithoutTime(row1)).not.toMatch(/失败|2|第一条秘密正文|第二条秘密正文/);
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("第二条秘密正文");
+  expect(rowTextWithoutTime(row1)).not.toMatch(/失败|2|第一条秘密正文/);
 
   // 切换到另一条话题，再直接点击列表行上的红叹号：只打开该 Topic，不直接重发
   await user.click(within(sidebar).getByRole("button", { name: "另一条话题" }));
@@ -905,7 +908,8 @@ test("集成回归：本地未确认/失败占位不误判未读、不阻断 lim
   // 触发一次 limited: true 增量 sync，在本地失败占位之后插入断层新消息；
   // 断层 anchor 应锚定到 $after-gap（不是本地占位），且失败占位未推进 readPositionEventId
   await act(async () => { view.clock.advance(5000); });
-  await screen.findByText("断层后的新消息");
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await within(timeline).findByText("断层后的新消息");
   expect(row).toHaveAttribute("data-unread", "true");
   expect(within(row).getByRole("img", { name: "失败" })).toBeInTheDocument();
 
@@ -919,7 +923,7 @@ test("集成回归：本地未确认/失败占位不误判未读、不阻断 lim
   view.unmount();
 });
 
-test("列表行右侧按本地日历和区域设置显示最近活动时刻（今天时刻/昨天/今年内月日/跨年年月日/空话题取诞生时间），忽略编辑与撤回且不放头像和预览", async () => {
+test("列表行右侧按本地日历和区域设置显示最近活动时刻（今天时刻/昨天/今年内月日/跨年年月日/空话题取诞生时间），时刻忽略编辑与撤回、预览展示最新有效正文且不放头像", async () => {
   const todayTs = new Date(2026, 10, 12, 9, 5, 0).getTime();
   const yesterdayTs = new Date(2026, 10, 11, 21, 30, 0).getTime();
   const earlierThisYearTs = new Date(2026, 4, 3, 14, 20, 0).getTime();
@@ -1076,11 +1080,13 @@ test("列表行右侧按本地日历和区域设置显示最近活动时刻（�
   expect(rowThisYear.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEarlierThisYear);
   expect(rowLastYear.querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedLastYear);
 
-  // 无头像、无消息正文预览、单 Bot 不显示 Bot 名、无搜索/筛选/分组
+  // 无头像、不显示 Bot 名、无搜索/筛选/分组；展示最新可渲染消息单行预览（含编辑后正文，忽略撤回消息）
   expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
   expect(within(sidebar).queryByRole("searchbox")).not.toBeInTheDocument();
-  expect(sidebar).not.toHaveTextContent("今天的消息正文不应预览");
-  expect(sidebar).not.toHaveTextContent("五月的编辑后消息");
+  expect(rowToday.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("今天的消息正文不应预览");
+  expect(rowYesterday.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("昨天的消息正文");
+  expect(rowThisYear.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("五月的编辑后消息");
+  expect(rowLastYear.querySelector(".waypoint-topic-row-preview")).toBeNull();
   expect(sidebar).not.toHaveTextContent("bot");
 
   // 排序按最近活动时间倒序
@@ -1642,14 +1648,14 @@ test("未确认和失败消息不提前修改列表行时刻也不重排，确�
   expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
   expect(pinNewRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent(expectedEarlierTime);
 
-  // 打开「置顶旧」发送一条会 403 失败的消息 -> 列表行时刻仍是「昨天」，排序不变，无正文预览
+  // 打开「置顶旧」发送一条会 403 失败的消息 -> 列表行预览更新为该失败消息，但时刻仍是「昨天」、排序不变
   await user.click(pinOldRow());
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "不会改时刻的失败消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await screen.findByRole("button", { name: "失败" });
 
   expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
-  expect(pinOldRow()).not.toHaveTextContent("不会改时刻的失败消息");
+  expect(pinOldRow().querySelector(".waypoint-topic-row-preview")).toHaveTextContent("不会改时刻的失败消息");
   expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
 
   // 点红叹号重发（未确认状态），PUT 200 先到但尚无同步回声 -> 时刻仍是「昨天」，排序不变
@@ -3779,7 +3785,7 @@ test("标记版本不是 1 或绑定 Agent 用户 ID 不合法时 Topic 不可�
   expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "输入消息" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
-  expect(screen.getByText("旧版绑定不应展示的 Bot 消息")).toBeInTheDocument();
+  expect(within(timeline).getByText("旧版绑定不应展示的 Bot 消息")).toBeInTheDocument();
 });
 
 test("普通加密房间不进列表；已有加密标记或诞生后才加密的 Topic 留在列表并标不可用，保留未读且可前移已读位置，重启后永不自动恢复", async () => {
@@ -3917,8 +3923,9 @@ test("普通加密房间不进列表；已有加密标记或诞生后才加密�
   const banner = screen.getByRole("status", { name: "Topic 不可用" });
   expect(banner).toHaveTextContent("加密");
   expect(banner).toHaveTextContent("无法发送新消息");
-  expect(screen.getByText("早先的提问")).toBeInTheDocument();
-  expect(screen.getByText("未读回复")).toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(within(timeline).getByText("早先的提问")).toBeInTheDocument();
+  expect(within(timeline).getByText("未读回复")).toBeInTheDocument();
 
   await waitFor(() => {
     expect(
@@ -4503,7 +4510,8 @@ test("Topic 不可用时失败消息的红叹号仍在，点击马上又失败�
   expect(
     homeserver.requests.filter((r) => r.url.includes("/send/m.room.message/")).length,
   ).toBe(sendCountBeforeUnavailable);
-  const bubbleRow = screen.getByText("被拒绝的消息").closest(".waypoint-message-row") as HTMLElement;
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const bubbleRow = within(timeline).getByText("被拒绝的消息").closest(".waypoint-message-row") as HTMLElement;
   expect(bubbleRow).not.toHaveTextContent("多于两人");
   expect(bubbleRow).not.toHaveTextContent("无法发送");
 });
@@ -4684,10 +4692,12 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
   expect(row1).not.toHaveAttribute("data-unread", "true");
   expect(row1.querySelector(".waypoint-topic-row-bot")).toBeNull();
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("已经出现的回答");
 
   const row2 = screen.getByRole("button", { name: "仅typing话题" });
   expect(row2).not.toHaveTextContent("正在回应");
-  expect(row2.querySelector(".waypoint-topic-row-secondary")).toBeNull();
+  expect(row2.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  expect(row2.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("纯文本");
 
   // 撤回第一条 👀，第二条 👀 还在，依然显示一次正在回应
   await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
@@ -4695,16 +4705,17 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   await waitFor(() => expect(syncRound).toBeGreaterThanOrEqual(2));
   expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
 
-  // 撤回第二条 👀，正在回应消失，单 Bot 次行也消失
+  // 撤回第二条 👀，正在回应消失，预览仍保留
   await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => {
     expect(row1).not.toHaveTextContent("正在回应");
   });
-  expect(row1.querySelector(".waypoint-topic-row-secondary")).toBeNull();
+  expect(row1.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("已经出现的回答");
 });
 
-test("多 Bot 时列表次行同时显示 Bot 名字与正在回应，并与未读圆点、置顶及发送状态共存，且不认非绑定 Bot 的 👀", async () => {
+test("多 Bot 时列表不展示 Bot 名字，最新消息预览与正在回应、未读圆点、置顶及发送状态共存，且不认非绑定 Bot 的 👀", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
 
@@ -4819,11 +4830,13 @@ test("多 Bot 时列表次行同时显示 Bot 名字与正在回应，并与未�
   expect(row1).toHaveAttribute("data-pinned", "true");
   expect(row1.querySelector(".waypoint-unread-dot")).not.toBeNull();
   expect(within(row1).getByText("置顶")).toBeInTheDocument();
-  expect(within(row1).getByText("研究助理")).toBeInTheDocument();
+  expect(row1.querySelector(".waypoint-topic-row-bot")).toBeNull();
+  expect(row1).not.toHaveTextContent("研究助理");
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("新进度消息");
   expect(within(row1).getByText("正在回应")).toBeInTheDocument();
   expect(row1.querySelector(".waypoint-topic-row-time")).not.toBeNull();
 
-  // 在另一个 Topic 上发送失败，然后验证未读+置顶+Bot名+正在回应+失败红叹号五者共存
+  // 在另一个 Topic 上发送失败，然后验证未读+置顶+最新预览+正在回应+失败红叹号五者共存
   await user.click(row1);
   const input = screen.getByLabelText("输入消息");
   await user.type(input, "这句会失败");
@@ -4831,12 +4844,14 @@ test("多 Bot 时列表次行同时显示 Bot 名字与正在回应，并与未�
   await waitFor(() => {
     expect(within(row1).getByRole("img", { name: "失败" })).toBeInTheDocument();
   });
-  expect(within(row1).getByText("研究助理")).toBeInTheDocument();
+  expect(row1).not.toHaveTextContent("研究助理");
+  expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("这句会失败");
   expect(within(row1).getByText("正在回应")).toBeInTheDocument();
   expect(within(row1).getByText("置顶")).toBeInTheDocument();
 
   const row2 = screen.getByRole("button", { name: "空闲多Bot话题" });
-  expect(within(row2).getByText("编程助理")).toBeInTheDocument();
+  expect(row2.querySelector(".waypoint-topic-row-bot")).toBeNull();
+  expect(row2.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("问编程助理");
   expect(row2).not.toHaveTextContent("正在回应");
 });
 
