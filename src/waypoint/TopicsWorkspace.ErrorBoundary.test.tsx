@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -117,6 +117,6 @@ describe("TopicsWorkspace detail ErrorBoundary", () => {
     await user.click(healthyBtn);
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByText("正常消息内容")).toBeInTheDocument();
+    expect(within(screen.getByTestId("timeline-ok")).getByText("正常消息内容")).toBeInTheDocument();
   });
 });

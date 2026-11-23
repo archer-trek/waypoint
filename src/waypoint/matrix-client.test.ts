@@ -919,4 +919,80 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     expect(idxGap29).toBe(84);
     expect(idx55).toBe(85);
   });
+
+  test("confirmSentRoomEvent on cold placeholder and applyBackfillPage refresh coldLatestPreview", async () => {
+    const olderMsg = {
+      type: "m.room.message",
+      event_id: "$cold-msg",
+      sender: "@bot:example.com",
+      origin_server_ts: 1000,
+      content: { msgtype: "m.text", body: "冷块旧消息" },
+    };
+    const coldPlaceholder = {
+      type: "m.room.message",
+      sender: "@alice:example.com",
+      content: { msgtype: "m.text", body: "冷占位消息" },
+      waypoint_local: { id: "loc-cold", status: "unconfirmed", txnId: "txn-cold" },
+    };
+    const fillerReactions = Array.from({ length: 147 }, (_, i) => ({
+      type: "m.reaction",
+      event_id: `$r-${i}`,
+      sender: "@alice:example.com",
+      origin_server_ts: 2000 + i,
+      content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$cold-msg", key: `k${i}` } },
+    }));
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: [olderMsg, coldPlaceholder, ...fillerReactions],
+          timelineGaps: [
+            { limited: true, prevBatch: "gap-hot", gapBeforeEventId: "$r-146" },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(noopTransport());
+    await client.restore();
+
+    // Confirming the cold placeholder removes it from coldPlaceholders; hot chunk still has only reactions
+    await client.confirmSentRoomEvent("!r1:example.com", "txn-cold", "$confirmed-cold");
+    const afterConfirm = client.rooms()["!r1:example.com"]!;
+    expect(afterConfirm.hasOlderLocalChunks).toBe(true);
+    expect(afterConfirm.coldLatestPreview).toBe("冷占位消息");
+
+    // Load chunk 1 (reactions only) so chunk 0 stays unloaded and chunk 2 split preserves seq > chunkMinSeq
+    await client.loadNextOlderLocalChunk("!r1:example.com");
+    expect(client.rooms()["!r1:example.com"]!.coldLatestPreview).toBe("冷占位消息");
+
+    // Backfilling a message into the hot gap populates the loaded timeline and clears stale coldLatestPreview
+    await client.applyBackfillPage("!r1:example.com", {
+      fromToken: "gap-hot",
+      gapIndex: 0,
+      body: {
+        chunk: [
+          {
+            type: "m.room.message",
+            event_id: "$gap-msg",
+            sender: "@bot:example.com",
+            origin_server_ts: 1999,
+            content: { msgtype: "m.text", body: "回填进热窗口的消息" },
+          },
+        ],
+        end: "older-tok",
+      },
+    });
+    const afterBackfill = client.rooms()["!r1:example.com"]!;
+    expect(afterBackfill.hasOlderLocalChunks).toBe(true);
+    expect(afterBackfill.coldLatestPreview).toBeUndefined();
+  });
 });

@@ -36,6 +36,7 @@ export type StoredRoomEvents = StoredRoomMeta & {
   timelineEvents: RawMatrixEvent[];
   hasOlderLocalChunks?: boolean;
   coldUnreadState?: ColdUnreadState;
+  coldLatestPreview?: string;
 };
 
 export type TimelineChunkRecord = {
@@ -2022,11 +2023,13 @@ function cleanStoredRoomMeta(meta: StoredRoomMeta): StoredRoomMeta {
     timelineEvents: _ignoredEvents,
     hasOlderLocalChunks: _ignoredHasOlder,
     coldUnreadState: _ignoredColdUnread,
+    coldLatestPreview: _ignoredColdPreview,
     ...rest
   } = meta as StoredRoomEvents;
   void _ignoredEvents;
   void _ignoredHasOlder;
   void _ignoredColdUnread;
+  void _ignoredColdPreview;
   return rest;
 }
 

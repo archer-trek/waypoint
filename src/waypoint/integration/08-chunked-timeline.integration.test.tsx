@@ -300,3 +300,99 @@ test("跨 chunk 的 m.replace 与 m.reaction 在冷块按需加载后准确合�
     restoreGeometry();
   }
 });
+
+test("热窗口无有效消息时按需逆序回溯本地冷块恢复最新预览，并在同步撤回冷块消息后刷新预览", async () => {
+  const homeserver = new FakeHomeserver();
+  let syncCalls = 0;
+
+  homeserver.handler = async (input) => {
+    if (input.url.includes("/sync")) {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-after-redaction",
+            rooms: {
+              join: {
+                "!t1:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-cold-latest",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 9999,
+                        redacts: "$cold-last",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncCalls}` } };
+    }
+    throw new Error(`不应收到 ${input.method} ${input.url}`);
+  };
+
+  // Cold chunks hold messages; hot chunk (last 50 events) holds only reactions so hot window has 0 renderable messages
+  const events: Array<Record<string, unknown>> = [
+    {
+      type: "m.room.message",
+      event_id: "$cold-prev",
+      sender: "@bot:example.com",
+      origin_server_ts: 1000,
+      content: { msgtype: "m.text", body: "**更早的** 冷块消息" },
+    },
+    {
+      type: "m.room.message",
+      event_id: "$cold-last",
+      sender: "@alice:example.com",
+      origin_server_ts: 2000,
+      content: { msgtype: "m.text", body: "即将被撤回的冷块消息" },
+    },
+    ...Array.from({ length: TIMELINE_CHUNK_SIZE }, (_, i) => ({
+      type: "m.reaction",
+      event_id: `$react-${i}`,
+      sender: "@alice:example.com",
+      origin_server_ts: 3000 + i,
+      content: {
+        "m.relates_to": { rel_type: "m.annotation", event_id: "$cold-prev", key: `👍-${i}` },
+      },
+    })),
+  ];
+
+  await saveSession({
+    baseUrl: "https://matrix.example.com",
+    userId: "@alice:example.com",
+    accessToken: "tok-1",
+    deviceId: "DEV1",
+    syncCursor: "batch-init",
+    accountData: { "im.waypoint.agents": { agents: [{ user_id: "@bot:example.com" }] } },
+    rooms: {
+      "!t1:example.com": {
+        stateEvents: [
+          { type: "m.room.create", state_key: "", origin_server_ts: 100, content: {} },
+          { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          { type: "m.room.name", state_key: "", content: { name: "冷块预览话题" } },
+        ],
+        timelineEvents: events,
+        readPositionEventId: "$cold-last",
+      },
+    },
+  });
+
+  const app = renderApp(homeserver);
+  const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
+  const row = within(sidebar).getByRole("button", { name: "冷块预览话题" });
+
+  await waitFor(() => {
+    expect(row.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("更早的 冷块消息");
+  });
+  app.unmount();
+});

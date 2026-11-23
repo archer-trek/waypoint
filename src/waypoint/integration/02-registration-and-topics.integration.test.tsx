@@ -1372,7 +1372,7 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
   expect(header).toHaveTextContent("重复名字");
   expect(header).not.toHaveTextContent("bot2");
   expect(header).not.toHaveTextContent("@bot2:example.com");
-  expect(screen.getByRole("button", { name: /重复名字/ })).toHaveTextContent("bot2");
+  expect(screen.getByRole("button", { name: /重复名字/ })).not.toHaveTextContent("bot2");
 
   const descButton = screen.getByRole("button", { name: /第一段上下文/ });
   expect(descButton).toHaveAttribute("aria-expanded", "false");
@@ -1409,7 +1409,7 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
   const secondHeader = await screen.findByRole("banner");
   expect(secondHeader).toHaveTextContent("重复名字");
   expect(secondHeader).not.toHaveTextContent("一号助理");
-  expect(screen.getAllByRole("button", { name: /重复名字/ }).some((button) => button.textContent?.includes("一号助理"))).toBe(true);
+  expect(screen.getAllByRole("button", { name: /重复名字/ }).every((button) => !button.textContent?.includes("一号助理"))).toBe(true);
   expect(screen.queryByRole("button", { name: /第一段上下文/ })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /重复名字/ })).toHaveLength(2);
 });
@@ -1627,7 +1627,7 @@ test("建房失败时表单保持打开且保留输入，不留残留房间，�
   expect(header).toHaveTextContent("不丢草稿的话题");
   expect(header).toHaveTextContent("保留这些描述");
   expect(header).not.toHaveTextContent("二号");
-  expect(screen.getByRole("button", { name: /不丢草稿的话题/ })).toHaveTextContent("二号");
+  expect(screen.getByRole("button", { name: /不丢草稿的话题/ })).not.toHaveTextContent("二号");
 });
 
 test("服务器在建房时强制开启加密，尽力 leave 再 forget，不进列表并在表单报错", async () => {
@@ -1773,7 +1773,7 @@ test("m.direct 追加失败时不报错也不回滚已建成的 Topic", async ()
   expect(await screen.findByText("照常打开的话题")).toBeInTheDocument();
 });
 
-test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，按手写名、显示名、localpart 解析 Bot 名字且启动不自动打开", async () => {
+test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，列表与顶栏均不放 Bot 名字且启动不自动打开", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncs = 0;
@@ -1925,21 +1925,22 @@ test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，按手
   expect(document.body).not.toHaveTextContent("@bot2:example.com");
   expect(document.body).not.toHaveTextContent("@bot3:example.com");
 
-  // 逐条打开。Bot 名字只在列表行解析，顶栏不放 Bot
+  // 逐条打开。列表行与顶栏均不放 Bot 名字或完整用户 ID
   const list = screen.getByRole("complementary", { name: "Topic 列表" });
   await user.click(within(list).getByRole("button", { name: "话题一" }));
-  expect(within(list).getByRole("button", { name: "话题一" })).toHaveTextContent("手写一号");
+  expect(within(list).getByRole("button", { name: "话题一" })).not.toHaveTextContent("手写一号");
+  expect(within(list).getByRole("button", { name: "话题一" }).querySelector(".waypoint-topic-row-bot")).toBeNull();
   expect(screen.getByRole("banner")).toHaveTextContent("话题一");
   expect(screen.getByRole("banner")).not.toHaveTextContent("手写一号");
   expect(screen.getByRole("banner")).not.toHaveTextContent("服务器显示名不应覆盖手写");
 
   await user.click(within(list).getByRole("button", { name: "话题二" }));
-  expect(within(list).getByRole("button", { name: "话题二" })).toHaveTextContent("小赫显示名");
+  expect(within(list).getByRole("button", { name: "话题二" })).not.toHaveTextContent("小赫显示名");
   expect(screen.getByRole("banner")).toHaveTextContent("话题二说明");
   expect(screen.getByRole("banner")).not.toHaveTextContent("小赫显示名");
 
   await user.click(within(list).getByRole("button", { name: "话题三" }));
-  expect(within(list).getByRole("button", { name: "话题三" })).toHaveTextContent("bot3");
+  expect(within(list).getByRole("button", { name: "话题三" })).not.toHaveTextContent("bot3");
   expect(screen.getByRole("banner")).not.toHaveTextContent("bot3");
   expect(screen.getByRole("banner")).not.toHaveTextContent("@bot3:example.com");
 

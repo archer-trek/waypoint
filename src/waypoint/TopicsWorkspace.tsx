@@ -3789,7 +3789,6 @@ export function TopicsWorkspace({
           reauthBanner={reauthRequired && !showDetail ? renderReauthBanner() : null}
           topics={topics}
           activeTopicId={activeTopic?.roomId}
-          registeredAgentsCount={registeredAgents.length}
           nowMs={nowMs}
           isNarrow={isNarrow}
           onOpenSettings={openSettings}

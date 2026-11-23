@@ -44,7 +44,7 @@ import {
   type StoredTimelineGap,
   type TimelineChunkRecord,
 } from "./session-store";
-import { evaluateRoomUnreadFromEvents } from "./topics";
+import { deriveLatestMessagePreview, evaluateRoomUnreadFromEvents } from "./topics";
 
 const MAX_SYNC_TIMELINE_EVENTS_PER_ROOM = 20;
 export const BACKFILL_PAGE_LIMIT = 50;
@@ -482,12 +482,20 @@ export class MatrixClient {
       if (coldResolution.readPositionInLocal !== undefined) {
         normalizedMeta.readPositionInLocal = coldResolution.readPositionInLocal;
       }
+      const coldLatestPreview = await resolveColdLatestPreviewForRoom(
+        roomId,
+        normalizedMeta,
+        chunkState,
+        startupTl.hasOlderLocalChunks,
+        meta.userId,
+      );
 
       const roomEvents = buildRoomFromChunkState(
         normalizedMeta,
         chunkState,
         startupTl.hasOlderLocalChunks,
         coldResolution.coldUnreadState,
+        coldLatestPreview,
       );
       restoredRooms[roomId] = roomEvents;
       restoredChunkStates.set(roomId, chunkState);
@@ -607,11 +615,18 @@ export class MatrixClient {
       const coldResolution = stillHasOlder
         ? await resolveColdUnreadForRoom(roomId, metaBase, nextState.loadedChunks, true)
         : { coldUnreadState: undefined };
+      const nextColdLatestPreview = deriveRemainingColdPreview(
+        room,
+        nextState,
+        stillHasOlder,
+        this.userId,
+      );
       const nextRoom = buildRoomFromChunkState(
         metaBase,
         nextState,
         stillHasOlder,
         coldResolution.coldUnreadState,
+        nextColdLatestPreview,
       );
       this.roomChunkStates.set(roomId, nextState);
       this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
@@ -684,11 +699,18 @@ export class MatrixClient {
       } else if (!stillHasOlder && readPos !== undefined) {
         metaBase.readPositionInLocal = false;
       }
+      const nextColdLatestPreview = deriveRemainingColdPreview(
+        room,
+        nextState,
+        stillHasOlder,
+        this.userId,
+      );
       const nextRoom = buildRoomFromChunkState(
         metaBase,
         nextState,
         stillHasOlder,
         stillHasOlder ? room.coldUnreadState : undefined,
+        nextColdLatestPreview,
       );
       this.roomChunkStates.set(roomId, nextState);
       this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
@@ -768,11 +790,33 @@ export class MatrixClient {
         nextState.chunkMinSeq = existingState.loadedChunks[0]!.seq;
       }
 
+      const keptPreview = deriveLatestMessagePreview(
+        {
+          timelineEvents: [
+            ...nextState.coldPlaceholders.map((p) => p.event),
+            ...keptEvents,
+          ],
+        },
+        [],
+        this.userId,
+        agentUserId,
+      );
+      const nextColdLatestPreview =
+        keptPreview === undefined
+          ? (deriveLatestMessagePreview(
+              { timelineEvents: allLoadedEvents },
+              [],
+              this.userId,
+              agentUserId,
+            ) ?? room.coldLatestPreview)
+          : undefined;
+
       const nextRoom = buildRoomFromChunkState(
         extractRoomMeta(room),
         nextState,
         true,
         nextColdUnreadState,
+        nextColdLatestPreview,
       );
       this.roomChunkStates.set(roomId, nextState);
       this.storedRooms = { ...this.storedRooms, [roomId]: nextRoom };
@@ -1144,6 +1188,7 @@ export class MatrixClient {
         options.fromToken,
         options.body,
         options.gapIndex,
+        this.userId,
       );
       if (!applied.changed) {
         outcome = {
@@ -1497,6 +1542,7 @@ export class MatrixClient {
               nextChunkState,
               Boolean(room.hasOlderLocalChunks),
               room.coldUnreadState,
+              room.coldLatestPreview,
             ),
           };
         }
@@ -1609,6 +1655,7 @@ export class MatrixClient {
           nextChunkState,
           Boolean(existingRoom.hasOlderLocalChunks),
           existingRoom.coldUnreadState,
+          existingRoom.coldLatestPreview,
         );
         roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
         nextRooms = {
@@ -1936,6 +1983,31 @@ export class MatrixClient {
         chunkWrite = res.chunkWrite;
       }
 
+      let nextColdLatestPreview = existingRoom.coldLatestPreview;
+      if (chunkWrite || isNewRoom) {
+        if (!existingRoom.hasOlderLocalChunks) {
+          nextColdLatestPreview = undefined;
+        } else {
+          const agentUserId = boundAgentUserIdFromState(existingRoom.stateEvents);
+          const hasLoadedPreview =
+            deriveLatestMessagePreview(
+              { timelineEvents: loadedTimelineOfState(nextChunkState) },
+              [],
+              this.userId,
+              agentUserId,
+            ) !== undefined;
+          nextColdLatestPreview = hasLoadedPreview
+            ? undefined
+            : (existingRoom.coldLatestPreview ??
+              (await resolveColdLatestPreviewForRoom(
+                roomId,
+                extractRoomMeta(existingRoom),
+                nextChunkState,
+                true,
+                this.userId,
+              )));
+        }
+      }
       const nextRoom: StoredRoomEvents =
         chunkWrite || isNewRoom
           ? buildRoomFromChunkState(
@@ -1943,6 +2015,7 @@ export class MatrixClient {
               nextChunkState,
               Boolean(existingRoom.hasOlderLocalChunks),
               existingRoom.coldUnreadState,
+              nextColdLatestPreview,
             )
           : existingRoom;
       const roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
@@ -2041,6 +2114,7 @@ export class MatrixClient {
         res.chunkState,
         Boolean(existingRoom.hasOlderLocalChunks),
         existingRoom.coldUnreadState,
+        existingRoom.coldLatestPreview,
       );
       const nextRooms = {
         ...this.storedRooms,
@@ -2091,11 +2165,23 @@ export class MatrixClient {
       if (!res.matched) {
         return;
       }
+      const discardMeta = extractRoomMeta(existingRoom);
+      const nextColdLatestPreview = existingRoom.hasOlderLocalChunks
+        ? (existingRoom.coldLatestPreview ??
+          (await resolveColdLatestPreviewForRoom(
+            roomId,
+            discardMeta,
+            res.chunkState,
+            true,
+            this.userId,
+          )))
+        : undefined;
       const nextRoom = buildRoomFromChunkState(
-        extractRoomMeta(existingRoom),
+        discardMeta,
         res.chunkState,
         Boolean(existingRoom.hasOlderLocalChunks),
         existingRoom.coldUnreadState,
+        nextColdLatestPreview,
       );
       const roomMetaChanged = didRoomChunkMetaChange(existingRoom, nextRoom);
       const nextRooms = {
@@ -2201,6 +2287,7 @@ export class MatrixClient {
               nextChunkState,
               Boolean(existingRoom.hasOlderLocalChunks),
               existingRoom.coldUnreadState,
+              existingRoom.coldLatestPreview,
             )
           : existingRoom;
       const roomMetaChanged = isNewRoom || didRoomChunkMetaChange(existingRoom, nextRoom);
@@ -2377,11 +2464,13 @@ function extractRoomMeta(room: StoredRoomEvents): StoredRoomMeta {
     timelineEvents: _ignored,
     hasOlderLocalChunks: _ignoredOlder,
     coldUnreadState: _ignoredUnread,
+    coldLatestPreview: _ignoredPreview,
     ...meta
   } = room;
   void _ignored;
   void _ignoredOlder;
   void _ignoredUnread;
+  void _ignoredPreview;
   return meta;
 }
 
@@ -2739,17 +2828,42 @@ function syncChunkBounds(state: RoomChunkState, hasOlderLocalChunks: boolean): v
   state.chunkMaxSeq = maxLoaded;
 }
 
+function loadedTimelineOfState(state: RoomChunkState): RawMatrixEvent[] {
+  return [
+    ...state.coldPlaceholders.map((p) => p.event),
+    ...state.loadedChunks.flatMap((c) => c.events),
+  ];
+}
+
+function deriveRemainingColdPreview(
+  room: StoredRoomEvents,
+  state: RoomChunkState,
+  stillHasOlder: boolean,
+  ownerUserId: string,
+): string | undefined {
+  if (!stillHasOlder) {
+    return undefined;
+  }
+  const agentUserId = boundAgentUserIdFromState(room.stateEvents);
+  const hasLoadedPreview =
+    deriveLatestMessagePreview(
+      { timelineEvents: loadedTimelineOfState(state) },
+      [],
+      ownerUserId,
+      agentUserId,
+    ) !== undefined;
+  return hasLoadedPreview ? undefined : room.coldLatestPreview;
+}
+
 function buildRoomFromChunkState(
   roomMeta: StoredRoomMeta,
   state: RoomChunkState,
   hasOlderLocalChunks: boolean,
   coldUnreadState: ColdUnreadState | undefined,
+  coldLatestPreview?: string,
 ): StoredRoomEvents {
   syncChunkBounds(state, hasOlderLocalChunks);
-  const timelineEvents: RawMatrixEvent[] = [
-    ...state.coldPlaceholders.map((p) => p.event),
-    ...state.loadedChunks.flatMap((c) => c.events),
-  ];
+  const timelineEvents = loadedTimelineOfState(state);
   const next: StoredRoomEvents = {
     ...roomMeta,
     timelineEvents,
@@ -2760,6 +2874,7 @@ function buildRoomFromChunkState(
       : {}),
     ...(hasOlderLocalChunks ? { hasOlderLocalChunks: true } : {}),
     ...(coldUnreadState ? { coldUnreadState } : {}),
+    ...(coldLatestPreview !== undefined ? { coldLatestPreview } : {}),
   };
   if (state.chunkMinSeq === undefined) {
     delete next.chunkMinSeq;
@@ -2775,6 +2890,9 @@ function buildRoomFromChunkState(
   }
   if (!coldUnreadState) {
     delete next.coldUnreadState;
+  }
+  if (coldLatestPreview === undefined) {
+    delete next.coldLatestPreview;
   }
   return next;
 }
@@ -3042,6 +3160,49 @@ async function resolveColdUnreadForRoom(
   return {
     coldUnreadState: { unread: foundUnread, readPositionUnknown: false },
   };
+}
+
+async function resolveColdLatestPreviewForRoom(
+  roomId: string,
+  roomMeta: StoredRoomMeta,
+  chunkState: RoomChunkState,
+  hasOlderLocalChunks: boolean,
+  ownerUserId: string | undefined,
+): Promise<string | undefined> {
+  if (!hasOlderLocalChunks || !ownerUserId) {
+    return undefined;
+  }
+  const agentUserId = boundAgentUserIdFromState(roomMeta.stateEvents);
+  if (
+    deriveLatestMessagePreview(
+      { timelineEvents: loadedTimelineOfState(chunkState) },
+      [],
+      ownerUserId,
+      agentUserId,
+    ) !== undefined
+  ) {
+    return undefined;
+  }
+  const hotEvents = chunkState.loadedChunks.flatMap((c) => c.events);
+  const minHotSeq = chunkState.loadedChunks.length > 0 ? chunkState.loadedChunks[0]!.seq : undefined;
+  const scannedDesc: TimelineChunkRecord[] = [];
+  let preview: string | undefined;
+  await scanRoomChunksBackward(roomId, minHotSeq, (chunk) => {
+    scannedDesc.push(chunk);
+    const combined = [...[...scannedDesc].reverse().flatMap((c) => c.events), ...hotEvents];
+    const candidate = deriveLatestMessagePreview(
+      { timelineEvents: combined },
+      [],
+      ownerUserId,
+      agentUserId,
+    );
+    if (candidate !== undefined) {
+      preview = candidate;
+      return "stop";
+    }
+    return "continue";
+  });
+  return preview;
 }
 
 function collectRedactionTargetsInto(
@@ -3707,11 +3868,47 @@ async function mergeSyncRoomsChunked(
         }
       }
 
+      let nextColdLatestPreview: string | undefined;
+      if (stillHasOlder) {
+        const agentUserId = boundAgentUserIdFromState(roomMetaNext.stateEvents);
+        if (
+          deriveLatestMessagePreview(
+            { timelineEvents: mergedTimeline },
+            [],
+            ownerUserId,
+            agentUserId,
+          ) !== undefined
+        ) {
+          nextColdLatestPreview = undefined;
+        } else if (coldEventsScanned) {
+          const remainingColdEvents = coldEventsScanned
+            .filter((c) => !deletedChunkSeqs.has(c.seq))
+            .flatMap((c) => c.events);
+          nextColdLatestPreview = deriveLatestMessagePreview(
+            { timelineEvents: [...remainingColdEvents, ...mergedTimeline] },
+            [],
+            ownerUserId,
+            agentUserId,
+          );
+        } else if (!incomingAppendedOrUpdated && existing.coldLatestPreview !== undefined) {
+          nextColdLatestPreview = existing.coldLatestPreview;
+        } else {
+          nextColdLatestPreview = await resolveColdLatestPreviewForRoom(
+            roomId,
+            roomMetaNext,
+            chunkState,
+            stillHasOlder,
+            ownerUserId,
+          );
+        }
+      }
+
       const nextRoom = buildRoomFromChunkState(
         roomMetaNext,
         chunkState,
         stillHasOlder,
         nextColdUnreadState,
+        nextColdLatestPreview,
       );
 
       const metaChanged =
@@ -3793,6 +3990,7 @@ async function applyRoomBackfillPageChunked(
   fromToken: string,
   body: unknown,
   gapIndex?: number,
+  ownerUserId?: string,
 ): Promise<{
   changed: boolean;
   room: StoredRoomEvents;
@@ -4235,11 +4433,35 @@ async function applyRoomBackfillPageChunked(
     ...(nextReadPositionInLocal !== undefined ? { readPositionInLocal: nextReadPositionInLocal } : {}),
   };
 
+  let nextColdLatestPreview: string | undefined;
+  if (stillHasOlder) {
+    const agentUserId = boundAgentUserIdFromState(nextStateEvents);
+    const hasLoadedPreview =
+      ownerUserId !== undefined &&
+      deriveLatestMessagePreview(
+        { timelineEvents: mergedTimeline },
+        [],
+        ownerUserId,
+        agentUserId,
+      ) !== undefined;
+    nextColdLatestPreview = hasLoadedPreview
+      ? undefined
+      : (room.coldLatestPreview ??
+        (await resolveColdLatestPreviewForRoom(
+          roomId,
+          nextMeta,
+          nextState,
+          true,
+          ownerUserId,
+        )));
+  }
+
   const nextRoom = buildRoomFromChunkState(
     nextMeta,
     nextState,
     stillHasOlder,
     stillHasOlder ? room.coldUnreadState : undefined,
+    nextColdLatestPreview,
   );
 
   return {

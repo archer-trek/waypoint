@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { Bot, Pin, Plus, Settings } from "lucide-react";
+import { Pin, Plus, Settings } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -14,7 +14,6 @@ export type SidebarViewProps = {
   reauthBanner: ReactNode;
   topics: TopicSummary[];
   activeTopicId?: string;
-  registeredAgentsCount: number;
   nowMs: number;
   isNarrow: boolean;
   showTrafficLightClearance?: boolean;
@@ -26,7 +25,6 @@ export type SidebarViewProps = {
 type TopicRowProps = {
   topic: TopicSummary;
   isActive: boolean;
-  showBotBadge: boolean;
   isNarrow: boolean;
   nowMs: number;
   onOpenTopic: (roomId: string) => void;
@@ -39,16 +37,15 @@ function needsMacTrafficLightClearance(): boolean {
   return /mac/i.test(navigator.platform || navigator.userAgent);
 }
 
-/** Single Topic item row aligned to the brand axis, with margin-inset unread dot and Bot icon subtitle. */
+/** Single Topic item row aligned to the brand axis, with margin-inset unread dot and latest message preview. */
 function TopicRow({
   topic,
   isActive,
-  showBotBadge,
   isNarrow,
   nowMs,
   onOpenTopic,
 }: TopicRowProps) {
-  const showSecondary = showBotBadge || topic.responding;
+  const showSecondary = Boolean(topic.lastMessagePreview) || topic.responding;
   return (
     <li>
       <button
@@ -139,15 +136,14 @@ function TopicRow({
 
         {showSecondary ? (
           <span className="waypoint-topic-row-secondary flex min-w-0 items-center justify-between gap-2">
-            {showBotBadge ? (
+            {topic.lastMessagePreview ? (
               <span
                 className={cn(
-                  "waypoint-topic-row-bot inline-flex min-w-0 max-w-full items-center gap-1 font-normal leading-snug text-muted-foreground",
-                  isNarrow ? "text-[13.5px]" : "text-[13px]",
+                  "waypoint-topic-row-preview min-w-0 flex-1 truncate font-normal text-muted-foreground",
+                  isNarrow ? "text-[14px] leading-snug" : "text-[13px] leading-snug",
                 )}
               >
-                <Bot aria-hidden="true" strokeWidth={1.75} className="size-3 shrink-0 opacity-75" />
-                <span className="truncate">{topic.botDisplayName}</span>
+                {topic.lastMessagePreview}
               </span>
             ) : null}
             {topic.responding ? (
@@ -179,7 +175,6 @@ export function SidebarView({
   reauthBanner,
   topics,
   activeTopicId,
-  registeredAgentsCount,
   nowMs,
   isNarrow,
   showTrafficLightClearance,
@@ -322,7 +317,6 @@ export function SidebarView({
                 key={topic.roomId}
                 topic={topic}
                 isActive={topic.roomId === activeTopicId}
-                showBotBadge={registeredAgentsCount > 1 && Boolean(topic.botDisplayName)}
                 isNarrow={isNarrow}
                 nowMs={nowMs}
                 onOpenTopic={onOpenTopic}
