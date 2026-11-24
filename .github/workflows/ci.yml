@@ -84,7 +84,7 @@ jobs:
             fi
             CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
-          if echo "$CHANGED" | grep -Eq '^(src-tauri/|\.github/workflows/)'; then
+          if echo "$CHANGED" | grep -Eq '^(src-tauri/|scripts/|\.github/workflows/)'; then
             echo "run_native=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_native=false" >> "$GITHUB_OUTPUT"
@@ -199,3 +199,48 @@ jobs:
               exit 1
             }
           done
+
+  macos-build:
+    name: macOS DMG build
+    needs: native-filter
+    if: needs.native-filter.outputs.run_native == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Rust unit tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build macOS DMG
+        run: node scripts/build-macos-dmg.mjs --out-dir artifacts/macos
+
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-macos-dmg
+          path: artifacts/macos/*.dmg
+          retention-days: 14

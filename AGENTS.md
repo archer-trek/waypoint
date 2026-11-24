@@ -23,3 +23,7 @@ Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `sr
 ### Android build
 
 Build single-ABI (`arm64-v8a`) signed test APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`). Default Android SDK/NDK and Java 17 paths are pre-configured in `Makefile` and `scripts/build-android-apk.mjs`.
+
+### macOS build
+
+Build macOS `.dmg` (Apple Silicon `aarch64-apple-darwin` by default, ad-hoc signed unless `APPLE_SIGNING_IDENTITY` is set) on macOS via `make build-macos-dmg` (or `make dmg`, optional `OUT=<path>`, `TARGET=arm64|universal|x64`) or `node scripts/build-macos-dmg.mjs`.

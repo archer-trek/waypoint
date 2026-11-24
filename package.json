@@ -13,7 +13,8 @@
     "test:unit": "vitest run --exclude \"src/waypoint/integration/**\"",
     "test:integration": "vitest run src/waypoint/integration",
     "lint": "eslint .",
-    "build:android": "node scripts/build-android-apk.mjs"
+    "build:android": "node scripts/build-android-apk.mjs",
+    "build:macos": "node scripts/build-macos-dmg.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.2.1",

@@ -1,4 +1,4 @@
-.PHONY: all build-android-apk apk test-android-jvm help
+.PHONY: all build-android-apk apk build-macos-dmg dmg test-android-jvm help
 
 ANDROID_HOME ?= $(HOME)/Android/Sdk
 NDK_HOME ?= $(ANDROID_HOME)/ndk/27.3.13750724
@@ -15,11 +15,17 @@ build-android-apk:
 
 apk: build-android-apk
 
+build-macos-dmg:
+	node scripts/build-macos-dmg.mjs $(if $(OUT),--out $(OUT),) $(if $(TARGET),--target $(TARGET),)
+
+dmg: build-macos-dmg
+
 test-android-jvm:
 	cd src-tauri/gen/android && ./gradlew :app:testUniversalDebugUnitTest
 
 help:
 	@echo "Waypoint build helpers:"
-	@echo "  make [build-android-apk|apk] [OUT=path/to/app.apk]  Build single-ABI (arm64-v8a) signed test APK"
-	@echo "  make test-android-jvm                               Run Android JVM unit tests"
-	@echo "  make help                                           Show this message"
+	@echo "  make [build-android-apk|apk] [OUT=path/to/app.apk]                  Build single-ABI (arm64-v8a) signed test APK"
+	@echo "  make [build-macos-dmg|dmg] [OUT=path/to/app.dmg] [TARGET=arm64|universal|x64]  Build macOS DMG (run on macOS)"
+	@echo "  make test-android-jvm                                               Run Android JVM unit tests"
+	@echo "  make help                                                           Show this message"
