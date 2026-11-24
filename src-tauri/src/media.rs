@@ -7,12 +7,41 @@ static NEXT_MEDIA_TEMP_ID: AtomicU64 = AtomicU64::new(1);
 pub const MEDIA_CACHE_SUBDIR: &str = "waypoint-media";
 pub const MEDIA_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
+fn is_windows_reserved_device_name(filename: &str) -> bool {
+    let stem = filename.split('.').next().unwrap_or(filename).trim_end();
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 pub fn sanitize_media_filename(raw: &str) -> String {
     let tail = raw.rsplit(['/', '\\']).next().unwrap_or("");
     let cleaned: String = tail
         .chars()
         .map(|ch| {
-            if ch == '\0' || ch == ':' || ch.is_control() {
+            if matches!(ch, '\0' | ':' | '<' | '>' | '"' | '|' | '?' | '*') || ch.is_control() {
                 '_'
             } else {
                 ch
@@ -22,7 +51,10 @@ pub fn sanitize_media_filename(raw: &str) -> String {
     let without_traversal = cleaned.replace("..", "_");
     let trimmed = without_traversal.trim_matches(|ch: char| ch == '.' || ch.is_whitespace());
     if trimmed.is_empty() {
-        "attachment".to_string()
+        return "attachment".to_string();
+    }
+    if is_windows_reserved_device_name(trimmed) {
+        format!("_{trimmed}")
     } else {
         trimmed.to_string()
     }
@@ -198,6 +230,27 @@ mod tests {
         assert_eq!(sanitize_media_filename("."), "attachment");
         assert_eq!(sanitize_media_filename("\0:\n"), "___");
         assert_eq!(sanitize_media_filename("demo.txt"), "demo.txt");
+    }
+
+    #[test]
+    fn sanitize_media_filename_replaces_windows_illegal_chars_and_prefixes_reserved_names() {
+        assert_eq!(
+            sanitize_media_filename("a<b>c\"d|e?f*g.png"),
+            "a_b_c_d_e_f_g.png"
+        );
+        assert_eq!(sanitize_media_filename("CON"), "_CON");
+        assert_eq!(sanitize_media_filename("prn.txt"), "_prn.txt");
+        assert_eq!(sanitize_media_filename("AUX.tar.gz"), "_AUX.tar.gz");
+        assert_eq!(sanitize_media_filename("Nul"), "_Nul");
+        assert_eq!(sanitize_media_filename("COM1.log"), "_COM1.log");
+        assert_eq!(sanitize_media_filename("com9"), "_com9");
+        assert_eq!(sanitize_media_filename("LPT1.pdf"), "_LPT1.pdf");
+        assert_eq!(sanitize_media_filename("lpt9"), "_lpt9");
+        assert_eq!(sanitize_media_filename("con .txt"), "_con .txt");
+        assert_eq!(sanitize_media_filename("console.log"), "console.log");
+        assert_eq!(sanitize_media_filename("com10.txt"), "com10.txt");
+        assert_eq!(sanitize_media_filename("lpt0.txt"), "lpt0.txt");
+        assert_eq!(sanitize_media_filename("nullable.json"), "nullable.json");
     }
 
     #[test]

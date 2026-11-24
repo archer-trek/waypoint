@@ -27,3 +27,7 @@ Build single-ABI (`arm64-v8a`) signed test APK via `make build-android-apk` (or 
 ### macOS build
 
 Build macOS `.dmg` (Apple Silicon `aarch64-apple-darwin` by default, ad-hoc signed unless `APPLE_SIGNING_IDENTITY` is set) on macOS via `make build-macos-dmg` (or `make dmg`, optional `OUT=<path>`, `TARGET=arm64|universal|x64`) or `node scripts/build-macos-dmg.mjs`.
+
+### Windows build
+
+Build Windows NSIS installer (`.exe`, `x86_64-pc-windows-msvc` / `x64` by default, `arm64` optional, unsigned by default unless `WINDOWS_SIGN_COMMAND` or `WINDOWS_CERTIFICATE_THUMBPRINT` is set) on Windows via `make build-windows-installer` (or `make win`, optional `OUT=<path>`, `TARGET=x64|arm64`) or `node scripts/build-windows-installer.mjs`.

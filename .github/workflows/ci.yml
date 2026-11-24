@@ -244,3 +244,48 @@ jobs:
           name: waypoint-macos-dmg
           path: artifacts/macos/*.dmg
           retention-days: 14
+
+  windows-build:
+    name: Windows NSIS build
+    needs: native-filter
+    if: needs.native-filter.outputs.run_native == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Rust unit tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Build Windows NSIS installer
+        run: node scripts/build-windows-installer.mjs --out-dir artifacts/windows
+
+      - name: Upload Windows NSIS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-windows-nsis
+          path: artifacts/windows/*.exe
+          retention-days: 14

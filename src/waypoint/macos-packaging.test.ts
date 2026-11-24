@@ -1,7 +1,7 @@
 // @ts-expect-error Node.js built-in child_process in Vitest test runner
 import { spawnSync } from "node:child_process";
 // @ts-expect-error Node.js built-in fs in Vitest test runner
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 // @ts-expect-error Node.js built-in path in Vitest test runner
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -224,9 +224,11 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(ciYml).toContain(".dmg");
   });
 
-  test("release-macos.yml builds release DMG on v* tags or manual dispatch as a draft release", () => {
+  test("release.yml builds release DMG on v* tags or manual dispatch as a draft release", () => {
+    expect(existsSync(resolve(ROOT_DIR, ".github/workflows/release-macos.yml"))).toBe(false);
+
     const releaseYml = readFileSync(
-      resolve(ROOT_DIR, ".github/workflows/release-macos.yml"),
+      resolve(ROOT_DIR, ".github/workflows/release.yml"),
       "utf8",
     );
     expect(releaseYml).toContain("tags:");
