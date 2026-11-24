@@ -2,9 +2,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { cn, copyToClipboard } from "./utils";
 
 async function readAppCss(): Promise<string> {
-  // @ts-expect-error Node.js built-in fs in Vitest test runner
   const { readFileSync } = await import("node:fs");
-  // @ts-expect-error Node.js built-in path in Vitest test runner
   const { resolve } = await import("node:path");
   const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
   return readFileSync(resolve(cwd, "src/App.css"), "utf-8") as string;

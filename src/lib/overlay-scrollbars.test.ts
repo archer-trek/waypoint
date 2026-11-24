@@ -116,9 +116,7 @@ describe("installOverlayScrollbars", () => {
 
 describe("App.css table and scrollbar corner guards", () => {
   test("prevents table vertical scrollbar gutter, keeps idle table/code scrollbars zero-sized, and styles transparent scrollbar corners", async () => {
-    // @ts-expect-error Node.js built-in fs in Vitest test runner
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Node.js built-in path in Vitest test runner
     const { resolve } = await import("node:path");
     const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
     const css = readFileSync(resolve(cwd, "src/App.css"), "utf-8") as string;

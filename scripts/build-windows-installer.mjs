@@ -1,23 +1,26 @@
 #!/usr/bin/env node
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
-  readdirSync,
-  readFileSync,
   readSync,
   statSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = resolve(SCRIPT_DIR, "..");
-const TAURI_CONF_PATH = resolve(ROOT_DIR, "src-tauri/tauri.conf.json");
-const TAURI_CLI_BIN = resolve(ROOT_DIR, "node_modules/@tauri-apps/cli/tauri.js");
+import {
+  findFreshArtifact,
+  formatSizeMb,
+  normalizeSemver,
+  parseBuildArgs,
+  readGitInfo,
+  readTauriConf,
+  resolveCargoTargetDir,
+  resolveOutputPath,
+  runTauriCli,
+} from "./lib/build-common.mjs";
 
 const TARGET_MAP = {
   "x86_64-pc-windows-msvc": { target: "x86_64-pc-windows-msvc", archLabel: "x64" },
@@ -42,53 +45,6 @@ Options:
   -h, --help               Show this help message`);
 }
 
-function readNextFlagValue(argv, index, flag) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new Error(`Missing value for ${flag}`);
-  }
-  return value;
-}
-
-function parseArgs(argv) {
-  const options = {
-    targetRaw: "x86_64-pc-windows-msvc",
-    outPath: undefined,
-    outDir: undefined,
-    release: false,
-    versionRaw: undefined,
-    dryRun: false,
-    help: false,
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "-h" || arg === "--help") {
-      options.help = true;
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--release") {
-      options.release = true;
-    } else if (arg === "--target") {
-      options.targetRaw = readNextFlagValue(argv, i, "--target");
-      i += 1;
-    } else if (arg === "--out") {
-      options.outPath = readNextFlagValue(argv, i, "--out");
-      i += 1;
-    } else if (arg === "--out-dir") {
-      options.outDir = readNextFlagValue(argv, i, "--out-dir");
-      i += 1;
-    } else if (arg === "--version") {
-      options.versionRaw = readNextFlagValue(argv, i, "--version");
-      i += 1;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
-
 function resolveTarget(rawTarget) {
   const resolved = TARGET_MAP[rawTarget];
   if (!resolved) {
@@ -97,36 +53,6 @@ function resolveTarget(rawTarget) {
     );
   }
   return resolved;
-}
-
-function normalizeSemver(rawVersion) {
-  const stripped = rawVersion.trim().replace(/^v/i, "");
-  if (!/^\d+\.\d+\.\d+$/.test(stripped)) {
-    throw new Error(
-      `Invalid Windows version "${rawVersion}". Bundle version requires strict X.Y.Z semver.`,
-    );
-  }
-  return stripped;
-}
-
-function readTauriConf() {
-  const conf = JSON.parse(readFileSync(TAURI_CONF_PATH, "utf8"));
-  const productName =
-    typeof conf.productName === "string" && conf.productName.trim()
-      ? conf.productName.trim()
-      : "Waypoint";
-  const baseVersion =
-    typeof conf.version === "string" && conf.version.trim()
-      ? conf.version.trim()
-      : "0.1.0";
-  return { productName, baseVersion };
-}
-
-function readGitShortSha() {
-  return execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-    cwd: ROOT_DIR,
-    encoding: "utf8",
-  }).trim();
 }
 
 function resolveSigningConfig() {
@@ -170,20 +96,26 @@ function resolveSigningConfig() {
 function resolveBuildPlan(options) {
   const { target, archLabel } = resolveTarget(options.targetRaw);
   const { productName, baseVersion } = readTauriConf();
-  const version = normalizeSemver(options.versionRaw ?? baseVersion);
-  const shortSha = readGitShortSha();
+  const version = normalizeSemver(
+    options.versionRaw ?? baseVersion,
+    "Windows",
+    "Bundle version requires strict X.Y.Z semver.",
+  );
+  const { shortSha } = readGitInfo();
   const { signingMode, windowsOverride } = resolveSigningConfig();
 
   const installerFilename = options.release
     ? `${productName}-${version}-${archLabel}-setup.exe`
     : `${productName}-${version}-test.${shortSha}-${archLabel}-setup.exe`;
 
-  const nsisBundleDir = resolve(ROOT_DIR, "src-tauri/target", target, "release/bundle/nsis");
-  const outputPath = options.outPath
-    ? resolve(ROOT_DIR, options.outPath)
-    : options.outDir
-      ? resolve(ROOT_DIR, options.outDir, installerFilename)
-      : resolve(nsisBundleDir, installerFilename);
+  const cargoTargetDir = resolveCargoTargetDir();
+  const nsisBundleDir = resolve(cargoTargetDir, target, "release/bundle/nsis");
+  const outputPath = resolveOutputPath({
+    outPath: options.outPath,
+    outDir: options.outDir,
+    defaultDir: nsisBundleDir,
+    filename: installerFilename,
+  });
 
   const configOverride = JSON.stringify({
     version,
@@ -215,53 +147,62 @@ function resolveBuildPlan(options) {
   };
 }
 
-function findGeneratedInstaller(nsisBundleDir, productName, version, buildStartMs) {
-  if (!existsSync(nsisBundleDir)) {
-    throw new Error(`Expected NSIS bundle directory not found: ${nsisBundleDir}`);
-  }
-  const tauriPrefix = `${productName}_${version}_`;
-  const candidates = readdirSync(nsisBundleDir)
-    .filter((name) => name.startsWith(tauriPrefix) && name.endsWith("-setup.exe"))
-    .map((name) => {
-      const fullPath = resolve(nsisBundleDir, name);
-      return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
-    })
-    .filter((entry) => entry.mtimeMs >= buildStartMs - 1000)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-  if (candidates.length === 0) {
-    throw new Error(
-      `No freshly generated ${tauriPrefix}*-setup.exe found in ${nsisBundleDir}`,
-    );
-  }
-  return candidates[0].fullPath;
-}
-
 function verifyInstallerPeHeader(filePath) {
   if (!existsSync(filePath)) {
     throw new Error(`Expected installer file missing at ${filePath}`);
   }
   const sizeBytes = statSync(filePath).size;
-  if (sizeBytes <= 2) {
+  if (sizeBytes < 64) {
     throw new Error(`Generated installer file is unexpectedly small (${sizeBytes} bytes): ${filePath}`);
   }
-  const header = Buffer.alloc(2);
+  const dosHeader = Buffer.alloc(64);
+  const peSig = Buffer.alloc(4);
   const fd = openSync(filePath, "r");
   try {
-    readSync(fd, header, 0, 2, 0);
+    readSync(fd, dosHeader, 0, 64, 0);
+    if (dosHeader[0] !== 0x4d || dosHeader[1] !== 0x5a) {
+      throw new Error(`Generated installer does not have a valid PE MZ header: ${filePath}`);
+    }
+    const peOffset = dosHeader.readUInt32LE(0x3c);
+    if (peOffset + 4 > sizeBytes) {
+      throw new Error(`Generated installer has out-of-bounds PE header offset (${peOffset}): ${filePath}`);
+    }
+    readSync(fd, peSig, 0, 4, peOffset);
+    if (peSig[0] !== 0x50 || peSig[1] !== 0x45 || peSig[2] !== 0x00 || peSig[3] !== 0x00) {
+      throw new Error(`Generated installer does not have a valid PE\\0\\0 signature: ${filePath}`);
+    }
   } finally {
     closeSync(fd);
   }
-  if (header[0] !== 0x4d || header[1] !== 0x5a) {
-    throw new Error(`Generated installer does not have a valid PE MZ header: ${filePath}`);
-  }
   return sizeBytes;
+}
+
+function verifyAuthenticodeSignature(filePath) {
+  const verify = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$sig = Get-AuthenticodeSignature -FilePath $env:WAYPOINT_VERIFY_FILE; if ($sig.Status -ne 'Valid') { Write-Error \"Authenticode signature verification failed ($($sig.Status)): $($sig.StatusMessage)\"; exit 1 }",
+    ],
+    {
+      env: { ...process.env, WAYPOINT_VERIFY_FILE: filePath },
+      encoding: "utf8",
+    },
+  );
+  if (verify.error) {
+    throw verify.error;
+  }
+  if (verify.status !== 0) {
+    throw new Error(verify.stderr?.trim() || `Authenticode verification failed for ${filePath}`);
+  }
 }
 
 function main() {
   let options;
   try {
-    options = parseArgs(process.argv.slice(2));
+    options = parseBuildArgs(process.argv.slice(2), { defaultTarget: "x86_64-pc-windows-msvc" });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
@@ -292,55 +233,40 @@ function main() {
     process.exit(1);
   }
 
-  if (!existsSync(TAURI_CLI_BIN)) {
-    console.error(`Tauri CLI entrypoint not found at ${TAURI_CLI_BIN}. Run npm ci first.`);
-    process.exit(1);
-  }
-
-  console.log(
-    `Building Windows NSIS installer (${plan.target}, ${plan.signingMode}): version=${plan.version}, out=${plan.outputPath}`,
-  );
-  const buildStartMs = Date.now();
-  // Invoke Tauri CLI via Node directly so Windows cmd.exe does not mangle JSON --config quotes.
-  const build = spawnSync(process.execPath, [TAURI_CLI_BIN, ...plan.tauriArgs], {
-    cwd: ROOT_DIR,
-    env: process.env,
-    stdio: "inherit",
-  });
-  if (build.status !== 0) {
-    process.exit(build.status ?? 1);
-  }
-
-  let sourceInstaller;
-  try {
-    sourceInstaller = findGeneratedInstaller(
-      plan.nsisBundleDir,
-      plan.productName,
-      plan.version,
-      buildStartMs,
-    );
-  } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  mkdirSync(dirname(plan.outputPath), { recursive: true });
-  if (sourceInstaller !== plan.outputPath) {
-    copyFileSync(sourceInstaller, plan.outputPath);
-  }
-
   let sizeBytes;
   try {
+    console.log(
+      `Building Windows NSIS installer (${plan.target}, ${plan.signingMode}): version=${plan.version}, out=${plan.outputPath}`,
+    );
+    const buildStartMs = Date.now();
+    // Invoke Tauri CLI via Node directly so Windows cmd.exe does not mangle JSON --config quotes.
+    runTauriCli(plan.tauriArgs);
+
+    const tauriPrefix = `${plan.productName}_${plan.version}_`;
+    const sourceInstaller = findFreshArtifact(
+      plan.nsisBundleDir,
+      (name) => name.startsWith(tauriPrefix) && name.endsWith("-setup.exe"),
+      buildStartMs,
+      `${tauriPrefix}*-setup.exe`,
+    );
+
+    mkdirSync(dirname(plan.outputPath), { recursive: true });
+    if (sourceInstaller !== plan.outputPath) {
+      copyFileSync(sourceInstaller, plan.outputPath);
+    }
+
     sizeBytes = verifyInstallerPeHeader(plan.outputPath);
+    if (plan.signingMode !== "unsigned") {
+      verifyAuthenticodeSignature(plan.outputPath);
+    }
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
-  const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(2);
   console.log("\n=== Windows NSIS Installer Ready ===");
   console.log(`Path: ${plan.outputPath}`);
-  console.log(`Size: ${sizeMb} MB (${sizeBytes} bytes)`);
+  console.log(`Size: ${formatSizeMb(sizeBytes)} MB (${sizeBytes} bytes)`);
   console.log(`Target: ${plan.target}`);
   console.log(`Version: ${plan.version}`);
   console.log(`Signing: ${plan.signingMode}`);

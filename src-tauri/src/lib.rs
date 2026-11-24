@@ -1,8 +1,8 @@
 mod media;
 
-use media::{MEDIA_CACHE_TTL, normalize_media_mime_type, prepare_media_cache_file};
 #[cfg(not(target_os = "android"))]
 use media::media_cache_dir;
+use media::{normalize_media_mime_type, prepare_media_cache_file, MEDIA_CACHE_TTL};
 use std::time::SystemTime;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
@@ -11,8 +11,8 @@ use tauri_plugin_opener::OpenerExt;
 
 #[cfg(target_os = "android")]
 mod android_bridge {
-    use jni::JNIEnv;
     use jni::objects::{JObject, JString, JValue};
+    use jni::JNIEnv;
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -26,7 +26,10 @@ mod android_bridge {
         fallback.to_string()
     }
 
-    fn read_nullable_jstring(env: &mut JNIEnv<'_>, obj: JObject<'_>) -> Result<Option<String>, String> {
+    fn read_nullable_jstring(
+        env: &mut JNIEnv<'_>,
+        obj: JObject<'_>,
+    ) -> Result<Option<String>, String> {
         if obj.is_null() {
             return Ok(None);
         }
@@ -61,16 +64,27 @@ mod android_bridge {
     }
 
     pub fn query_media_cache_dir(window: &tauri::WebviewWindow) -> Result<PathBuf, String> {
-        exec_on_activity(window, "Timed out resolving Android cache directory", |env, activity| {
-            let value = env
-                .call_method(activity, "getMediaCacheDirPath", "()Ljava/lang/String;", &[])
-                .map_err(|err| take_jni_error(env, &err.to_string()))?;
-            let obj = value.l().map_err(|err| take_jni_error(env, &err.to_string()))?;
-            match read_nullable_jstring(env, obj)? {
-                Some(raw) if !raw.is_empty() => Ok(PathBuf::from(raw)),
-                _ => Err("Android cache directory is unavailable".to_string()),
-            }
-        })
+        exec_on_activity(
+            window,
+            "Timed out resolving Android cache directory",
+            |env, activity| {
+                let value = env
+                    .call_method(
+                        activity,
+                        "getMediaCacheDirPath",
+                        "()Ljava/lang/String;",
+                        &[],
+                    )
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                let obj = value
+                    .l()
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                match read_nullable_jstring(env, obj)? {
+                    Some(raw) if !raw.is_empty() => Ok(PathBuf::from(raw)),
+                    _ => Err("Android cache directory is unavailable".to_string()),
+                }
+            },
+        )
     }
 
     pub fn open_media_file(
@@ -80,27 +94,33 @@ mod android_bridge {
     ) -> Result<(), String> {
         let path_owned = file_path.to_string();
         let mime_owned = mime_type.to_string();
-        exec_on_activity(window, "Timed out opening media file on Android", move |env, activity| {
-            let jpath = env
-                .new_string(&path_owned)
-                .map_err(|err| take_jni_error(env, &err.to_string()))?;
-            let jmime = env
-                .new_string(&mime_owned)
-                .map_err(|err| take_jni_error(env, &err.to_string()))?;
-            let value = env
-                .call_method(
-                    activity,
-                    "openMediaFile",
-                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                    &[JValue::Object(&jpath), JValue::Object(&jmime)],
-                )
-                .map_err(|err| take_jni_error(env, &err.to_string()))?;
-            let obj = value.l().map_err(|err| take_jni_error(env, &err.to_string()))?;
-            match read_nullable_jstring(env, obj)? {
-                Some(err_msg) if !err_msg.is_empty() => Err(err_msg),
-                _ => Ok(()),
-            }
-        })
+        exec_on_activity(
+            window,
+            "Timed out opening media file on Android",
+            move |env, activity| {
+                let jpath = env
+                    .new_string(&path_owned)
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                let jmime = env
+                    .new_string(&mime_owned)
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                let value = env
+                    .call_method(
+                        activity,
+                        "openMediaFile",
+                        "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                        &[JValue::Object(&jpath), JValue::Object(&jmime)],
+                    )
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                let obj = value
+                    .l()
+                    .map_err(|err| take_jni_error(env, &err.to_string()))?;
+                match read_nullable_jstring(env, obj)? {
+                    Some(err_msg) if !err_msg.is_empty() => Err(err_msg),
+                    _ => Ok(()),
+                }
+            },
+        )
     }
 
     pub fn set_system_appearance(
@@ -238,10 +258,19 @@ mod tests {
 
     #[test]
     fn parse_desktop_window_theme_maps_known_modes_and_falls_back_to_system() {
-        assert_eq!(parse_desktop_window_theme("light"), Some(tauri::Theme::Light));
+        assert_eq!(
+            parse_desktop_window_theme("light"),
+            Some(tauri::Theme::Light)
+        );
         assert_eq!(parse_desktop_window_theme("dark"), Some(tauri::Theme::Dark));
-        assert_eq!(parse_desktop_window_theme(" Light "), Some(tauri::Theme::Light));
-        assert_eq!(parse_desktop_window_theme("DARK\n"), Some(tauri::Theme::Dark));
+        assert_eq!(
+            parse_desktop_window_theme(" Light "),
+            Some(tauri::Theme::Light)
+        );
+        assert_eq!(
+            parse_desktop_window_theme("DARK\n"),
+            Some(tauri::Theme::Dark)
+        );
         assert_eq!(parse_desktop_window_theme("system"), None);
         assert_eq!(parse_desktop_window_theme("unknown"), None);
     }

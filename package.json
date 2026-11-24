@@ -3,16 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+  },
   "scripts": {
     "dev": "vite",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "build": "npm run typecheck && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
     "test:unit": "vitest run --exclude \"src/waypoint/integration/**\"",
     "test:integration": "vitest run src/waypoint/integration",
     "lint": "eslint .",
+    "lint:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "prepare": "node -e \"import('node:fs').then(async ({existsSync})=>{if(!existsSync('.git'))return;const {spawnSync}=await import('node:child_process');spawnSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'});})\"",
     "build:android": "node scripts/build-android-apk.mjs",
     "build:macos": "node scripts/build-macos-dmg.mjs",
     "build:windows": "node scripts/build-windows-installer.mjs"
@@ -44,6 +49,7 @@
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.9",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.7.0",

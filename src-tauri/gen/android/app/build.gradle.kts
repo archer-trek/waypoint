@@ -39,7 +39,9 @@ val releaseStorePath = resolveSigningProp("WAYPOINT_ANDROID_KEYSTORE_PATH", "sto
 val releaseStorePassword = resolveSigningProp("WAYPOINT_ANDROID_KEYSTORE_PASSWORD", "storePassword")
 val releaseKeyAlias = resolveSigningProp("WAYPOINT_ANDROID_KEY_ALIAS", "keyAlias")
 val releaseKeyPassword = resolveSigningProp("WAYPOINT_ANDROID_KEY_PASSWORD", "keyPassword")
+val forceUnsigned = System.getenv("WAYPOINT_ANDROID_UNSIGNED") == "1"
 val hasReleaseSigning =
+    !forceUnsigned &&
     releaseStorePath != null &&
     releaseStorePassword != null &&
     releaseKeyAlias != null &&

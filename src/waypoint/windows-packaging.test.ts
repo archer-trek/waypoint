@@ -1,8 +1,5 @@
-// @ts-expect-error Node.js built-in child_process in Vitest test runner
 import { spawnSync } from "node:child_process";
-// @ts-expect-error Node.js built-in fs in Vitest test runner
 import { existsSync, readFileSync } from "node:fs";
-// @ts-expect-error Node.js built-in path in Vitest test runner
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -177,7 +174,7 @@ describe("build-windows-installer CLI", () => {
     expect(tpCfg.bundle?.windows?.tsp).toBe(true);
   });
 
-  test("rejects unsupported target, non-semver version, and WINDOWS_SIGN_COMMAND missing %1", () => {
+  test("rejects unsupported target, non-semver version, --out + --out-dir conflict, and WINDOWS_SIGN_COMMAND missing %1, and honors CARGO_TARGET_DIR", () => {
     const badTarget = runBuildScript(["--dry-run", "--target", "armv7-pc-windows-msvc"]);
     expect(badTarget.status).not.toBe(0);
     expect(badTarget.stderr).toContain("Unsupported Windows target");
@@ -186,11 +183,31 @@ describe("build-windows-installer CLI", () => {
     expect(badVersion.status).not.toBe(0);
     expect(badVersion.stderr).toContain("Invalid Windows version");
 
+    const bothOut = runBuildScript(["--dry-run", "--out", "a.exe", "--out-dir", "artifacts"]);
+    expect(bothOut.status).not.toBe(0);
+    expect(bothOut.stderr).toContain("Cannot specify both --out and --out-dir");
+
     const badSignCmd = runBuildScript(["--dry-run"], {
       WINDOWS_SIGN_COMMAND: "signtool sign /fd SHA256",
     });
     expect(badSignCmd.status).not.toBe(0);
     expect(badSignCmd.stderr).toContain("%1");
+
+    const customTargetRes = runBuildScript(["--dry-run"], {
+      CARGO_TARGET_DIR: "tmp/cargo-target",
+    });
+    expect(customTargetRes.status, customTargetRes.stderr).toBe(0);
+    const customTargetPlan = JSON.parse(customTargetRes.stdout) as {
+      nsisBundleDir: string;
+      installerFilename: string;
+      outputPath: string;
+    };
+    expect(customTargetPlan.nsisBundleDir).toBe(
+      resolve(ROOT_DIR, "tmp/cargo-target/x86_64-pc-windows-msvc/release/bundle/nsis"),
+    );
+    expect(customTargetPlan.outputPath).toBe(
+      resolve(customTargetPlan.nsisBundleDir, customTargetPlan.installerFilename),
+    );
   });
 
   if (HOST_PLATFORM !== "win32") {
@@ -256,8 +273,10 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
   test("ci.yml runs windows-build on windows-latest gated by native-filter and uploads NSIS artifact", () => {
     const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf8");
     expect(ciYml).toContain("windows-build:");
+    expect(ciYml).toContain("if: needs.native-filter.outputs.run_windows == 'true'");
     expect(ciYml).toContain("runs-on: windows-latest");
     expect(ciYml).toContain("targets: x86_64-pc-windows-msvc");
+    expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
     expect(ciYml).toContain("node scripts/build-windows-installer.mjs");
     expect(ciYml).toContain("waypoint-windows-nsis");
     expect(ciYml).toContain("artifacts/windows/*.exe");
@@ -270,7 +289,9 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("tags:");
     expect(releaseYml).toContain('"v*"');
     expect(releaseYml).toContain("workflow_dispatch:");
+    expect(releaseYml).toContain("cancel-in-progress: false");
     expect(releaseYml).toContain("contents: write");
+    expect(releaseYml).toContain("verify:");
     expect(releaseYml).toContain("runs-on: macos-latest");
     expect(releaseYml).toContain("windows-latest");
     expect(releaseYml).toContain("windows-11-arm");
@@ -279,6 +300,7 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("scripts/build-windows-installer.mjs");
     expect(releaseYml).toContain("scripts/build-macos-dmg.mjs");
     expect(releaseYml).toContain("--release");
+    expect(releaseYml).toContain("SHA256SUMS.txt");
     expect(releaseYml).toContain("isDraft");
     expect(releaseYml).toContain("gh release create");
     expect(releaseYml).toContain("--draft");

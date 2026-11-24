@@ -1,6 +1,4 @@
-// @ts-expect-error Node.js built-in fs in Vitest test runner
 import { readdirSync, readFileSync } from "node:fs";
-// @ts-expect-error Node.js built-in path in Vitest test runner
 import { join, relative, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 

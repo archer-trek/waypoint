@@ -578,9 +578,7 @@ describe("Responsive Dialogs, Forms, and AlertDialogs (#87)", () => {
   });
 
   test("owned workspace dialog and form files contain zero raw hex color literals", async () => {
-    // @ts-expect-error Node.js built-in fs in Vitest test runner
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Node.js built-in path in Vitest test runner
     const { resolve } = await import("node:path");
     const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
     const files = [
