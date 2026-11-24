@@ -261,8 +261,10 @@ button,
 input,
 textarea,
 select,
+label,
 [role="button"],
-a {
+a,
+[data-tauri-drag-region="false"] {
   -webkit-app-region: no-drag;
 }
 

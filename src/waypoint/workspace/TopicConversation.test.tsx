@@ -50,6 +50,7 @@ describe("TopicHeaderView (#89)", () => {
     );
 
     const header = screen.getByRole("banner");
+    expect(header).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(header).toHaveClass(
       "waypoint-topic-header",
       "sticky",

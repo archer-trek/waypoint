@@ -19,7 +19,8 @@ export function EmptyInvitation({
   return (
     <section
       aria-label="Topic 引导"
-      className="waypoint-empty-detail flex flex-1 flex-col items-center justify-center px-6 py-10 text-center text-muted-foreground"
+      data-tauri-drag-region="deep"
+      className="waypoint-empty-detail flex flex-1 flex-col items-center justify-center px-6 py-10 text-center text-muted-foreground select-none"
     >
       <div className="waypoint-empty-card flex w-full max-w-sm flex-col items-center gap-5 rounded-2xl border border-dashed border-border bg-muted/40 px-6 py-8">
         <p className="m-0 text-[15px] leading-relaxed text-muted-foreground">
