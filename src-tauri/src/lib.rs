@@ -168,13 +168,28 @@ fn open_media_file(
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn parse_desktop_window_theme(appearance: &str) -> Option<tauri::Theme> {
+    match appearance.trim().to_ascii_lowercase().as_str() {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    }
+}
+
 #[tauri::command]
 fn sync_system_appearance(window: tauri::WebviewWindow, appearance: String) -> Result<(), String> {
     #[cfg(target_os = "android")]
     {
         android_bridge::set_system_appearance(&window, &appearance)
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    {
+        window
+            .set_theme(parse_desktop_window_theme(&appearance))
+            .map_err(|err| err.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "windows", target_os = "macos")))]
     {
         let _ = (window, appearance);
         Ok(())
@@ -215,4 +230,19 @@ pub fn run() {
         #[cfg(not(target_os = "macos"))]
         let _ = (app_handle, event);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_desktop_window_theme;
+
+    #[test]
+    fn parse_desktop_window_theme_maps_known_modes_and_falls_back_to_system() {
+        assert_eq!(parse_desktop_window_theme("light"), Some(tauri::Theme::Light));
+        assert_eq!(parse_desktop_window_theme("dark"), Some(tauri::Theme::Dark));
+        assert_eq!(parse_desktop_window_theme(" Light "), Some(tauri::Theme::Light));
+        assert_eq!(parse_desktop_window_theme("DARK\n"), Some(tauri::Theme::Dark));
+        assert_eq!(parse_desktop_window_theme("system"), None);
+        assert_eq!(parse_desktop_window_theme("unknown"), None);
+    }
 }

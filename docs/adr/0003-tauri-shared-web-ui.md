@@ -1,5 +1,7 @@
 # 双端用 Tauri 2 和一套 Web UI
 
+> 注：客户端现已扩展支持 Windows 桌面端（Edge WebView2），同样复用本这套 Web UI，且保持不对 WebView2 设版本硬门槛原则；Windows 打包与原生外壳边界见 [ADR-0033](./0033-windows-nsis-packaging-and-native-chrome.md)。
+
 Waypoint V1 的 macOS 与 Android 是同一个 Tauri 2 应用。界面是一套 React 代码，跑在 macOS WKWebView 和 Android 系统 WebView 里。Markdown 用 Streamdown、remark-gfm、KaTeX、Shiki。不选 Flutter 或 Compose Multiplatform：要接住的是未闭合的流式 Markdown、表格、代码和公式，这套库只在 Web 渲染管线里是现成的。
 
 ## Considered Options

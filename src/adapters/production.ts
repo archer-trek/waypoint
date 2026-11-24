@@ -137,9 +137,36 @@ function parseKeyboardInsetEvent(event: Event): number | undefined {
   return undefined;
 }
 
+function detectDeviceDisplayName(): string {
+  if (typeof navigator === "undefined") {
+    return "Waypoint";
+  }
+  const ua = navigator.userAgent || "";
+  const platform = navigator.platform || "";
+  const maxTouchPoints = typeof navigator.maxTouchPoints === "number" ? navigator.maxTouchPoints : 0;
+
+  // Check Android before Linux (Android UAs contain "Linux") and iOS before Mac (iOS UAs contain "like Mac OS X").
+  if (/Android/i.test(ua)) {
+    return "Waypoint Android";
+  }
+  if (/iPhone|iPad|iPod/i.test(ua) || (/MacIntel/i.test(platform) && maxTouchPoints > 1)) {
+    return "Waypoint iOS";
+  }
+  if (/Windows/i.test(ua) || /^Win/i.test(platform)) {
+    return "Waypoint Windows";
+  }
+  if (/Mac/i.test(ua) || /Mac/i.test(platform)) {
+    return "Waypoint macOS";
+  }
+  if (/Linux/i.test(ua) || /Linux/i.test(platform)) {
+    return "Waypoint Linux";
+  }
+  return "Waypoint";
+}
+
 export function detectPlatform(): PlatformAdapter {
-  const isAndroid = /Android/i.test(navigator.userAgent);
-  const deviceDisplayName = isAndroid ? "Waypoint Android" : "Waypoint macOS";
+  const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  const deviceDisplayName = detectDeviceDisplayName();
   let navDepth = 0;
   let suppressedPopCount = 0;
   let backInFlight = false;

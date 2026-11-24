@@ -1,0 +1,258 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: Desktop platforms to build
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - macos
+          - windows
+      macos_target:
+        description: macOS target architecture
+        required: false
+        default: aarch64-apple-darwin
+        type: choice
+        options:
+          - aarch64-apple-darwin
+          - universal-apple-darwin
+          - x86_64-apple-darwin
+      windows_target:
+        description: Windows target architecture
+        required: false
+        default: x86_64-pc-windows-msvc
+        type: choice
+        options:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+      version:
+        description: Optional semver override (e.g. 0.1.0); defaults to tag or tauri.conf.json
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  meta:
+    name: Resolve release metadata
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      build_macos: ${{ steps.resolve.outputs.build_macos }}
+      build_windows: ${{ steps.resolve.outputs.build_windows }}
+      macos_target: ${{ steps.resolve.outputs.macos_target }}
+      macos_rust_targets: ${{ steps.resolve.outputs.macos_rust_targets }}
+      windows_target: ${{ steps.resolve.outputs.windows_target }}
+      windows_runner: ${{ steps.resolve.outputs.windows_runner }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve build configuration
+        id: resolve
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_MACOS_TARGET: ${{ inputs.macos_target }}
+          INPUT_WINDOWS_TARGET: ${{ inputs.windows_target }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          PLATFORMS="${INPUT_PLATFORMS:-all}"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            PLATFORMS="all"
+          fi
+
+          BUILD_MACOS="false"
+          BUILD_WINDOWS="false"
+          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "macos" ]; then
+            BUILD_MACOS="true"
+          fi
+          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "windows" ]; then
+            BUILD_WINDOWS="true"
+          fi
+
+          MACOS_TARGET="${INPUT_MACOS_TARGET:-aarch64-apple-darwin}"
+          if [ "$MACOS_TARGET" = "universal-apple-darwin" ]; then
+            MACOS_RUST_TARGETS="aarch64-apple-darwin,x86_64-apple-darwin"
+          else
+            MACOS_RUST_TARGETS="$MACOS_TARGET"
+          fi
+
+          WINDOWS_TARGET="${INPUT_WINDOWS_TARGET:-x86_64-pc-windows-msvc}"
+          if [ "$WINDOWS_TARGET" = "aarch64-pc-windows-msvc" ]; then
+            WINDOWS_RUNNER="windows-11-arm"
+          else
+            WINDOWS_RUNNER="windows-latest"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            RELEASE_VERSION="${RELEASE_TAG#v}"
+          else
+            if [ -n "${INPUT_VERSION}" ]; then
+              RELEASE_VERSION="${INPUT_VERSION#v}"
+            else
+              RELEASE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")"
+            fi
+            RELEASE_TAG="v${RELEASE_VERSION}"
+          fi
+
+          if ! printf '%s' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Invalid release semver '${RELEASE_VERSION}'. Expected strict X.Y.Z." >&2
+            exit 1
+          fi
+
+          {
+            echo "build_macos=${BUILD_MACOS}"
+            echo "build_windows=${BUILD_WINDOWS}"
+            echo "macos_target=${MACOS_TARGET}"
+            echo "macos_rust_targets=${MACOS_RUST_TARGETS}"
+            echo "windows_target=${WINDOWS_TARGET}"
+            echo "windows_runner=${WINDOWS_RUNNER}"
+            echo "version=${RELEASE_VERSION}"
+            echo "tag=${RELEASE_TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+  build-macos:
+    name: Build macOS Release DMG
+    needs: meta
+    if: needs.meta.outputs.build_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ needs.meta.outputs.macos_rust_targets }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS Release DMG
+        run: |
+          node scripts/build-macos-dmg.mjs \
+            --release \
+            --target "${{ needs.meta.outputs.macos_target }}" \
+            --version "${{ needs.meta.outputs.version }}" \
+            --out-dir artifacts/macos
+
+      - name: Upload macOS Release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-macos-release-${{ needs.meta.outputs.macos_target }}
+          path: artifacts/macos/*.dmg
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows Release NSIS
+    needs: meta
+    if: needs.meta.outputs.build_windows == 'true'
+    runs-on: ${{ needs.meta.outputs.windows_runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ needs.meta.outputs.windows_target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows Release NSIS installer
+        run: node scripts/build-windows-installer.mjs --release --target "${{ needs.meta.outputs.windows_target }}" --version "${{ needs.meta.outputs.version }}" --out-dir artifacts/windows
+
+      - name: Upload Windows Release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-windows-release-${{ needs.meta.outputs.windows_target }}
+          path: artifacts/windows/*.exe
+          retention-days: 30
+
+  draft-release:
+    name: Create or Update Draft GitHub Release
+    needs: [meta, build-macos, build-windows]
+    if: ${{ always() && needs.meta.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create or update Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          FILES=(release-artifacts/*.dmg release-artifacts/*.exe)
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No release artifacts found in release-artifacts/." >&2
+            exit 1
+          fi
+
+          if IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "Release $RELEASE_TAG is already published (not a draft); refusing to overwrite." >&2
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${FILES[@]}" \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi

@@ -8,5 +8,6 @@ src-tauri/gen/*
 *.log
 *.apk
 *.dmg
+*.exe
 *.jks
 *.keystore
