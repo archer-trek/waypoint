@@ -152,9 +152,9 @@ describe("build-macos-dmg CLI", () => {
   if (HOST_PLATFORM !== "darwin") {
     test("fails fast on non-macOS hosts when not in --dry-run mode", () => {
       const res = runBuildScript([]);
-    expect(res.status).not.toBe(0);
-    expect(res.stderr).toContain("darwin");
-  });
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain("darwin");
+    });
   }
 });
 
@@ -194,9 +194,11 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
 
   test("ci.yml runs macos-build on macos-latest gated by native-filter and uploads DMG artifact", () => {
     const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf8");
+    expect(ciYml).toContain("src-tauri/|scripts/|\\.github/workflows/");
     expect(ciYml).toContain("macos-build:");
     expect(ciYml).toContain("runs-on: macos-latest");
     expect(ciYml).toContain("needs: native-filter");
+    expect(ciYml).toContain("fetch-depth: 0");
     expect(ciYml).toContain("targets: aarch64-apple-darwin");
     expect(ciYml).toContain("node scripts/build-macos-dmg.mjs");
     expect(ciYml).toContain("actions/upload-artifact@v7");
@@ -213,9 +215,11 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("workflow_dispatch:");
     expect(releaseYml).toContain("contents: write");
     expect(releaseYml).toContain("runs-on: macos-latest");
+    expect(releaseYml).toContain("fetch-depth: 0");
     expect(releaseYml).toContain("universal-apple-darwin");
     expect(releaseYml).toContain("scripts/build-macos-dmg.mjs");
     expect(releaseYml).toContain("--release");
+    expect(releaseYml).toContain("isDraft");
     expect(releaseYml).toContain("gh release create");
     expect(releaseYml).toContain("--draft");
   });

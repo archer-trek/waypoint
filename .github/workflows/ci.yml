@@ -84,7 +84,7 @@ jobs:
             fi
             CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
-          if echo "$CHANGED" | grep -Eq '^(src-tauri/|\.github/workflows/)'; then
+          if echo "$CHANGED" | grep -Eq '^(src-tauri/|scripts/|\.github/workflows/)'; then
             echo "run_native=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_native=false" >> "$GITHUB_OUTPUT"
@@ -209,6 +209,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7

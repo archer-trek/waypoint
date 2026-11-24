@@ -190,23 +190,26 @@ function resolveBuildPlan(options) {
   };
 }
 
-function findGeneratedDmg(dmgBundleDir, expectedOutputPath) {
+function findGeneratedDmg(dmgBundleDir, productName, version, buildStartMs) {
   if (!existsSync(dmgBundleDir)) {
     throw new Error(`Expected DMG bundle directory not found: ${dmgBundleDir}`);
   }
+  const tauriPrefix = `${productName}_${version}_`;
   const candidates = readdirSync(dmgBundleDir)
-    .filter((name) => name.endsWith(".dmg") && !name.startsWith("rw."))
-    .map((name) => resolve(dmgBundleDir, name))
-    .filter((fullPath) => fullPath !== expectedOutputPath)
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+    .filter((name) => name.startsWith(tauriPrefix) && name.endsWith(".dmg"))
+    .map((name) => {
+      const fullPath = resolve(dmgBundleDir, name);
+      return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
+    })
+    .filter((entry) => entry.mtimeMs >= buildStartMs - 1000)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
 
   if (candidates.length === 0) {
-    if (existsSync(expectedOutputPath)) {
-      return expectedOutputPath;
-    }
-    throw new Error(`No generated .dmg found in ${dmgBundleDir}`);
+    throw new Error(
+      `No freshly generated ${tauriPrefix}*.dmg found in ${dmgBundleDir}`,
+    );
   }
-  return candidates[0];
+  return candidates[0].fullPath;
 }
 
 function main() {
@@ -246,6 +249,7 @@ function main() {
   console.log(
     `Building macOS DMG (${plan.target}, ${plan.signingMode}): version=${plan.version} (${plan.bundleVersion}), out=${plan.outputPath}`,
   );
+  const buildStartMs = Date.now();
   const build = spawnSync("npx", ["tauri", ...plan.tauriArgs], {
     cwd: ROOT_DIR,
     env: process.env,
@@ -257,7 +261,12 @@ function main() {
 
   let sourceDmg;
   try {
-    sourceDmg = findGeneratedDmg(plan.dmgBundleDir, plan.outputPath);
+    sourceDmg = findGeneratedDmg(
+      plan.dmgBundleDir,
+      plan.productName,
+      plan.version,
+      buildStartMs,
+    );
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);

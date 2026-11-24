@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Resolve build configuration
         id: meta
@@ -107,7 +109,11 @@ jobs:
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+          if IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "Release $RELEASE_TAG is already published (not a draft); refusing to overwrite." >&2
+              exit 1
+            fi
             gh release upload "$RELEASE_TAG" artifacts/macos/*.dmg --clobber
           else
             gh release create "$RELEASE_TAG" artifacts/macos/*.dmg \
