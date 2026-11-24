@@ -43,13 +43,11 @@ function readNextFlagValue(argv, index, flag) {
 
 function parseArgs(argv) {
   const options = {
-    targetRaw: process.env.WAYPOINT_MACOS_TARGET?.trim() || "aarch64-apple-darwin",
+    targetRaw: "aarch64-apple-darwin",
     outPath: undefined,
     outDir: undefined,
-    release:
-      process.env.WAYPOINT_MACOS_RELEASE === "1" ||
-      process.env.WAYPOINT_MACOS_RELEASE === "true",
-    versionRaw: process.env.WAYPOINT_MACOS_VERSION?.trim() || undefined,
+    release: false,
+    versionRaw: undefined,
     dryRun: false,
     help: false,
   };
@@ -136,9 +134,7 @@ function resolveBuildPlan(options) {
   const version = normalizeSemver(options.versionRaw ?? baseVersion);
   const { shortSha, commitCount } = readGitInfo();
 
-  const bundleVersion =
-    process.env.WAYPOINT_MACOS_BUNDLE_VERSION?.trim() ||
-    String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
+  const bundleVersion = String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
 
   const dmgFilename = options.release
     ? `${productName}-${version}-${archLabel}.dmg`

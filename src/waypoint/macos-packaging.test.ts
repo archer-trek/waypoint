@@ -6,22 +6,19 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
-const ROOT_DIR = (
-  globalThis as unknown as { process: { cwd: () => string; platform: string; env: Record<string, string | undefined> } }
-).process.cwd();
-const HOST_PLATFORM = (
-  globalThis as unknown as { process: { platform: string } }
-).process.platform;
+const NODE_PROCESS = (
+  globalThis as unknown as {
+    process: { cwd: () => string; platform: string; env: Record<string, string | undefined> };
+  }
+).process;
+const ROOT_DIR = NODE_PROCESS.cwd();
+const HOST_PLATFORM = NODE_PROCESS.platform;
 const SCRIPT_PATH = resolve(ROOT_DIR, "scripts/build-macos-dmg.mjs");
 
 function runBuildScript(args: string[], extraEnv: Record<string, string | undefined> = {}) {
   const baseEnv = {
-    ...(globalThis as unknown as { process: { env: Record<string, string | undefined> } }).process.env,
+    ...NODE_PROCESS.env,
     APPLE_SIGNING_IDENTITY: undefined,
-    WAYPOINT_MACOS_RELEASE: undefined,
-    WAYPOINT_MACOS_VERSION: undefined,
-    WAYPOINT_MACOS_TARGET: undefined,
-    WAYPOINT_MACOS_BUNDLE_VERSION: undefined,
     ...extraEnv,
   };
   return spawnSync("node", [SCRIPT_PATH, ...args], {
