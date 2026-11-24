@@ -54,6 +54,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
+      run_rust: ${{ steps.filter.outputs.run_rust }}
       run_android: ${{ steps.filter.outputs.run_android }}
       run_macos: ${{ steps.filter.outputs.run_macos }}
       run_windows: ${{ steps.filter.outputs.run_windows }}
@@ -74,6 +75,7 @@ jobs:
         run: |
           set -euo pipefail
           set_all() {
+            echo "run_rust=true" >> "$GITHUB_OUTPUT"
             echo "run_android=true" >> "$GITHUB_OUTPUT"
             echo "run_macos=true" >> "$GITHUB_OUTPUT"
             echo "run_windows=true" >> "$GITHUB_OUTPUT"
@@ -100,16 +102,24 @@ jobs:
             CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
 
+          RUN_RUST="false"
           RUN_ANDROID="false"
           RUN_MACOS="false"
           RUN_WINDOWS="false"
 
-          SHARED_RE='^(src-tauri/(src/|capabilities/|icons/|Cargo\.toml|Cargo\.lock|build\.rs|tauri\.conf\.json)|scripts/lib/|package\.json|package-lock\.json|\.nvmrc|\.github/workflows/ci\.yml)'
-          if printf '%s\n' "$CHANGED" | grep -Eq "$SHARED_RE"; then
+          RUST_RE='^(src-tauri/(src/|capabilities/|icons/|Cargo\.toml|Cargo\.lock|build\.rs|tauri\.conf\.json)|\.github/workflows/ci\.yml)'
+          SHARED_BUILD_RE='^(scripts/lib/|package\.json|package-lock\.json|\.nvmrc)'
+          if printf '%s\n' "$CHANGED" | grep -Eq "$RUST_RE"; then
+            RUN_RUST="true"
             RUN_ANDROID="true"
             RUN_MACOS="true"
             RUN_WINDOWS="true"
           else
+            if printf '%s\n' "$CHANGED" | grep -Eq "$SHARED_BUILD_RE"; then
+              RUN_ANDROID="true"
+              RUN_MACOS="true"
+              RUN_WINDOWS="true"
+            fi
             if printf '%s\n' "$CHANGED" | grep -Eq '^(src-tauri/gen/android/|scripts/build-android-apk\.mjs|Makefile)'; then
               RUN_ANDROID="true"
             fi
@@ -121,12 +131,53 @@ jobs:
             fi
           fi
 
+          echo "run_rust=${RUN_RUST}" >> "$GITHUB_OUTPUT"
           echo "run_android=${RUN_ANDROID}" >> "$GITHUB_OUTPUT"
           echo "run_macos=${RUN_MACOS}" >> "$GITHUB_OUTPUT"
           echo "run_windows=${RUN_WINDOWS}" >> "$GITHUB_OUTPUT"
 
-  native-checks:
-    name: Rust and Android checks
+  rust-checks:
+    name: Rust checks
+    needs: native-filter
+    if: needs.native-filter.outputs.run_rust == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux Tauri dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: linux-rust
+
+      - name: Check Rust formatting, clippy, and unit tests
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+  android-build:
+    name: Android APK build
     needs: native-filter
     if: needs.native-filter.outputs.run_android == 'true'
     runs-on: ubuntu-26.04
@@ -142,18 +193,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-
-      - name: Install Linux Tauri dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          sudo apt-get update -o Acquire::Retries=3
-          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libglib2.0-dev \
-            libssl-dev \
-            pkg-config
 
       - name: Setup Java 17
         uses: actions/setup-java@v5
@@ -175,25 +214,18 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
-          components: rustfmt, clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: android-aarch64
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
       - name: Install Node dependencies
         run: npm ci
-
-      - name: Check Rust formatting, clippy, and unit tests
-        working-directory: src-tauri
-        run: |
-          cargo fmt --check
-          cargo clippy --all-targets -- -D warnings
-          cargo test
 
       - name: Build Android Release APK (aarch64, unsigned, R8 enabled)
         run: node scripts/build-android-apk.mjs --unsigned --out-dir artifacts/android

@@ -192,7 +192,14 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(agentsMd).toContain("scripts/build-android-apk.mjs");
 
     const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf8");
+    expect(ciYml).toContain("rust-checks:");
+    expect(ciYml).toContain("if: needs.native-filter.outputs.run_rust == 'true'");
+    expect(ciYml).toContain("key: linux-rust");
+    expect(ciYml).toContain("android-build:");
     expect(ciYml).toContain("if: needs.native-filter.outputs.run_android == 'true'");
+    expect(ciYml).toContain("key: android-aarch64");
+    const androidBuildSection = ciYml.split("\n  android-build:")[1]?.split("\n  macos-build:")[0] ?? "";
+    expect(androidBuildSection).not.toContain("libwebkit2gtk");
     expect(ciYml).toContain("gradle/actions/setup-gradle@v6");
     expect(ciYml).toContain("cargo fmt --check");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
