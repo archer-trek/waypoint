@@ -8,11 +8,10 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   ANDROID_BUILD_TOOLS_VERSION: "36.1.0"
@@ -32,8 +31,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          # Current LTS. Vitest 5 accepts ^22.12, ^24, or >=26.
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install
@@ -49,14 +47,16 @@ jobs:
         run: npm test
 
       - name: Build
-        run: npm run build
+        run: npx vite build
 
   native-filter:
     name: Detect native changes
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
-      run_native: ${{ steps.filter.outputs.run_native }}
+      run_android: ${{ steps.filter.outputs.run_android }}
+      run_macos: ${{ steps.filter.outputs.run_macos }}
+      run_windows: ${{ steps.filter.outputs.run_windows }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -65,51 +65,90 @@ jobs:
 
       - name: Check native path changes
         id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "run_native=true" >> "$GITHUB_OUTPUT"
+          set_all() {
+            echo "run_android=true" >> "$GITHUB_OUTPUT"
+            echo "run_macos=true" >> "$GITHUB_OUTPUT"
+            echo "run_windows=true" >> "$GITHUB_OUTPUT"
+          }
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            set_all
             exit 0
           fi
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_SHA="${{ github.event.pull_request.base.sha }}"
-            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            BASE_SHA="$PR_BASE_SHA"
+            HEAD_SHA="$PR_HEAD_SHA"
+            if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              set_all
+              exit 0
+            fi
             CHANGED=$(git diff --name-only "${BASE_SHA}...${HEAD_SHA}")
           else
-            BASE_SHA="${{ github.event.before }}"
-            HEAD_SHA="${{ github.sha }}"
-            if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
-              echo "run_native=true" >> "$GITHUB_OUTPUT"
+            BASE_SHA="$PUSH_BEFORE"
+            HEAD_SHA="$PUSH_HEAD_SHA"
+            if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+              set_all
               exit 0
             fi
             CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
           fi
-          if echo "$CHANGED" | grep -Eq '^(src-tauri/|scripts/|\.github/workflows/)'; then
-            echo "run_native=true" >> "$GITHUB_OUTPUT"
+
+          RUN_ANDROID="false"
+          RUN_MACOS="false"
+          RUN_WINDOWS="false"
+
+          SHARED_RE='^(src-tauri/(src/|capabilities/|icons/|Cargo\.toml|Cargo\.lock|build\.rs|tauri\.conf\.json)|scripts/lib/|package\.json|package-lock\.json|\.nvmrc|\.github/workflows/ci\.yml)'
+          if printf '%s\n' "$CHANGED" | grep -Eq "$SHARED_RE"; then
+            RUN_ANDROID="true"
+            RUN_MACOS="true"
+            RUN_WINDOWS="true"
           else
-            echo "run_native=false" >> "$GITHUB_OUTPUT"
+            if printf '%s\n' "$CHANGED" | grep -Eq '^(src-tauri/gen/android/|scripts/build-android-apk\.mjs|Makefile)'; then
+              RUN_ANDROID="true"
+            fi
+            if printf '%s\n' "$CHANGED" | grep -Eq '^(scripts/build-macos-dmg\.mjs|\.github/workflows/release\.yml|Makefile)'; then
+              RUN_MACOS="true"
+            fi
+            if printf '%s\n' "$CHANGED" | grep -Eq '^(scripts/build-windows-installer\.mjs|\.github/workflows/release\.yml|Makefile)'; then
+              RUN_WINDOWS="true"
+            fi
           fi
+
+          echo "run_android=${RUN_ANDROID}" >> "$GITHUB_OUTPUT"
+          echo "run_macos=${RUN_MACOS}" >> "$GITHUB_OUTPUT"
+          echo "run_windows=${RUN_WINDOWS}" >> "$GITHUB_OUTPUT"
 
   native-checks:
     name: Rust and Android checks
     needs: native-filter
-    if: needs.native-filter.outputs.run_native == 'true'
+    if: needs.native-filter.outputs.run_android == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Install Linux Tauri dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libglib2.0-dev \
@@ -136,50 +175,41 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+          components: rustfmt, clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
 
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('src-tauri/gen/android/**/*.gradle*', 'src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
 
-      - name: Install & build frontend assets
-        run: |
-          npm ci
-          npm run build
+      - name: Install Node dependencies
+        run: npm ci
 
-      - name: Run Rust unit tests
+      - name: Check Rust formatting, clippy, and unit tests
         working-directory: src-tauri
-        run: cargo test
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
-      - name: Build Android Release APK (aarch64, R8 enabled)
-        run: npx tauri android build --apk --target aarch64 --ci
+      - name: Build Android Release APK (aarch64, unsigned, R8 enabled)
+        run: node scripts/build-android-apk.mjs --unsigned --out-dir artifacts/android
 
       - name: Run Android JVM unit tests
         working-directory: src-tauri/gen/android
-        run: ./gradlew :app:testUniversalDebugUnitTest
+        run: ./gradlew :app:testUniversalDebugUnitTest --no-daemon
 
       - name: Verify R8-kept bridge classes in Release APK
         run: |
           set -euo pipefail
-          APK_DIR="src-tauri/gen/android/app/build/outputs/apk/universal/release"
-          APK_PATH="${APK_DIR}/app-universal-release.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            APK_PATH="${APK_DIR}/app-universal-release-unsigned.apk"
-          fi
+          shopt -s nullglob
+          APKS=(artifacts/android/*.apk)
+          test "${#APKS[@]}" -eq 1
+          APK_PATH="${APKS[0]}"
           test -f "$APK_PATH"
-          if [ "${APK_PATH##*-}" != "unsigned.apk" ]; then
-            "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" verify --verbose "$APK_PATH"
-          fi
           DEX_TMP="$(mktemp -d)"
           trap 'rm -rf "$DEX_TMP"' EXIT
           unzip -qo "$APK_PATH" 'classes*.dex' -d "$DEX_TMP"
@@ -200,10 +230,17 @@ jobs:
             }
           done
 
+      - name: Upload Android APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-android-apk
+          path: artifacts/android/*.apk
+          retention-days: 14
+
   macos-build:
     name: macOS DMG build
     needs: native-filter
-    if: needs.native-filter.outputs.run_native == 'true'
+    if: needs.native-filter.outputs.run_macos == 'true'
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -215,13 +252,14 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -231,9 +269,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run Rust unit tests
+      - name: Run Rust clippy and unit tests
         working-directory: src-tauri
-        run: cargo test
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
       - name: Build macOS DMG
         run: node scripts/build-macos-dmg.mjs --out-dir artifacts/macos
@@ -248,25 +288,24 @@ jobs:
   windows-build:
     name: Windows NSIS build
     needs: native-filter
-    if: needs.native-filter.outputs.run_native == 'true'
+    if: needs.native-filter.outputs.run_windows == 'true'
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
@@ -276,9 +315,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run Rust unit tests
+      - name: Run Rust clippy and unit tests
         working-directory: src-tauri
-        run: cargo test
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
       - name: Build Windows NSIS installer
         run: node scripts/build-windows-installer.mjs --out-dir artifacts/windows

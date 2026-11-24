@@ -22,7 +22,7 @@ Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `sr
 
 ### Android build
 
-Build single-ABI (`arm64-v8a`) signed test APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`). Default Android SDK/NDK and Java 17 paths are pre-configured in `Makefile` and `scripts/build-android-apk.mjs`.
+Build single-ABI (`arm64-v8a`) APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`, `OUT_DIR=<dir>`, `VERSION=X.Y.Z`, `RELEASE=1`, `UNSIGNED=1`) or `node scripts/build-android-apk.mjs`. Running `npm ci`/`npm install` automatically activates `core.hooksPath=.githooks`.
 
 ### macOS build
 

@@ -1,77 +1,143 @@
 #!/usr/bin/env node
-import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  assertCommitCountSafe,
+  compareVersionDesc,
+  findFreshArtifact,
+  formatSizeMb,
+  normalizeSemver,
+  parseBuildArgs,
+  readGitInfo,
+  readTauriConf,
+  resolveOutputPath,
+  ROOT_DIR,
+  runTauriCli,
+} from "./lib/build-common.mjs";
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = resolve(SCRIPT_DIR, "..");
+const ANDROID_NDK_VERSION = "27.3.13750724";
 const ANDROID_DIR = resolve(ROOT_DIR, "src-tauri/gen/android");
+const ANDROID_APK_DIR = resolve(ANDROID_DIR, "app/build/outputs/apk/universal/release");
 const KEYSTORE_PROPS_PATH = resolve(ANDROID_DIR, "keystore.properties");
-const DEFAULT_RELEASE_APK = resolve(
-  ANDROID_DIR,
-  "app/build/outputs/apk/universal/release/app-universal-release.apk",
-);
 
-function parseArgs(argv) {
-  let outPath;
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === "--out" && argv[i + 1]) {
-      outPath = resolve(ROOT_DIR, argv[i + 1]);
-      i += 1;
+function printHelp() {
+  console.log(`Build Waypoint single-ABI (arm64-v8a) Android APK
+
+Usage:
+  node scripts/build-android-apk.mjs [options]
+
+Options:
+  --out <path>             Write final APK to exact file path
+  --out-dir <dir>          Write final APK into directory using computed filename
+  --release                Build release filename without -test.<shortSha> suffix
+  --version <semver>       Override versionName base semver (e.g. 0.1.0 or v0.1.0)
+  --unsigned               Build unsigned release APK without requiring keystore config
+  --dry-run                Print resolved build plan JSON without building
+  -h, --help               Show this help message`);
+}
+
+function readPropertiesFile(filePath) {
+  const props = {};
+  if (!existsSync(filePath)) return props;
+  const raw = readFileSync(filePath, "utf8");
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("!")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim();
+    if (val) {
+      props[key] = val;
     }
   }
-  return { outPath };
-}
-
-function readGitInfo() {
-  const shortSha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-    cwd: ROOT_DIR,
-    encoding: "utf8",
-  }).trim();
-  const commitCount = Number.parseInt(
-    execFileSync("git", ["rev-list", "--count", "HEAD"], {
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-    }).trim(),
-    10,
-  );
-  return { shortSha, commitCount };
-}
-
-function readBaseVersion() {
-  const conf = JSON.parse(
-    readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf8"),
-  );
-  return typeof conf.version === "string" && conf.version.trim()
-    ? conf.version.trim()
-    : "0.1.0";
+  return props;
 }
 
 function hasSigningConfigured() {
-  const hasEnv =
-    Boolean(process.env.WAYPOINT_ANDROID_KEYSTORE_PATH?.trim()) &&
-    Boolean(process.env.WAYPOINT_ANDROID_KEYSTORE_PASSWORD?.trim()) &&
-    Boolean(process.env.WAYPOINT_ANDROID_KEY_ALIAS?.trim()) &&
-    Boolean(process.env.WAYPOINT_ANDROID_KEY_PASSWORD?.trim());
-  return hasEnv || existsSync(KEYSTORE_PROPS_PATH);
+  const props = readPropertiesFile(KEYSTORE_PROPS_PATH);
+  const resolveProp = (envName, propName) =>
+    Boolean(process.env[envName]?.trim() || props[propName]?.trim());
+  return (
+    resolveProp("WAYPOINT_ANDROID_KEYSTORE_PATH", "storeFile") &&
+    resolveProp("WAYPOINT_ANDROID_KEYSTORE_PASSWORD", "storePassword") &&
+    resolveProp("WAYPOINT_ANDROID_KEY_ALIAS", "keyAlias") &&
+    resolveProp("WAYPOINT_ANDROID_KEY_PASSWORD", "keyPassword")
+  );
 }
 
-function findApksigner() {
+function resolveExistingPath(candidates) {
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function resolveAndroidToolchainEnv() {
+  const sdkCandidates = [
+    process.env.ANDROID_HOME?.trim(),
+    process.env.ANDROID_SDK_ROOT?.trim(),
+    ...(process.platform === "darwin" ? [resolve(homedir(), "Library/Android/sdk")] : []),
+    resolve(homedir(), "Android/Sdk"),
+  ];
+  const androidHome = resolveExistingPath(sdkCandidates);
+
+  const ndkCandidates = [
+    process.env.NDK_HOME?.trim(),
+    process.env.ANDROID_NDK_HOME?.trim(),
+    ...(androidHome ? [resolve(androidHome, "ndk", ANDROID_NDK_VERSION)] : []),
+  ];
+  const ndkHome = resolveExistingPath(ndkCandidates);
+
+  let darwinJavaHome;
+  if (process.platform === "darwin") {
+    try {
+      darwinJavaHome = execFileSync("/usr/libexec/java_home", ["-v", "17"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+    } catch {
+      darwinJavaHome = undefined;
+    }
+  }
+  const javaCandidates = [
+    process.env.JAVA_HOME?.trim(),
+    darwinJavaHome,
+    "/usr/lib/jvm/java-17-openjdk-arm64",
+    "/usr/lib/jvm/java-17-openjdk-amd64",
+  ];
+  const javaHome = resolveExistingPath(javaCandidates);
+
+  return { androidHome, ndkHome, javaHome };
+}
+
+function findBuildTool(toolName, androidHome) {
   const sdkRoots = [
-    process.env.ANDROID_HOME,
-    process.env.ANDROID_SDK_ROOT,
+    androidHome,
+    process.env.ANDROID_HOME?.trim(),
+    process.env.ANDROID_SDK_ROOT?.trim(),
+    ...(process.platform === "darwin" ? [resolve(homedir(), "Library/Android/sdk")] : []),
     resolve(homedir(), "Android/Sdk"),
   ].filter(Boolean);
 
-  for (const sdk of sdkRoots) {
+  const fileNames =
+    process.platform === "win32"
+      ? [`${toolName}.bat`, `${toolName}.exe`, toolName]
+      : [toolName];
+
+  for (const sdk of new Set(sdkRoots)) {
     const btDir = resolve(sdk, "build-tools");
     if (!existsSync(btDir)) continue;
-    const versions = readdirSync(btDir).sort().reverse();
+    const versions = readdirSync(btDir).sort(compareVersionDesc);
     for (const ver of versions) {
-      const candidate = resolve(btDir, ver, "apksigner");
-      if (existsSync(candidate)) return candidate;
+      for (const fileName of fileNames) {
+        const candidate = resolve(btDir, ver, fileName);
+        if (existsSync(candidate)) return candidate;
+      }
     }
   }
   return null;
@@ -88,113 +154,175 @@ function cleanOtherAbiJniLibs() {
   }
 }
 
-function main() {
-  const { outPath } = parseArgs(process.argv.slice(2));
-  if (!hasSigningConfigured()) {
-    console.error(
-      "Missing Android release signing config. Set WAYPOINT_ANDROID_KEYSTORE_* env vars or create src-tauri/gen/android/keystore.properties.",
+function resolveBuildPlan(options) {
+  const signingMode = options.unsigned ? "unsigned" : "keystore";
+  if (!options.unsigned && !hasSigningConfigured()) {
+    throw new Error(
+      "Missing Android release signing config. Set WAYPOINT_ANDROID_KEYSTORE_* env vars, create src-tauri/gen/android/keystore.properties, or pass --unsigned.",
     );
-    process.exit(1);
   }
 
-  const { shortSha, commitCount } = readGitInfo();
-  const baseVersion = readBaseVersion();
-  const versionCode =
-    process.env.WAYPOINT_ANDROID_VERSION_CODE?.trim() ||
-    String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
-  const versionName =
-    process.env.WAYPOINT_ANDROID_VERSION_NAME?.trim() ||
-    `${baseVersion}-test.${shortSha}`;
-
-  cleanOtherAbiJniLibs();
-
-  const androidHome =
-    process.env.ANDROID_HOME?.trim() ||
-    process.env.ANDROID_SDK_ROOT?.trim() ||
-    resolve(homedir(), "Android/Sdk");
-  const ndkHome =
-    process.env.NDK_HOME?.trim() ||
-    process.env.ANDROID_NDK_HOME?.trim() ||
-    resolve(androidHome, "ndk/27.3.13750724");
-  const javaHome =
-    process.env.JAVA_HOME?.trim() ||
-    (existsSync("/usr/lib/jvm/java-17-openjdk-arm64")
-      ? "/usr/lib/jvm/java-17-openjdk-arm64"
-      : undefined);
-
-  const env = {
-    ...process.env,
-    ...(androidHome && existsSync(androidHome)
-      ? { ANDROID_HOME: androidHome, ANDROID_SDK_ROOT: androidHome }
-      : {}),
-    ...(ndkHome && existsSync(ndkHome)
-      ? { NDK_HOME: ndkHome, ANDROID_NDK_HOME: ndkHome }
-      : {}),
-    ...(javaHome ? { JAVA_HOME: javaHome } : {}),
-    WAYPOINT_ANDROID_ABI_FILTERS: "arm64-v8a",
-    WAYPOINT_ANDROID_VERSION_CODE: versionCode,
-    WAYPOINT_ANDROID_VERSION_NAME: versionName,
-  };
-
-  console.log(
-    `Building single-ABI (arm64-v8a) signed APK: versionCode=${versionCode}, versionName=${versionName}`,
+  const { productName, baseVersion } = readTauriConf();
+  const version = normalizeSemver(
+    options.versionRaw ?? baseVersion,
+    "Android",
+    "Android versionName base requires strict X.Y.Z semver.",
   );
-  const build = spawnSync(
-    "npx",
-    ["tauri", "android", "build", "--target", "aarch64", "--apk"],
-    {
-      cwd: ROOT_DIR,
-      env,
-      stdio: "inherit",
+
+  const hasExplicitVersionCode = Boolean(process.env.WAYPOINT_ANDROID_VERSION_CODE?.trim());
+  const { shortSha, commitCount, isShallow } = readGitInfo({ needCommitCount: true });
+  const versionCode = hasExplicitVersionCode
+    ? process.env.WAYPOINT_ANDROID_VERSION_CODE.trim()
+    : String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
+
+  const computedVersionName = options.release ? version : `${version}-test.${shortSha}`;
+  const versionName = options.versionRaw
+    ? computedVersionName
+    : process.env.WAYPOINT_ANDROID_VERSION_NAME?.trim() || computedVersionName;
+
+  const apkFilename = options.unsigned
+    ? `${productName}-${versionName}-arm64-unsigned.apk`
+    : `${productName}-${versionName}-arm64.apk`;
+  const sourceApkName = options.unsigned
+    ? "app-universal-release-unsigned.apk"
+    : "app-universal-release.apk";
+
+  const outputPath = resolveOutputPath({
+    outPath: options.outPath,
+    outDir: options.outDir,
+    defaultDir: ANDROID_APK_DIR,
+    filename: apkFilename,
+  });
+
+  const tauriArgs = ["android", "build", "--target", "aarch64", "--apk", "--ci"];
+
+  return {
+    isShallow,
+    hasExplicitVersionCode,
+    sourceApkName,
+    plan: {
+      productName,
+      abi: "arm64-v8a",
+      version,
+      versionCode,
+      versionName,
+      release: options.release,
+      signingMode,
+      apkFilename,
+      outputPath,
+      tauriArgs,
     },
-  );
-  if (build.status !== 0) {
-    process.exit(build.status ?? 1);
-  }
+  };
+}
 
-  if (!existsSync(DEFAULT_RELEASE_APK)) {
-    console.error(`Expected APK not found at ${DEFAULT_RELEASE_APK}`);
+function main() {
+  let options;
+  try {
+    options = parseBuildArgs(process.argv.slice(2), {
+      allowTarget: false,
+      allowUnsigned: true,
+    });
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
-  const finalApk =
-    outPath ??
-    resolve(
-      ANDROID_DIR,
-      `app/build/outputs/apk/universal/release/waypoint-${versionName}-arm64.apk`,
-    );
-  mkdirSync(dirname(finalApk), { recursive: true });
-  if (finalApk !== DEFAULT_RELEASE_APK) {
-    copyFileSync(DEFAULT_RELEASE_APK, finalApk);
+  if (options.help) {
+    printHelp();
+    return;
   }
 
-  const entries = execFileSync("unzip", ["-Z1", finalApk], {
-    encoding: "utf8",
-  })
-    .split("\n")
-    .filter(Boolean);
-  const soEntries = entries.filter((name) => name.startsWith("lib/") && name.endsWith(".so"));
-  const nonArm64 = soEntries.filter((name) => !name.startsWith("lib/arm64-v8a/"));
-  if (soEntries.length === 0 || nonArm64.length > 0) {
-    console.error(`Unexpected native library ABIs in APK: ${soEntries.join(", ")}`);
+  let resolved;
+  try {
+    resolved = resolveBuildPlan(options);
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
+  const { plan, isShallow, hasExplicitVersionCode, sourceApkName } = resolved;
 
-  const apksigner = findApksigner();
+  if (options.dryRun) {
+    console.log(JSON.stringify(plan, null, 2));
+    return;
+  }
+
   let signerOutput = "";
-  if (apksigner) {
-    signerOutput = execFileSync(apksigner, ["verify", "--print-certs", finalApk], {
+  let soEntries = [];
+  try {
+    if (!hasExplicitVersionCode) {
+      assertCommitCountSafe({
+        isShallow,
+        release: plan.release,
+        label: "Android versionCode",
+      });
+    }
+
+    cleanOtherAbiJniLibs();
+
+    const { androidHome, ndkHome, javaHome } = resolveAndroidToolchainEnv();
+    const env = {
+      ...process.env,
+      ...(androidHome ? { ANDROID_HOME: androidHome, ANDROID_SDK_ROOT: androidHome } : {}),
+      ...(ndkHome ? { NDK_HOME: ndkHome, ANDROID_NDK_HOME: ndkHome } : {}),
+      ...(javaHome ? { JAVA_HOME: javaHome } : {}),
+      WAYPOINT_ANDROID_ABI_FILTERS: "arm64-v8a",
+      WAYPOINT_ANDROID_VERSION_CODE: plan.versionCode,
+      WAYPOINT_ANDROID_VERSION_NAME: plan.versionName,
+      ...(plan.signingMode === "unsigned" ? { WAYPOINT_ANDROID_UNSIGNED: "1" } : {}),
+    };
+
+    console.log(
+      `Building single-ABI (arm64-v8a) ${plan.signingMode} APK: versionCode=${plan.versionCode}, versionName=${plan.versionName}, out=${plan.outputPath}`,
+    );
+    const buildStartMs = Date.now();
+    runTauriCli(plan.tauriArgs, env);
+
+    const sourceApk = findFreshArtifact(
+      ANDROID_APK_DIR,
+      (name) => name === sourceApkName,
+      buildStartMs,
+      sourceApkName,
+    );
+
+    mkdirSync(dirname(plan.outputPath), { recursive: true });
+    if (sourceApk !== plan.outputPath) {
+      copyFileSync(sourceApk, plan.outputPath);
+    }
+
+    const entries = execFileSync("unzip", ["-Z1", plan.outputPath], {
       encoding: "utf8",
-    }).trim();
+    })
+      .split("\n")
+      .filter(Boolean);
+    soEntries = entries.filter((name) => name.startsWith("lib/") && name.endsWith(".so"));
+    const nonArm64 = soEntries.filter((name) => !name.startsWith("lib/arm64-v8a/"));
+    if (soEntries.length === 0 || nonArm64.length > 0) {
+      throw new Error(`Unexpected native library ABIs in APK: ${soEntries.join(", ")}`);
+    }
+
+    if (plan.signingMode === "keystore") {
+      const apksigner = findBuildTool("apksigner", androidHome);
+      if (!apksigner) {
+        throw new Error(
+          "apksigner not found in Android SDK build-tools; cannot verify signed release APK.",
+        );
+      }
+      signerOutput = execFileSync(apksigner, ["verify", "--print-certs", plan.outputPath], {
+        encoding: "utf8",
+      }).trim();
+    }
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 
-  const sizeBytes = statSync(finalApk).size;
-  const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(2);
-  console.log("\n=== Android Test APK Ready ===");
-  console.log(`Path: ${finalApk}`);
-  console.log(`Size: ${sizeMb} MB (${sizeBytes} bytes)`);
+  const sizeBytes = statSync(plan.outputPath).size;
+  console.log("\n=== Android APK Ready ===");
+  console.log(`Path: ${plan.outputPath}`);
+  console.log(`Size: ${formatSizeMb(sizeBytes)} MB (${sizeBytes} bytes)`);
   console.log(`ABIs: ${soEntries.join(", ")}`);
-  console.log(`Version: ${versionName} (${versionCode})`);
+  console.log(`Version: ${plan.versionName} (${plan.versionCode})`);
+  console.log(`Signing: ${plan.signingMode}`);
   if (signerOutput) {
     console.log(signerOutput);
   }

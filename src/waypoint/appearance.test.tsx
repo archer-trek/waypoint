@@ -399,9 +399,7 @@ describe("本地外观三档切换与首次连接迁移 (#86)", () => {
     expect(lightOption).toHaveAttribute("aria-checked", "true");
     expect(document.documentElement).not.toHaveClass("dark");
 
-    // @ts-expect-error Node.js built-in fs in Vitest test runner
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Node.js built-in path in Vitest test runner
     const { resolve } = await import("node:path");
     const cwd = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
     for (const relPath of ["src/waypoint/WaypointApp.tsx", "src/waypoint/workspace/SettingsView.tsx"]) {

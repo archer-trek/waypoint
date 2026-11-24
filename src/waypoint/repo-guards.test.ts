@@ -1,6 +1,4 @@
-// @ts-expect-error Node.js built-in fs in Vitest test runner
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-// @ts-expect-error Node.js built-in path in Vitest test runner
 import { join, relative, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
@@ -359,7 +357,62 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(ciYml).toContain(".github/workflows/");
     expect(ciYml).toContain("cargo test");
     expect(ciYml).toContain("./gradlew :app:testUniversalDebugUnitTest");
-    expect(ciYml).toContain("npx tauri android build --apk --target aarch64 --ci");
+    expect(ciYml).toContain("node scripts/build-android-apk.mjs --unsigned");
     expect(ciYml).toContain("dexdump");
+  });
+
+  test("Version & toolchain single-source-of-truth and CI/Release workflow hygiene guards", () => {
+    const pkg = JSON.parse(readFileSync(resolve(ROOT_DIR, "package.json"), "utf-8")) as {
+      version: string;
+    };
+    const tauriConf = JSON.parse(
+      readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf-8"),
+    ) as { version: string };
+    const cargoToml = readFileSync(resolve(ROOT_DIR, "src-tauri/Cargo.toml"), "utf-8");
+    const cargoVersion = cargoToml.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(tauriConf.version).toBe(pkg.version);
+    expect(cargoVersion).toBe(pkg.version);
+
+    const nvmrcPath = resolve(ROOT_DIR, ".nvmrc");
+    expect(existsSync(nvmrcPath)).toBe(true);
+    expect(readFileSync(nvmrcPath, "utf-8").trim()).toBe("26");
+
+    const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf-8");
+    const releaseYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/release.yml"), "utf-8");
+
+    expect(ciYml).toContain("node-version-file: .nvmrc");
+    expect(ciYml).not.toContain("node-version: 26");
+    expect(releaseYml).toContain("node-version-file: .nvmrc");
+    expect(releaseYml).not.toContain("node-version: 26");
+
+    expect(ciYml).not.toContain("actions: write");
+    expect(ciYml).toContain("cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
+
+    const releaseHeader = releaseYml.split("\njobs:")[0] ?? "";
+    expect(releaseHeader).toContain("contents: read");
+    expect(releaseHeader).not.toContain("contents: write");
+    expect(releaseYml).toContain("cancel-in-progress: false");
+    const draftJobSection = releaseYml.split("\n  draft-release:")[1] ?? "";
+    expect(draftJobSection).toContain("contents: write");
+    expect(releaseYml.match(/contents:\s*write/g)?.length).toBe(1);
+
+    const ndkVersion = "27.3.13750724";
+    expect(ciYml).toContain(`ANDROID_NDK_VERSION: "${ndkVersion}"`);
+    const gradleKts = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
+      "utf-8",
+    );
+    expect(gradleKts).toContain(`ndkVersion = "${ndkVersion}"`);
+    expect(gradleKts).toContain("compileSdk = 37");
+    expect(ciYml).toContain('ANDROID_COMPILE_SDK_VERSION: "37.0"');
+
+    const makefile = readFileSync(resolve(ROOT_DIR, "Makefile"), "utf-8");
+    expect(makefile).toContain(`ANDROID_NDK_VERSION := ${ndkVersion}`);
+    const androidScript = readFileSync(resolve(ROOT_DIR, "scripts/build-android-apk.mjs"), "utf-8");
+    expect(androidScript).toContain(`ANDROID_NDK_VERSION = "${ndkVersion}"`);
+
+    expect(existsSync(resolve(ROOT_DIR, ".github/dependabot.yml"))).toBe(true);
   });
 });

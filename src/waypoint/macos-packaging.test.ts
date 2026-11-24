@@ -1,8 +1,5 @@
-// @ts-expect-error Node.js built-in child_process in Vitest test runner
 import { spawnSync } from "node:child_process";
-// @ts-expect-error Node.js built-in fs in Vitest test runner
 import { existsSync, readFileSync } from "node:fs";
-// @ts-expect-error Node.js built-in path in Vitest test runner
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 
@@ -136,7 +133,7 @@ describe("build-macos-dmg CLI", () => {
     expect(mergedConfig.bundle.macOS.signingIdentity).toBeUndefined();
   });
 
-  test("rejects unsupported target and non-semver version", () => {
+  test("rejects unsupported target, non-semver version, and --out + --out-dir conflict, and honors CARGO_TARGET_DIR", () => {
     const badTarget = runBuildScript(["--dry-run", "--target", "armv7-apple-darwin"]);
     expect(badTarget.status).not.toBe(0);
     expect(badTarget.stderr).toContain("Unsupported macOS target");
@@ -144,6 +141,26 @@ describe("build-macos-dmg CLI", () => {
     const badVersion = runBuildScript(["--dry-run", "--version", "0.1.0-test.123"]);
     expect(badVersion.status).not.toBe(0);
     expect(badVersion.stderr).toContain("Invalid macOS version");
+
+    const bothOut = runBuildScript(["--dry-run", "--out", "a.dmg", "--out-dir", "artifacts"]);
+    expect(bothOut.status).not.toBe(0);
+    expect(bothOut.stderr).toContain("Cannot specify both --out and --out-dir");
+
+    const customTargetRes = runBuildScript(["--dry-run"], {
+      CARGO_TARGET_DIR: "tmp/cargo-target",
+    });
+    expect(customTargetRes.status, customTargetRes.stderr).toBe(0);
+    const customTargetPlan = JSON.parse(customTargetRes.stdout) as {
+      dmgBundleDir: string;
+      dmgFilename: string;
+      outputPath: string;
+    };
+    expect(customTargetPlan.dmgBundleDir).toBe(
+      resolve(ROOT_DIR, "tmp/cargo-target/aarch64-apple-darwin/release/bundle/dmg"),
+    );
+    expect(customTargetPlan.outputPath).toBe(
+      resolve(customTargetPlan.dmgBundleDir, customTargetPlan.dmgFilename),
+    );
   });
 
   if (HOST_PLATFORM !== "darwin") {
@@ -213,12 +230,15 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
 
   test("ci.yml runs macos-build on macos-latest gated by native-filter and uploads DMG artifact", () => {
     const ciYml = readFileSync(resolve(ROOT_DIR, ".github/workflows/ci.yml"), "utf8");
-    expect(ciYml).toContain("src-tauri/|scripts/|\\.github/workflows/");
+    expect(ciYml).toContain("run_macos:");
+    expect(ciYml).toContain("scripts/build-macos-dmg\\.mjs");
     expect(ciYml).toContain("macos-build:");
+    expect(ciYml).toContain("if: needs.native-filter.outputs.run_macos == 'true'");
     expect(ciYml).toContain("runs-on: macos-latest");
     expect(ciYml).toContain("needs: native-filter");
     expect(ciYml).toContain("fetch-depth: 0");
     expect(ciYml).toContain("targets: aarch64-apple-darwin");
+    expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
     expect(ciYml).toContain("node scripts/build-macos-dmg.mjs");
     expect(ciYml).toContain("actions/upload-artifact@v7");
     expect(ciYml).toContain(".dmg");
@@ -234,12 +254,15 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("tags:");
     expect(releaseYml).toContain('"v*"');
     expect(releaseYml).toContain("workflow_dispatch:");
+    expect(releaseYml).toContain("cancel-in-progress: false");
     expect(releaseYml).toContain("contents: write");
+    expect(releaseYml).toContain("verify:");
     expect(releaseYml).toContain("runs-on: macos-latest");
     expect(releaseYml).toContain("fetch-depth: 0");
     expect(releaseYml).toContain("universal-apple-darwin");
     expect(releaseYml).toContain("scripts/build-macos-dmg.mjs");
     expect(releaseYml).toContain("--release");
+    expect(releaseYml).toContain("SHA256SUMS.txt");
     expect(releaseYml).toContain("isDraft");
     expect(releaseYml).toContain("gh release create");
     expect(releaseYml).toContain("--draft");

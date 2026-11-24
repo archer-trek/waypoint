@@ -947,9 +947,7 @@ describe("ComposerView (#89)", () => {
 
 describe("Theme hygiene (#89)", () => {
   test("owned TSX files contain zero hardcoded hex literals and MessageBody renders math errors cleanly", async () => {
-    // @ts-expect-error Node.js built-in fs in Vitest test runner
     const { readFileSync } = await import("node:fs");
-    // @ts-expect-error Node.js built-in path in Vitest test runner
     const { resolve } = await import("node:path");
     const rootDir = (globalThis as unknown as { process: { cwd: () => string } }).process.cwd();
 

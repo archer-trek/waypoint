@@ -38,11 +38,11 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   meta:
@@ -75,6 +75,13 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             PLATFORMS="all"
           fi
+          case "$PLATFORMS" in
+            all|macos|windows) ;;
+            *)
+              echo "Unsupported platforms input '${PLATFORMS}'." >&2
+              exit 1
+              ;;
+          esac
 
           BUILD_MACOS="false"
           BUILD_WINDOWS="false"
@@ -86,27 +93,53 @@ jobs:
           fi
 
           MACOS_TARGET="${INPUT_MACOS_TARGET:-aarch64-apple-darwin}"
-          if [ "$MACOS_TARGET" = "universal-apple-darwin" ]; then
-            MACOS_RUST_TARGETS="aarch64-apple-darwin,x86_64-apple-darwin"
-          else
-            MACOS_RUST_TARGETS="$MACOS_TARGET"
-          fi
+          case "$MACOS_TARGET" in
+            aarch64-apple-darwin|x86_64-apple-darwin)
+              MACOS_RUST_TARGETS="$MACOS_TARGET"
+              ;;
+            universal-apple-darwin)
+              MACOS_RUST_TARGETS="aarch64-apple-darwin,x86_64-apple-darwin"
+              ;;
+            *)
+              echo "Unsupported macOS target '${MACOS_TARGET}'." >&2
+              exit 1
+              ;;
+          esac
 
           WINDOWS_TARGET="${INPUT_WINDOWS_TARGET:-x86_64-pc-windows-msvc}"
-          if [ "$WINDOWS_TARGET" = "aarch64-pc-windows-msvc" ]; then
-            WINDOWS_RUNNER="windows-11-arm"
-          else
-            WINDOWS_RUNNER="windows-latest"
+          case "$WINDOWS_TARGET" in
+            x86_64-pc-windows-msvc)
+              WINDOWS_RUNNER="windows-latest"
+              ;;
+            aarch64-pc-windows-msvc)
+              WINDOWS_RUNNER="windows-11-arm"
+              ;;
+            *)
+              echo "Unsupported Windows target '${WINDOWS_TARGET}'." >&2
+              exit 1
+              ;;
+          esac
+
+          PKG_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          TAURI_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")"
+          CARGO_VERSION="$(node -p "require('fs').readFileSync('src-tauri/Cargo.toml','utf8').match(/^\\[package\\][\\s\\S]*?^version\\s*=\\s*\"([^\"]+)\"/m)?.[1] ?? ''")"
+          if [ "$PKG_VERSION" != "$TAURI_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "Manifest version mismatch: package.json=${PKG_VERSION}, tauri.conf.json=${TAURI_VERSION}, Cargo.toml=${CARGO_VERSION}" >&2
+            exit 1
           fi
 
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
             RELEASE_VERSION="${RELEASE_TAG#v}"
+            if [ "$RELEASE_VERSION" != "$PKG_VERSION" ]; then
+              echo "Release tag version '${RELEASE_VERSION}' does not match manifest version '${PKG_VERSION}'." >&2
+              exit 1
+            fi
           else
             if [ -n "${INPUT_VERSION}" ]; then
               RELEASE_VERSION="${INPUT_VERSION#v}"
             else
-              RELEASE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")"
+              RELEASE_VERSION="$TAURI_VERSION"
             fi
             RELEASE_TAG="v${RELEASE_VERSION}"
           fi
@@ -127,6 +160,36 @@ jobs:
             echo "tag=${RELEASE_TAG}"
           } >> "$GITHUB_OUTPUT"
 
+  verify:
+    name: Verify frontend lint, types, tests, and build
+    needs: meta
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npx vite build
+
   build-macos:
     name: Build macOS Release DMG
     needs: meta
@@ -142,28 +205,46 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ needs.meta.outputs.macos_rust_targets }}
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ needs.meta.outputs.macos_target }}
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Run Rust clippy and unit tests
+        working-directory: src-tauri
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
       - name: Build macOS Release DMG
+        env:
+          MACOS_TARGET: ${{ needs.meta.outputs.macos_target }}
+          RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         run: |
           node scripts/build-macos-dmg.mjs \
             --release \
-            --target "${{ needs.meta.outputs.macos_target }}" \
-            --version "${{ needs.meta.outputs.version }}" \
+            --target "$MACOS_TARGET" \
+            --version "$RELEASE_VERSION" \
             --out-dir artifacts/macos
 
       - name: Upload macOS Release artifact
@@ -182,30 +263,44 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: 26
+          node-version-file: .nvmrc
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ needs.meta.outputs.windows_target }}
+          components: clippy
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ needs.meta.outputs.windows_target }}
 
       - name: Install dependencies
         run: npm ci
 
+      - name: Run Rust clippy and unit tests
+        working-directory: src-tauri
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
       - name: Build Windows Release NSIS installer
-        run: node scripts/build-windows-installer.mjs --release --target "${{ needs.meta.outputs.windows_target }}" --version "${{ needs.meta.outputs.version }}" --out-dir artifacts/windows
+        env:
+          WINDOWS_TARGET: ${{ needs.meta.outputs.windows_target }}
+          RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+          WINDOWS_SIGN_COMMAND: ${{ secrets.WINDOWS_SIGN_COMMAND }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+          WINDOWS_DIGEST_ALGORITHM: ${{ secrets.WINDOWS_DIGEST_ALGORITHM }}
+          WINDOWS_TSP: ${{ secrets.WINDOWS_TSP }}
+        run: node scripts/build-windows-installer.mjs --release --target "$env:WINDOWS_TARGET" --version "$env:RELEASE_VERSION" --out-dir artifacts/windows
 
       - name: Upload Windows Release artifact
         uses: actions/upload-artifact@v7
@@ -216,8 +311,10 @@ jobs:
 
   draft-release:
     name: Create or Update Draft GitHub Release
-    needs: [meta, build-macos, build-windows]
-    if: ${{ always() && needs.meta.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') }}
+    needs: [meta, verify, build-macos, build-windows]
+    permissions:
+      contents: write
+    if: ${{ always() && needs.meta.result == 'success' && needs.verify.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -237,19 +334,34 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          FILES=(release-artifacts/*.dmg release-artifacts/*.exe)
-          if [ "${#FILES[@]}" -eq 0 ]; then
+          INSTALLERS=(release-artifacts/*.dmg release-artifacts/*.exe)
+          if [ "${#INSTALLERS[@]}" -eq 0 ]; then
             echo "No release artifacts found in release-artifacts/." >&2
             exit 1
           fi
 
-          if IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft -q .isDraft 2>/dev/null)"; then
+          BASENAMES=()
+          for f in "${INSTALLERS[@]}"; do
+            BASENAMES+=("$(basename "$f")")
+          done
+          (cd release-artifacts && sha256sum "${BASENAMES[@]}" > SHA256SUMS.txt)
+          FILES=("${INSTALLERS[@]}" release-artifacts/SHA256SUMS.txt)
+
+          VIEW_ERR_FILE="$(mktemp)"
+          trap 'rm -f "$VIEW_ERR_FILE"' EXIT
+          if IS_DRAFT="$(gh release view "$RELEASE_TAG" --json isDraft -q .isDraft 2>"$VIEW_ERR_FILE")"; then
             if [ "$IS_DRAFT" != "true" ]; then
               echo "Release $RELEASE_TAG is already published (not a draft); refusing to overwrite." >&2
               exit 1
             fi
+            gh release edit "$RELEASE_TAG" --target "$GITHUB_SHA"
             gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
           else
+            VIEW_ERR="$(cat "$VIEW_ERR_FILE")"
+            if ! printf '%s' "$VIEW_ERR" | grep -qi "release not found"; then
+              echo "$VIEW_ERR" >&2
+              exit 1
+            fi
             gh release create "$RELEASE_TAG" "${FILES[@]}" \
               --draft \
               --target "$GITHUB_SHA" \

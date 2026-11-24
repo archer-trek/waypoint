@@ -112,7 +112,10 @@ fn is_valid_mime_essence(essence: &str) -> bool {
     let valid_token = |part: &str| {
         part.bytes().all(|b| {
             b.is_ascii_alphanumeric()
-                || matches!(b, b'!' | b'#' | b'$' | b'&' | b'-' | b'^' | b'_' | b'.' | b'+')
+                || matches!(
+                    b,
+                    b'!' | b'#' | b'$' | b'&' | b'-' | b'^' | b'_' | b'.' | b'+'
+                )
         })
     };
     valid_token(major) && valid_token(minor)
@@ -221,7 +224,10 @@ mod tests {
 
     #[test]
     fn sanitize_media_filename_strips_paths_and_traversal() {
-        assert_eq!(sanitize_media_filename("../secret/report.pdf"), "report.pdf");
+        assert_eq!(
+            sanitize_media_filename("../secret/report.pdf"),
+            "report.pdf"
+        );
         assert_eq!(
             sanitize_media_filename("C:\\Users\\a\\..pic:1.png"),
             "_pic_1.png"

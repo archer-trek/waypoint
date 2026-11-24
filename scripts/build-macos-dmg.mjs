@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
-const ROOT_DIR = resolve(SCRIPT_DIR, "..");
-const TAURI_CONF_PATH = resolve(ROOT_DIR, "src-tauri/tauri.conf.json");
+import {
+  assertCommitCountSafe,
+  findFreshArtifact,
+  formatSizeMb,
+  normalizeSemver,
+  parseBuildArgs,
+  readGitInfo,
+  readTauriConf,
+  resolveCargoTargetDir,
+  resolveOutputPath,
+  runTauriCli,
+} from "./lib/build-common.mjs";
 
 const TARGET_MAP = {
   "aarch64-apple-darwin": { target: "aarch64-apple-darwin", archLabel: "arm64" },
@@ -15,6 +22,12 @@ const TARGET_MAP = {
   x64: { target: "x86_64-apple-darwin", archLabel: "x64" },
   "universal-apple-darwin": { target: "universal-apple-darwin", archLabel: "universal" },
   universal: { target: "universal-apple-darwin", archLabel: "universal" },
+};
+
+const EXPECTED_MACHO_ARCHS = {
+  "aarch64-apple-darwin": ["arm64"],
+  "x86_64-apple-darwin": ["x86_64"],
+  "universal-apple-darwin": ["arm64", "x86_64"],
 };
 
 function printHelp() {
@@ -33,53 +46,6 @@ Options:
   -h, --help               Show this help message`);
 }
 
-function readNextFlagValue(argv, index, flag) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new Error(`Missing value for ${flag}`);
-  }
-  return value;
-}
-
-function parseArgs(argv) {
-  const options = {
-    targetRaw: "aarch64-apple-darwin",
-    outPath: undefined,
-    outDir: undefined,
-    release: false,
-    versionRaw: undefined,
-    dryRun: false,
-    help: false,
-  };
-
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === "-h" || arg === "--help") {
-      options.help = true;
-    } else if (arg === "--dry-run") {
-      options.dryRun = true;
-    } else if (arg === "--release") {
-      options.release = true;
-    } else if (arg === "--target") {
-      options.targetRaw = readNextFlagValue(argv, i, "--target");
-      i += 1;
-    } else if (arg === "--out") {
-      options.outPath = readNextFlagValue(argv, i, "--out");
-      i += 1;
-    } else if (arg === "--out-dir") {
-      options.outDir = readNextFlagValue(argv, i, "--out-dir");
-      i += 1;
-    } else if (arg === "--version") {
-      options.versionRaw = readNextFlagValue(argv, i, "--version");
-      i += 1;
-    } else {
-      throw new Error(`Unknown argument: ${arg}`);
-    }
-  }
-
-  return options;
-}
-
 function resolveTarget(rawTarget) {
   const resolved = TARGET_MAP[rawTarget];
   if (!resolved) {
@@ -90,49 +56,15 @@ function resolveTarget(rawTarget) {
   return resolved;
 }
 
-function normalizeSemver(rawVersion) {
-  const stripped = rawVersion.trim().replace(/^v/i, "");
-  if (!/^\d+\.\d+\.\d+$/.test(stripped)) {
-    throw new Error(
-      `Invalid macOS version "${rawVersion}". Apple CFBundleShortVersionString requires strict X.Y.Z semver.`,
-    );
-  }
-  return stripped;
-}
-
-function readTauriConf() {
-  const conf = JSON.parse(readFileSync(TAURI_CONF_PATH, "utf8"));
-  const productName =
-    typeof conf.productName === "string" && conf.productName.trim()
-      ? conf.productName.trim()
-      : "Waypoint";
-  const baseVersion =
-    typeof conf.version === "string" && conf.version.trim()
-      ? conf.version.trim()
-      : "0.1.0";
-  return { productName, baseVersion };
-}
-
-function readGitInfo() {
-  const shortSha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
-    cwd: ROOT_DIR,
-    encoding: "utf8",
-  }).trim();
-  const commitCount = Number.parseInt(
-    execFileSync("git", ["rev-list", "--count", "HEAD"], {
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-    }).trim(),
-    10,
-  );
-  return { shortSha, commitCount };
-}
-
 function resolveBuildPlan(options) {
   const { target, archLabel } = resolveTarget(options.targetRaw);
   const { productName, baseVersion } = readTauriConf();
-  const version = normalizeSemver(options.versionRaw ?? baseVersion);
-  const { shortSha, commitCount } = readGitInfo();
+  const version = normalizeSemver(
+    options.versionRaw ?? baseVersion,
+    "macOS",
+    "Apple CFBundleShortVersionString requires strict X.Y.Z semver.",
+  );
+  const { shortSha, commitCount, isShallow } = readGitInfo({ needCommitCount: true });
 
   const bundleVersion = String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
 
@@ -140,12 +72,15 @@ function resolveBuildPlan(options) {
     ? `${productName}-${version}-${archLabel}.dmg`
     : `${productName}-${version}-test.${shortSha}-${archLabel}.dmg`;
 
-  const dmgBundleDir = resolve(ROOT_DIR, "src-tauri/target", target, "release/bundle/dmg");
-  const outputPath = options.outPath
-    ? resolve(ROOT_DIR, options.outPath)
-    : options.outDir
-      ? resolve(ROOT_DIR, options.outDir, dmgFilename)
-      : resolve(dmgBundleDir, dmgFilename);
+  const cargoTargetDir = resolveCargoTargetDir();
+  const dmgBundleDir = resolve(cargoTargetDir, target, "release/bundle/dmg");
+  const appBundlePath = resolve(cargoTargetDir, target, "release/bundle/macos", `${productName}.app`);
+  const outputPath = resolveOutputPath({
+    outPath: options.outPath,
+    outDir: options.outDir,
+    defaultDir: dmgBundleDir,
+    filename: dmgFilename,
+  });
 
   const hasSigningIdentity = Boolean(process.env.APPLE_SIGNING_IDENTITY?.trim());
   const signingMode = hasSigningIdentity ? "identity" : "ad-hoc";
@@ -172,46 +107,60 @@ function resolveBuildPlan(options) {
   ];
 
   return {
-    productName,
-    target,
-    archLabel,
-    version,
-    bundleVersion,
-    release: options.release,
-    signingMode,
-    dmgFilename,
-    dmgBundleDir,
-    outputPath,
-    tauriArgs,
+    isShallow,
+    plan: {
+      productName,
+      target,
+      archLabel,
+      version,
+      bundleVersion,
+      release: options.release,
+      signingMode,
+      dmgFilename,
+      dmgBundleDir,
+      appBundlePath,
+      outputPath,
+      tauriArgs,
+    },
   };
 }
 
-function findGeneratedDmg(dmgBundleDir, productName, version, buildStartMs) {
-  if (!existsSync(dmgBundleDir)) {
-    throw new Error(`Expected DMG bundle directory not found: ${dmgBundleDir}`);
+function verifyAppBundle(appBundlePath, target) {
+  if (!existsSync(appBundlePath)) {
+    throw new Error(`Expected macOS .app bundle not found at ${appBundlePath}`);
   }
-  const tauriPrefix = `${productName}_${version}_`;
-  const candidates = readdirSync(dmgBundleDir)
-    .filter((name) => name.startsWith(tauriPrefix) && name.endsWith(".dmg"))
-    .map((name) => {
-      const fullPath = resolve(dmgBundleDir, name);
-      return { fullPath, mtimeMs: statSync(fullPath).mtimeMs };
-    })
-    .filter((entry) => entry.mtimeMs >= buildStartMs - 1000)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const codesign = spawnSync("codesign", ["--verify", "--deep", "--strict", appBundlePath], {
+    encoding: "utf8",
+  });
+  if (codesign.error) {
+    throw codesign.error;
+  }
+  if (codesign.status !== 0) {
+    throw new Error(codesign.stderr?.trim() || `codesign verification failed for ${appBundlePath}`);
+  }
 
-  if (candidates.length === 0) {
+  const infoPlistPath = resolve(appBundlePath, "Contents/Info.plist");
+  const executableName = execFileSync(
+    "plutil",
+    ["-extract", "CFBundleExecutable", "raw", infoPlistPath],
+    { encoding: "utf8" },
+  ).trim();
+  const executablePath = resolve(appBundlePath, "Contents/MacOS", executableName);
+  const lipoOutput = execFileSync("lipo", ["-archs", executablePath], { encoding: "utf8" }).trim();
+  const actualArchs = new Set(lipoOutput.split(/\s+/).filter(Boolean));
+  const expectedArchs = EXPECTED_MACHO_ARCHS[target] ?? [];
+  const missingArchs = expectedArchs.filter((arch) => !actualArchs.has(arch));
+  if (missingArchs.length > 0) {
     throw new Error(
-      `No freshly generated ${tauriPrefix}*.dmg found in ${dmgBundleDir}`,
+      `Expected Mach-O slices [${expectedArchs.join(", ")}] in ${executablePath}, found [${[...actualArchs].join(", ")}].`,
     );
   }
-  return candidates[0].fullPath;
 }
 
 function main() {
   let options;
   try {
-    options = parseArgs(process.argv.slice(2));
+    options = parseBuildArgs(process.argv.slice(2), { defaultTarget: "aarch64-apple-darwin" });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
@@ -222,13 +171,14 @@ function main() {
     return;
   }
 
-  let plan;
+  let resolved;
   try {
-    plan = resolveBuildPlan(options);
+    resolved = resolveBuildPlan(options);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
+  const { plan, isShallow } = resolved;
 
   if (options.dryRun) {
     console.log(JSON.stringify(plan, null, 2));
@@ -242,50 +192,52 @@ function main() {
     process.exit(1);
   }
 
-  console.log(
-    `Building macOS DMG (${plan.target}, ${plan.signingMode}): version=${plan.version} (${plan.bundleVersion}), out=${plan.outputPath}`,
-  );
-  const buildStartMs = Date.now();
-  const build = spawnSync("npx", ["tauri", ...plan.tauriArgs], {
-    cwd: ROOT_DIR,
-    env: process.env,
-    stdio: "inherit",
-  });
-  if (build.status !== 0) {
-    process.exit(build.status ?? 1);
-  }
-
-  let sourceDmg;
   try {
-    sourceDmg = findGeneratedDmg(
-      plan.dmgBundleDir,
-      plan.productName,
-      plan.version,
-      buildStartMs,
+    assertCommitCountSafe({
+      isShallow,
+      release: plan.release,
+      label: "macOS CFBundleVersion",
+    });
+
+    console.log(
+      `Building macOS DMG (${plan.target}, ${plan.signingMode}): version=${plan.version} (${plan.bundleVersion}), out=${plan.outputPath}`,
     );
+    const buildStartMs = Date.now();
+    runTauriCli(plan.tauriArgs);
+
+    const tauriPrefix = `${plan.productName}_${plan.version}_`;
+    const sourceDmg = findFreshArtifact(
+      plan.dmgBundleDir,
+      (name) => name.startsWith(tauriPrefix) && name.endsWith(".dmg"),
+      buildStartMs,
+      `${tauriPrefix}*.dmg`,
+    );
+
+    mkdirSync(dirname(plan.outputPath), { recursive: true });
+    if (sourceDmg !== plan.outputPath) {
+      copyFileSync(sourceDmg, plan.outputPath);
+    }
+
+    const verify = spawnSync("hdiutil", ["verify", plan.outputPath], {
+      encoding: "utf8",
+    });
+    if (verify.error) {
+      throw verify.error;
+    }
+    if (verify.status !== 0) {
+      throw new Error(verify.stderr?.trim() || `hdiutil verify failed for ${plan.outputPath}`);
+    }
+
+    verifyAppBundle(plan.appBundlePath, plan.target);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
-  mkdirSync(dirname(plan.outputPath), { recursive: true });
-  if (sourceDmg !== plan.outputPath) {
-    copyFileSync(sourceDmg, plan.outputPath);
-  }
-
-  const verify = spawnSync("hdiutil", ["verify", plan.outputPath], {
-    encoding: "utf8",
-  });
-  if (verify.status !== 0) {
-    console.error(verify.stderr || `hdiutil verify failed for ${plan.outputPath}`);
-    process.exit(verify.status ?? 1);
-  }
-
   const sizeBytes = statSync(plan.outputPath).size;
-  const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(2);
   console.log("\n=== macOS DMG Ready ===");
   console.log(`Path: ${plan.outputPath}`);
-  console.log(`Size: ${sizeMb} MB (${sizeBytes} bytes)`);
+  console.log(`Size: ${formatSizeMb(sizeBytes)} MB (${sizeBytes} bytes)`);
   console.log(`Target: ${plan.target}`);
   console.log(`Version: ${plan.version} (${plan.bundleVersion})`);
   console.log(`Signing: ${plan.signingMode}`);

@@ -4091,9 +4091,7 @@ test("桌面端回车直接发送消息，且未选 Topic 时展示 Muse 式引�
 });
 
 test("CSS Design Tokens 验证：包含 Grokbot Light/Dark 语义变量定义，无未声明硬编码色值 (#81 #90)", async () => {
-  // @ts-expect-error Node.js built-in fs in Vitest test runner
   const { readFileSync } = await import("node:fs");
-  // @ts-expect-error Node.js built-in path in Vitest test runner
   const { resolve } = await import("node:path");
   const css = readFileSync(resolve((globalThis as unknown as { process: { cwd: () => string } }).process.cwd(), "src/App.css"), "utf-8");
 
