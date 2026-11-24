@@ -170,6 +170,28 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(tauriConf.bundle?.icon).toContain("icons/icon.icns");
   });
 
+  test("tauri.conf.json and capabilities/default.json enable macOS overlay titlebar dragging", () => {
+    const tauriConf = JSON.parse(
+      readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf8"),
+    ) as {
+      app?: {
+        windows?: Array<{ titleBarStyle?: string; hiddenTitle?: boolean }>;
+      };
+    };
+    const mainWindow = tauriConf.app?.windows?.[0];
+    expect(mainWindow?.titleBarStyle).toBe("Overlay");
+    expect(mainWindow?.hiddenTitle).toBe(true);
+
+    const capabilities = JSON.parse(
+      readFileSync(resolve(ROOT_DIR, "src-tauri/capabilities/default.json"), "utf8"),
+    ) as {
+      permissions?: string[];
+    };
+    expect(capabilities.permissions).toContain("core:default");
+    expect(capabilities.permissions).toContain("core:window:allow-start-dragging");
+    expect(capabilities.permissions).toContain("opener:default");
+  });
+
   test("Makefile, package.json, .gitignore, and AGENTS.md expose macOS DMG build entrypoints", () => {
     const makefile = readFileSync(resolve(ROOT_DIR, "Makefile"), "utf8");
     expect(makefile).toContain("build-macos-dmg");

@@ -248,7 +248,7 @@ export function SidebarView({
               ? "justify-end pt-[calc(0.65rem+env(safe-area-inset-top,0px))] pb-2.5 pl-[76px] pr-3"
               : "justify-between pt-[calc(0.65rem+env(safe-area-inset-top,0px))] pb-2.5 pl-6 pr-3",
         )}
-        data-tauri-drag-region
+        data-tauri-drag-region="deep"
       >
         <h1 className="sr-only">Topic</h1>
         {!trafficLightHeader ? (

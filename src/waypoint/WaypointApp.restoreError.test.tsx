@@ -70,6 +70,7 @@ describe("WaypointApp startup restore() error recovery UI", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "本地数据读取异常" })).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重置本地数据并重新连接" })).toBeInTheDocument();
     expect(restoreSpy).toHaveBeenCalledTimes(1);
@@ -77,6 +78,7 @@ describe("WaypointApp startup restore() error recovery UI", () => {
     await user.click(screen.getByRole("button", { name: "重试" }));
 
     expect(await screen.findByLabelText("Homeserver 地址")).toBeInTheDocument();
+    expect(screen.getByRole("main")).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(restoreSpy).toHaveBeenCalledTimes(2);
     view.unmount();
   });

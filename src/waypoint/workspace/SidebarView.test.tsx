@@ -52,7 +52,7 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
 
     const header = sidebar.querySelector(".waypoint-sidebar-header");
-    expect(header).toHaveAttribute("data-tauri-drag-region");
+    expect(header).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(header).not.toHaveClass("pl-[76px]");
     expect(header?.querySelector(".waypoint-sidebar-brand")).toHaveTextContent("Waypoint");
     expect(sidebar.querySelector(".waypoint-sidebar-scroll")).toHaveClass("overflow-y-auto");
@@ -75,7 +75,7 @@ describe("SidebarView & EmptyDetailView", () => {
     renderSidebar({ isNarrow: false, showTrafficLightClearance: true });
     const sidebar = screen.getByRole("complementary", { name: "Topic 列表" });
     const header = sidebar.querySelector(".waypoint-sidebar-header");
-    expect(header).toHaveAttribute("data-tauri-drag-region");
+    expect(header).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(header).toHaveClass("pl-[76px]", "justify-end");
     expect(header?.querySelector(".waypoint-sidebar-brand")).toBeNull();
   });
@@ -204,6 +204,7 @@ describe("SidebarView & EmptyDetailView", () => {
 
     const detailGuide = screen.getByRole("region", { name: "Topic 引导" });
     expect(detailGuide).toHaveClass("waypoint-empty-detail");
+    expect(detailGuide).toHaveAttribute("data-tauri-drag-region", "deep");
     expect(detailGuide.querySelector(".waypoint-empty-card")).not.toBeNull();
     expect(detailGuide.querySelector(".waypoint-kbd-hint")).toHaveTextContent("Alt + N");
     expect(within(detailGuide).getByText("选择一条 Topic，或新建一条 Topic 开始交流。")).toBeInTheDocument();

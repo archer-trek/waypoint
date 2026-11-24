@@ -63,6 +63,7 @@ export function TopicHeaderView({
   return (
     <header
       data-elevated={isElevated ? "true" : undefined}
+      data-tauri-drag-region="deep"
       className={cn(
         "waypoint-topic-header sticky top-0 z-10 shrink-0 py-2.5 box-border touch-none transition-colors duration-200",
         isElevated

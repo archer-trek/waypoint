@@ -912,7 +912,11 @@ export function WaypointApp({
 
   if (duplicateInstance) {
     return (
-      <main data-viewport={viewportMode} className={authMainClassName}>
+      <main
+        data-viewport={viewportMode}
+        data-tauri-drag-region="deep"
+        className={authMainClassName}
+      >
         <div
           className={cn(
             "mx-auto w-full max-w-[23rem] text-center select-none waypoint-auth-fade",
@@ -966,6 +970,7 @@ export function WaypointApp({
     return (
       <main
         data-viewport={viewportMode}
+        data-tauri-drag-region="deep"
         className={authMainClassName}
         aria-busy="true"
         style={authMainStyle}
@@ -1034,6 +1039,7 @@ export function WaypointApp({
     return (
       <main
         data-viewport={viewportMode}
+        data-tauri-drag-region="deep"
         className={authMainClassName}
         style={authMainStyle}
       >
@@ -1143,7 +1149,12 @@ export function WaypointApp({
   const headerAlignedLeft = isNarrow && phase.name !== "syncing";
 
   return (
-    <main data-viewport={viewportMode} className={authMainClassName} style={authMainStyle}>
+    <main
+      data-viewport={viewportMode}
+      data-tauri-drag-region="deep"
+      className={authMainClassName}
+      style={authMainStyle}
+    >
       <p className="sr-only">尚未进入 Topic 列表</p>
       <div
         className={cn(

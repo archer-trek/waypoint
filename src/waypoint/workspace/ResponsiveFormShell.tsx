@@ -246,6 +246,7 @@ export function ResponsiveFormShell({
         className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-background"
       >
         <div
+          data-tauri-drag-region="deep"
           className="sticky top-0 z-10 flex shrink-0 items-center gap-2 border-b border-border bg-background/95 px-2 py-2 backdrop-blur-xs"
           style={{ paddingTop: "max(0.5rem, env(safe-area-inset-top, 0px))" }}
         >
