@@ -1,0 +1,118 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: macOS target architecture
+        required: false
+        default: aarch64-apple-darwin
+        type: choice
+        options:
+          - aarch64-apple-darwin
+          - universal-apple-darwin
+          - x86_64-apple-darwin
+      version:
+        description: Optional semver override (e.g. 0.1.0); defaults to tag or tauri.conf.json
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-macos:
+    name: Build & Draft macOS Release
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve build configuration
+        id: meta
+        env:
+          INPUT_TARGET: ${{ inputs.target }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TARGET="${INPUT_TARGET:-aarch64-apple-darwin}"
+          if [ "$TARGET" = "universal-apple-darwin" ]; then
+            RUST_TARGETS="aarch64-apple-darwin,x86_64-apple-darwin"
+          else
+            RUST_TARGETS="$TARGET"
+          fi
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+            RELEASE_VERSION="${RELEASE_TAG#v}"
+          else
+            if [ -n "${INPUT_VERSION}" ]; then
+              RELEASE_VERSION="${INPUT_VERSION#v}"
+            else
+              RELEASE_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")"
+            fi
+            RELEASE_TAG="v${RELEASE_VERSION}"
+          fi
+
+          echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
+          echo "rust_targets=${RUST_TARGETS}" >> "$GITHUB_OUTPUT"
+          echo "version=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ steps.meta.outputs.rust_targets }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build macOS Release DMG
+        run: |
+          node scripts/build-macos-dmg.mjs \
+            --release \
+            --target "${{ steps.meta.outputs.target }}" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --out-dir artifacts/macos
+
+      - name: Upload macOS Release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: waypoint-macos-release-${{ steps.meta.outputs.target }}
+          path: artifacts/macos/*.dmg
+          retention-days: 30
+
+      - name: Create or update Draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/macos/*.dmg --clobber
+          else
+            gh release create "$RELEASE_TAG" artifacts/macos/*.dmg \
+              --draft \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" \
+              --generate-notes
+          fi

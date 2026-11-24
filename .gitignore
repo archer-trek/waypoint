@@ -7,5 +7,6 @@ src-tauri/gen/*
 .DS_Store
 *.log
 *.apk
+*.dmg
 *.jks
 *.keystore
