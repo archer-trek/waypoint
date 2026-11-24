@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import {
   assertCommitCountSafe,
   findFreshArtifact,
@@ -74,7 +75,6 @@ function resolveBuildPlan(options) {
 
   const cargoTargetDir = resolveCargoTargetDir();
   const dmgBundleDir = resolve(cargoTargetDir, target, "release/bundle/dmg");
-  const appBundlePath = resolve(cargoTargetDir, target, "release/bundle/macos", `${productName}.app`);
   const outputPath = resolveOutputPath({
     outPath: options.outPath,
     outDir: options.outDir,
@@ -118,7 +118,6 @@ function resolveBuildPlan(options) {
       signingMode,
       dmgFilename,
       dmgBundleDir,
-      appBundlePath,
       outputPath,
       tauriArgs,
     },
@@ -154,6 +153,34 @@ function verifyAppBundle(appBundlePath, target) {
     throw new Error(
       `Expected Mach-O slices [${expectedArchs.join(", ")}] in ${executablePath}, found [${[...actualArchs].join(", ")}].`,
     );
+  }
+}
+
+function verifyMountedDmgAppBundle(dmgPath, productName, target) {
+  const mountPoint = mkdtempSync(join(tmpdir(), "waypoint-dmg-verify-"));
+  let attached = false;
+  try {
+    const attach = spawnSync(
+      "hdiutil",
+      ["attach", "-nobrowse", "-readonly", "-mountpoint", mountPoint, dmgPath],
+      { encoding: "utf8" },
+    );
+    if (attach.error) {
+      throw attach.error;
+    }
+    if (attach.status !== 0) {
+      throw new Error(attach.stderr?.trim() || `hdiutil attach failed for ${dmgPath}`);
+    }
+    attached = true;
+    verifyAppBundle(resolve(mountPoint, `${productName}.app`), target);
+  } finally {
+    if (attached) {
+      const detach = spawnSync("hdiutil", ["detach", mountPoint, "-quiet"], { encoding: "utf8" });
+      if (detach.status !== 0) {
+        spawnSync("hdiutil", ["detach", mountPoint, "-force", "-quiet"], { encoding: "utf8" });
+      }
+    }
+    rmSync(mountPoint, { recursive: true, force: true });
   }
 }
 
@@ -228,7 +255,7 @@ function main() {
       throw new Error(verify.stderr?.trim() || `hdiutil verify failed for ${plan.outputPath}`);
     }
 
-    verifyAppBundle(plan.appBundlePath, plan.target);
+    verifyMountedDmgAppBundle(plan.outputPath, plan.productName, plan.target);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
