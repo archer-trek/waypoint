@@ -22,7 +22,7 @@ Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `sr
 
 ### Android build
 
-Build single-ABI (`arm64-v8a`) APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`, `OUT_DIR=<dir>`, `VERSION=X.Y.Z`, `RELEASE=1`, `UNSIGNED=1`) or `node scripts/build-android-apk.mjs`. Without a release keystore, test builds are signed with the committed CI debug key so they can be sideloaded; `UNSIGNED=1` / `--unsigned` produces a non-installable APK. CI uses `--ci-debug`. Running `npm ci`/`npm install` automatically activates `core.hooksPath=.githooks`.
+Build single-ABI (`arm64-v8a`) APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`, `OUT_DIR=<dir>`, `VERSION=X.Y.Z`, `RELEASE=1`, `UNSIGNED=1`) or `node scripts/build-android-apk.mjs`. Running `npm ci`/`npm install` automatically activates `core.hooksPath=.githooks`.
 
 ### macOS build
 

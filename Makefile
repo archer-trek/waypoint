@@ -105,7 +105,7 @@ clean:
 help:
 	@echo "Waypoint build helpers:"
 	@echo "  make [build-android-apk|apk] [OUT=path] [OUT_DIR=dir] [VERSION=X.Y.Z] [RELEASE=1] [UNSIGNED=1]"
-	@echo "      Build single-ABI (arm64-v8a) APK. Without a release keystore, signs with the CI debug key so the APK can be sideloaded. UNSIGNED=1 is not installable."
+	@echo "      Build single-ABI (arm64-v8a) APK"
 	@echo "  make [build-macos-dmg|dmg] [OUT=path] [OUT_DIR=dir] [TARGET=arm64|universal|x64] [VERSION=X.Y.Z] [RELEASE=1]"
 	@echo "      Build macOS DMG (run on macOS)"
 	@echo "  make [build-windows-installer|win] [OUT=path] [OUT_DIR=dir] [TARGET=x64|arm64] [VERSION=X.Y.Z] [RELEASE=1]"

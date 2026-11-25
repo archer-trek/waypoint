@@ -18,7 +18,7 @@ export function readNextFlagValue(argv, index, flag) {
 
 export function parseBuildArgs(
   argv,
-  { defaultTarget, allowTarget = true, allowUnsigned = false, allowCiDebug = false } = {},
+  { defaultTarget, allowTarget = true, allowUnsigned = false } = {},
 ) {
   const options = {
     targetRaw: defaultTarget,
@@ -26,7 +26,6 @@ export function parseBuildArgs(
     outDir: undefined,
     release: false,
     unsigned: false,
-    ciDebug: false,
     versionRaw: undefined,
     dryRun: false,
     help: false,
@@ -42,8 +41,6 @@ export function parseBuildArgs(
       options.release = true;
     } else if (allowUnsigned && arg === "--unsigned") {
       options.unsigned = true;
-    } else if (allowCiDebug && arg === "--ci-debug") {
-      options.ciDebug = true;
     } else if (allowTarget && arg === "--target") {
       options.targetRaw = readNextFlagValue(argv, i, "--target");
       i += 1;
