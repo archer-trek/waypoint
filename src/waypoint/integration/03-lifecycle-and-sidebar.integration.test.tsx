@@ -411,7 +411,9 @@ test("宽窄视口切换时保留已打开 Topic 与新建表单草稿且不重�
     <WaypointApp homeserver={homeserver} platform={platform} clock={new ManualClock()} />,
   );
   expect(await screen.findByText("正在讨论的话题")).toBeInTheDocument();
-  expect(syncCount).toBe(2);
+  await waitFor(() => {
+    expect(syncCount).toBe(2);
+  });
   third.unmount();
 });
 
