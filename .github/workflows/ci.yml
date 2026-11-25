@@ -227,9 +227,42 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build Android Release APK (aarch64, CI debug-signed, R8 enabled)
+      - name: Decode Android release keystore
+        env:
+          WAYPOINT_ANDROID_KEYSTORE_BASE64: ${{ secrets.WAYPOINT_ANDROID_KEYSTORE_BASE64 }}
+          WAYPOINT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.WAYPOINT_ANDROID_KEYSTORE_PASSWORD }}
+          WAYPOINT_ANDROID_KEY_PASSWORD: ${{ secrets.WAYPOINT_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WAYPOINT_ANDROID_KEYSTORE_BASE64}" ] || [ -z "${WAYPOINT_ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${WAYPOINT_ANDROID_KEY_PASSWORD}" ]; then
+            echo "Android release keystore secrets are not configured." >&2
+            exit 1
+          fi
+          keystore_path="${RUNNER_TEMP}/waypoint-release.jks"
+          printf '%s' "${WAYPOINT_ANDROID_KEYSTORE_BASE64}" | base64 -d > "${keystore_path}"
+          test -s "${keystore_path}"
+          {
+            echo "WAYPOINT_ANDROID_KEYSTORE_PATH=${keystore_path}"
+            echo "WAYPOINT_ANDROID_KEYSTORE_PASSWORD=${WAYPOINT_ANDROID_KEYSTORE_PASSWORD}"
+            echo "WAYPOINT_ANDROID_KEY_ALIAS=waypoint-release"
+            echo "WAYPOINT_ANDROID_KEY_PASSWORD=${WAYPOINT_ANDROID_KEY_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build Android Release APK (aarch64, release-signed, R8 enabled)
         # Unsigned APKs fail Xiaomi PackageInstaller with packageInfo is null (error 33).
-        run: node scripts/build-android-apk.mjs --ci-debug --out-dir artifacts/android
+        run: node scripts/build-android-apk.mjs --out-dir artifacts/android
+
+      - name: Verify APK is signed with the existing test certificate
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          APKS=(artifacts/android/*.apk)
+          test "${#APKS[@]}" -eq 1
+          # Same cert as local test APKs signed by ~/.android/waypoint-release.jks
+          # (CN=Waypoint Release). Must stay stable so sideloaded builds can update.
+          EXPECTED_SHA256="e188240857f673865c523198b8f5f914ad39b3a142397e4dd367d268eb890650"
+          CERTS="$("${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" verify --print-certs "${APKS[0]}")"
+          grep -Fq "${EXPECTED_SHA256}" <<< "${CERTS}"
 
       - name: Run Android JVM unit tests
         working-directory: src-tauri/gen/android

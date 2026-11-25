@@ -203,7 +203,14 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(ciYml).toContain("gradle/actions/setup-gradle@v6");
     expect(ciYml).toContain("cargo fmt --check");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
-    expect(ciYml).toContain("node scripts/build-android-apk.mjs --unsigned --out-dir artifacts/android");
+    expect(ciYml).toContain("node scripts/build-android-apk.mjs --out-dir artifacts/android");
+    expect(ciYml).not.toContain("--unsigned");
+    expect(ciYml).not.toContain("--ci-debug");
+    expect(ciYml).toContain("secrets.WAYPOINT_ANDROID_KEYSTORE_BASE64");
+    expect(ciYml).toContain("secrets.WAYPOINT_ANDROID_KEYSTORE_PASSWORD");
+    expect(ciYml).toContain("secrets.WAYPOINT_ANDROID_KEY_PASSWORD");
+    expect(ciYml).toContain("WAYPOINT_ANDROID_KEY_ALIAS=waypoint-release");
+    expect(ciYml).toContain("e188240857f673865c523198b8f5f914ad39b3a142397e4dd367d268eb890650");
     expect(androidBuildSection).toContain("archive: false");
     expect(androidBuildSection).not.toContain("waypoint-android-apk");
   });
