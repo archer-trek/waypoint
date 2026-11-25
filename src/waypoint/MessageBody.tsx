@@ -3,6 +3,7 @@ import {
   Fragment,
   isValidElement,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -452,6 +453,11 @@ export function MessageBody({
   onOpenExternalUrl?: (url: string) => void;
   richColor?: boolean;
 }) {
+  const onOpenExternalUrlRef = useRef(onOpenExternalUrl);
+  useLayoutEffect(() => {
+    onOpenExternalUrlRef.current = onOpenExternalUrl;
+  }, [onOpenExternalUrl]);
+
   const components = useMemo<Components>(
     () => ({
       ...STREAMDOWN_COMPONENTS,
@@ -513,8 +519,8 @@ export function MessageBody({
             onClick={(event) => {
               event.preventDefault();
               onClick?.(event);
-              if (onOpenExternalUrl) {
-                onOpenExternalUrl(safeHref);
+              if (onOpenExternalUrlRef.current) {
+                onOpenExternalUrlRef.current(safeHref);
               } else if (typeof window !== "undefined" && typeof window.open === "function") {
                 window.open(safeHref, "_blank", "noopener,noreferrer");
               }
@@ -525,7 +531,7 @@ export function MessageBody({
         );
       },
     }),
-    [onOpenExternalUrl, richColor],
+    [richColor],
   );
 
   const plugins = getStreamdownPlugins();

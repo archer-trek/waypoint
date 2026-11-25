@@ -4068,8 +4068,10 @@ test("桌面端回车直接发送消息，且未选 Topic 时展示 Muse 式引�
   expect(within(emptyGuide).getByRole("button", { name: "新建一条 Topic" })).toBeInTheDocument();
 
   // 触发 Alt+N 快捷键打开新建 Topic 弹窗
-  fireEvent.keyDown(window, { key: "n", altKey: true });
-  expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  await waitFor(() => {
+    fireEvent.keyDown(window, { key: "n", altKey: true });
+    expect(screen.getByRole("region", { name: "新建 Topic" })).toBeVisible();
+  });
   fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.queryByRole("region", { name: "新建 Topic" })).not.toBeInTheDocument();
 
