@@ -204,6 +204,7 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(ciYml).toContain("cargo fmt --check");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
     expect(ciYml).toContain("node scripts/build-android-apk.mjs --unsigned --out-dir artifacts/android");
-    expect(ciYml).toContain("waypoint-android-apk");
+    expect(androidBuildSection).toContain("archive: false");
+    expect(androidBuildSection).not.toContain("waypoint-android-apk");
   });
 });

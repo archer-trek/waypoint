@@ -278,7 +278,9 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
     expect(ciYml).toContain("targets: x86_64-pc-windows-msvc");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
     expect(ciYml).toContain("node scripts/build-windows-installer.mjs");
-    expect(ciYml).toContain("waypoint-windows-nsis");
+    const windowsBuildSection = ciYml.split("\n  windows-build:")[1] ?? "";
+    expect(windowsBuildSection).toContain("archive: false");
+    expect(windowsBuildSection).not.toContain("waypoint-windows-nsis");
     expect(ciYml).toContain("artifacts/windows/*.exe");
   });
 
@@ -304,5 +306,6 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("isDraft");
     expect(releaseYml).toContain("gh release create");
     expect(releaseYml).toContain("--draft");
+    expect(releaseYml.match(/archive: false/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });
