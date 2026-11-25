@@ -3988,8 +3988,12 @@ test("本地日历日变更才插入日期分隔（今天/昨天/无时刻本地
   await user.click(await screen.findByRole("button", { name: "日期分隔话题" }));
 
   const timeline = screen.getByRole("log", { name: "对话时间线" });
-  const children = Array.from(timeline.children);
-  expect(children.map((el) => el.getAttribute("role") ?? el.getAttribute("data-side"))).toEqual([
+  const timelineItems = Array.from(
+    timeline.querySelectorAll('[role="separator"], .waypoint-message-row'),
+  );
+  expect(
+    timelineItems.map((el) => el.getAttribute("role") ?? el.getAttribute("data-side")),
+  ).toEqual([
     "left",
     "separator",
     "left",
