@@ -186,6 +186,7 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(releaseBlock).toContain("proguard-android-optimize.txt");
     expect(gradleKts).toContain("WAYPOINT_ANDROID_KEYSTORE_PATH");
     expect(gradleKts).toContain("keystore.properties");
+    expect(gradleKts).toContain("enableV1Signing = true");
 
     const androidGitignore = readFileSync(
       resolve(ROOT_DIR, "src-tauri/gen/android/.gitignore"),
@@ -357,7 +358,8 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(ciYml).toContain(".github/workflows/");
     expect(ciYml).toContain("cargo test");
     expect(ciYml).toContain("./gradlew :app:testUniversalDebugUnitTest");
-    expect(ciYml).toContain("node scripts/build-android-apk.mjs --unsigned");
+    expect(ciYml).toContain("node scripts/build-android-apk.mjs --ci-debug");
+    expect(ciYml).not.toContain("node scripts/build-android-apk.mjs --unsigned");
     expect(ciYml).toContain("dexdump");
   });
 

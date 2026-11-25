@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {
@@ -21,6 +21,8 @@ const ANDROID_NDK_VERSION = "27.3.13750724";
 const ANDROID_DIR = resolve(ROOT_DIR, "src-tauri/gen/android");
 const ANDROID_APK_DIR = resolve(ANDROID_DIR, "app/build/outputs/apk/universal/release");
 const KEYSTORE_PROPS_PATH = resolve(ANDROID_DIR, "keystore.properties");
+const CI_DEBUG_DIR = resolve(ROOT_DIR, "scripts/android");
+const CI_DEBUG_PROPS_PATH = resolve(CI_DEBUG_DIR, "ci-debug.properties");
 
 function printHelp() {
   console.log(`Build Waypoint single-ABI (arm64-v8a) Android APK
@@ -33,7 +35,8 @@ Options:
   --out-dir <dir>          Write final APK into directory using computed filename
   --release                Build release filename without -test.<shortSha> suffix
   --version <semver>       Override versionName base semver (e.g. 0.1.0 or v0.1.0)
-  --unsigned               Build unsigned release APK without requiring keystore config
+  --ci-debug               Sign with the committed CI debug key (installable sideload APK)
+  --unsigned               Build a truly unsigned APK (not installable)
   --dry-run                Print resolved build plan JSON without building
   -h, --help               Show this help message`);
 }
@@ -154,13 +157,46 @@ function cleanOtherAbiJniLibs() {
   }
 }
 
-function resolveBuildPlan(options) {
-  const signingMode = options.unsigned ? "unsigned" : "keystore";
-  if (!options.unsigned && !hasSigningConfigured()) {
+function readCiDebugSigning() {
+  const props = readPropertiesFile(CI_DEBUG_PROPS_PATH);
+  const storeFile = props.storeFile;
+  const storePassword = props.storePassword;
+  const keyAlias = props.keyAlias;
+  const keyPassword = props.keyPassword;
+  const storeType = props.storeType || "PKCS12";
+  if (!storeFile || !storePassword || !keyAlias || !keyPassword) {
+    throw new Error(`Incomplete CI debug signing config: ${CI_DEBUG_PROPS_PATH}`);
+  }
+  const keystorePath = resolve(CI_DEBUG_DIR, storeFile);
+  if (!existsSync(keystorePath)) {
+    throw new Error(`Missing CI debug keystore: ${keystorePath}`);
+  }
+  return { keystorePath, storePassword, keyAlias, keyPassword, storeType };
+}
+
+function resolveSigningMode(options) {
+  if (options.unsigned && options.ciDebug) {
+    throw new Error("Cannot specify both --unsigned and --ci-debug.");
+  }
+  if (options.release && options.ciDebug) {
     throw new Error(
-      "Missing Android release signing config. Set WAYPOINT_ANDROID_KEYSTORE_* env vars, create src-tauri/gen/android/keystore.properties, or pass --unsigned.",
+      "Release Android builds cannot use the CI debug key. Set WAYPOINT_ANDROID_KEYSTORE_* or create src-tauri/gen/android/keystore.properties.",
     );
   }
+  if (options.unsigned) return "unsigned";
+  if (options.ciDebug) return "ci-debug";
+  if (hasSigningConfigured()) return "keystore";
+  if (options.release) {
+    throw new Error(
+      "Missing Android release signing config. Set WAYPOINT_ANDROID_KEYSTORE_* or create src-tauri/gen/android/keystore.properties. Omit --release to sign a sideload APK with the CI debug key.",
+    );
+  }
+  return "ci-debug";
+}
+
+function resolveBuildPlan(options) {
+  const signingMode = resolveSigningMode(options);
+  const ciDebugSigning = signingMode === "ci-debug" ? readCiDebugSigning() : null;
 
   const { productName, baseVersion } = readTauriConf();
   const version = normalizeSemver(
@@ -180,12 +216,13 @@ function resolveBuildPlan(options) {
     ? computedVersionName
     : process.env.WAYPOINT_ANDROID_VERSION_NAME?.trim() || computedVersionName;
 
-  const apkFilename = options.unsigned
-    ? `${productName}-${versionName}-arm64-unsigned.apk`
-    : `${productName}-${versionName}-arm64.apk`;
-  const sourceApkName = options.unsigned
-    ? "app-universal-release-unsigned.apk"
-    : "app-universal-release.apk";
+  const apkFilename =
+    signingMode === "unsigned"
+      ? `${productName}-${versionName}-arm64-unsigned.apk`
+      : `${productName}-${versionName}-arm64.apk`;
+  // CI debug signing post-signs the unsigned Gradle output so v1+v2+v3 are explicit.
+  const sourceApkName =
+    signingMode === "keystore" ? "app-universal-release.apk" : "app-universal-release-unsigned.apk";
 
   const outputPath = resolveOutputPath({
     outPath: options.outPath,
@@ -200,6 +237,7 @@ function resolveBuildPlan(options) {
     isShallow,
     hasExplicitVersionCode,
     sourceApkName,
+    ciDebugSigning,
     plan: {
       productName,
       abi: "arm64-v8a",
@@ -215,12 +253,70 @@ function resolveBuildPlan(options) {
   };
 }
 
+function signWithCiDebugKey(androidHome, apkPath, signing) {
+  const apksigner = findBuildTool("apksigner", androidHome);
+  if (!apksigner) {
+    throw new Error(
+      "apksigner not found in Android SDK build-tools; cannot sign the CI debug APK.",
+    );
+  }
+  if (!signing) {
+    throw new Error("CI debug signing config is missing.");
+  }
+  const signedPath = `${apkPath}.signed`;
+  rmSync(signedPath, { force: true });
+  execFileSync(
+    apksigner,
+    [
+      "sign",
+      "--ks",
+      signing.keystorePath,
+      "--ks-type",
+      signing.storeType,
+      "--ks-pass",
+      `pass:${signing.storePassword}`,
+      "--ks-key-alias",
+      signing.keyAlias,
+      "--key-pass",
+      `pass:${signing.keyPassword}`,
+      "--v1-signing-enabled",
+      "true",
+      "--v2-signing-enabled",
+      "true",
+      "--v3-signing-enabled",
+      "true",
+      "--v4-signing-enabled",
+      "false",
+      "--out",
+      signedPath,
+      apkPath,
+    ],
+    { encoding: "utf8" },
+  );
+  rmSync(apkPath, { force: true });
+  renameSync(signedPath, apkPath);
+  // minSdk 24 makes default verify ignore v1. Check v1 as API 23 so Xiaomi's
+  // JAR-based parser still has a certificate (error 33 / packageInfo is null).
+  const output = execFileSync(
+    apksigner,
+    ["verify", "--min-sdk-version", "23", "--verbose", "--print-certs", apkPath],
+    { encoding: "utf8" },
+  );
+  const v1Ok = output.includes("Verified using v1 scheme (JAR signing): true");
+  const v2Ok = output.includes("Verified using v2 scheme (APK Signature Scheme v2): true");
+  if (!v1Ok || !v2Ok) {
+    throw new Error(`CI debug APK is not sideload-installable (need v1 and v2).\n${output}`);
+  }
+  return output.trim();
+}
+
 function main() {
   let options;
   try {
     options = parseBuildArgs(process.argv.slice(2), {
       allowTarget: false,
       allowUnsigned: true,
+      allowCiDebug: true,
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
@@ -239,7 +335,7 @@ function main() {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  const { plan, isShallow, hasExplicitVersionCode, sourceApkName } = resolved;
+  const { plan, isShallow, hasExplicitVersionCode, sourceApkName, ciDebugSigning } = resolved;
 
   if (options.dryRun) {
     console.log(JSON.stringify(plan, null, 2));
@@ -268,8 +364,17 @@ function main() {
       WAYPOINT_ANDROID_ABI_FILTERS: "arm64-v8a",
       WAYPOINT_ANDROID_VERSION_CODE: plan.versionCode,
       WAYPOINT_ANDROID_VERSION_NAME: plan.versionName,
-      ...(plan.signingMode === "unsigned" ? { WAYPOINT_ANDROID_UNSIGNED: "1" } : {}),
+      ...(plan.signingMode === "unsigned" || plan.signingMode === "ci-debug"
+        ? { WAYPOINT_ANDROID_UNSIGNED: "1" }
+        : {}),
     };
+    if (plan.signingMode === "ci-debug") {
+      delete env.WAYPOINT_ANDROID_KEYSTORE_PATH;
+      delete env.WAYPOINT_ANDROID_KEYSTORE_PASSWORD;
+      delete env.WAYPOINT_ANDROID_KEY_ALIAS;
+      delete env.WAYPOINT_ANDROID_KEY_PASSWORD;
+      delete env.WAYPOINT_ANDROID_KEYSTORE_TYPE;
+    }
 
     console.log(
       `Building single-ABI (arm64-v8a) ${plan.signingMode} APK: versionCode=${plan.versionCode}, versionName=${plan.versionName}, out=${plan.outputPath}`,
@@ -300,7 +405,9 @@ function main() {
       throw new Error(`Unexpected native library ABIs in APK: ${soEntries.join(", ")}`);
     }
 
-    if (plan.signingMode === "keystore") {
+    if (plan.signingMode === "ci-debug") {
+      signerOutput = signWithCiDebugKey(androidHome, plan.outputPath, ciDebugSigning);
+    } else if (plan.signingMode === "keystore") {
       const apksigner = findBuildTool("apksigner", androidHome);
       if (!apksigner) {
         throw new Error(

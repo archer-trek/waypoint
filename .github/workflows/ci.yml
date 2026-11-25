@@ -227,8 +227,9 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
-      - name: Build Android Release APK (aarch64, unsigned, R8 enabled)
-        run: node scripts/build-android-apk.mjs --unsigned --out-dir artifacts/android
+      - name: Build Android Release APK (aarch64, CI debug-signed, R8 enabled)
+        # Unsigned APKs fail Xiaomi PackageInstaller with packageInfo is null (error 33).
+        run: node scripts/build-android-apk.mjs --ci-debug --out-dir artifacts/android
 
       - name: Run Android JVM unit tests
         working-directory: src-tauri/gen/android

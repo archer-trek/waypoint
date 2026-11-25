@@ -83,6 +83,17 @@ android {
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword
+                val configuredStoreType = resolveSigningProp("WAYPOINT_ANDROID_KEYSTORE_TYPE", "storeType")
+                if (!configuredStoreType.isNullOrBlank()) {
+                    storeType = configuredStoreType
+                }
+                // minSdk is 24, so AGP drops the JAR signature unless forced. Xiaomi's
+                // installer returns packageInfo=null (error 33) when it cannot collect
+                // certificates. Keep v1+v2+v3 for sideload parsing.
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = false
             }
         }
     }
