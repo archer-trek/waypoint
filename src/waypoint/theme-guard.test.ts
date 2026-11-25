@@ -411,5 +411,10 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     const katexRule = css.match(/\.waypoint-markdown \.katex-display \{[^}]+\}/)?.[0] ?? "";
     expect(katexRule).toContain("overflow-x: auto;");
     expect(katexRule).toContain("max-width: 100%;");
+
+    const agentParagraphRule =
+      css.match(/\.waypoint-message-row\.left \.waypoint-md-p,\s*\.waypoint-message-row\.left p \{[^}]+\}/)?.[0] ?? "";
+    expect(agentParagraphRule).toContain("max-width: 100%;");
+    expect(agentParagraphRule).not.toContain("max-width: min(42rem, 100%);");
   });
 });

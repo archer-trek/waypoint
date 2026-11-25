@@ -98,7 +98,7 @@ export function ComposerView({
     <div
       ref={safeAreaRef}
       className={cn(
-        "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border [&>*]:pointer-events-auto transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+        "waypoint-composer-safe-area relative shrink-0 px-3 sm:px-6 pt-1.5 bg-transparent border-t-0 pointer-events-none box-border transition-[padding-bottom] duration-280 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
         composerTextareaScrollable ? "touch-pan-y" : "touch-none",
         safeInset === 0
           ? "pb-[max(0.75rem,env(safe-area-inset-bottom,0px))]"
@@ -112,12 +112,13 @@ export function ComposerView({
           variant="outline"
           size="icon"
           aria-label="回到底部"
-          className="waypoint-scroll-bottom-fab touch-none absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-8 rounded-full border-border/80 bg-background/90 backdrop-blur-md text-foreground shadow-sm hover:bg-accent hover:-translate-y-0.5 transition-transform"
+          className="waypoint-scroll-bottom-fab pointer-events-auto touch-none absolute bottom-[calc(100%+0.5rem)] left-1/2 -translate-x-1/2 z-25 size-8 rounded-full border-border/80 bg-background/90 backdrop-blur-md text-foreground shadow-sm hover:bg-accent hover:-translate-y-0.5 transition-transform"
           onClick={onScrollToBottom}
         >
           <ChevronDown aria-hidden="true" className="size-4" />
         </Button>
       ) : null}
+      <div className="waypoint-composer-track mx-auto w-full min-w-0 max-w-3xl pointer-events-none [&>*]:pointer-events-auto">
       {composerError ? (
         <Alert variant="destructive" className="mb-2 py-2 px-3">
           <AlertDescription>{composerError}</AlertDescription>
@@ -279,6 +280,7 @@ export function ComposerView({
           <span className="waypoint-sr-only sr-only">发送</span>
         </Button>
       </form>
+      </div>
     </div>
   );
 }

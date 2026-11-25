@@ -416,7 +416,7 @@ a,
 .waypoint-message-row.left .waypoint-md-p,
 .waypoint-message-row.left p {
   min-width: 0;
-  max-width: min(42rem, 100%);
+  max-width: 100%;
   margin: 0.5rem 0;
   line-height: 1.5;
   font-size: 16px;

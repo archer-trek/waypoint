@@ -147,6 +147,13 @@ describe("TopicHeaderView (#89)", () => {
 
     render(<ControlledHeaderHarness />);
 
+    const header = screen.getByRole("banner");
+    expect(header).toHaveClass("waypoint-topic-header");
+    expect(header).not.toHaveClass("max-w-3xl", "mx-auto");
+    const headerBar = header.querySelector(".waypoint-topic-header-bar") as HTMLElement;
+    expect(headerBar).not.toBeNull();
+    expect(headerBar).not.toHaveClass("max-w-3xl", "mx-auto");
+
     const trigger = screen.getByRole("button", { name: "话题操作" });
     await user.click(trigger);
     expect(onToggleOverflowMenu).toHaveBeenCalledTimes(1);
@@ -316,20 +323,31 @@ describe("TimelineView (#89)", () => {
     expect(separator.querySelector(".waypoint-bubble")).toBeNull();
 
     const timeline = screen.getByRole("log", { name: "对话时间线" });
-    const agentRow = timeline.querySelector('[data-event-id="$agent-1"]') as HTMLElement;
+    expect(timeline).toHaveClass("overflow-x-hidden", "overflow-y-auto");
+    expect(timeline).not.toHaveClass("max-w-3xl", "mx-auto");
+
+    const track = timeline.querySelector(".waypoint-timeline-track") as HTMLElement;
+    expect(track).not.toBeNull();
+    expect(track).toHaveClass("mx-auto", "w-full", "max-w-3xl");
+    expect(track).toContainElement(separator);
+
+    const agentRow = track.querySelector('[data-event-id="$agent-1"]') as HTMLElement;
     expect(agentRow).toHaveAttribute("data-side", "left");
     const agentBubble = agentRow.querySelector(".waypoint-bubble") as HTMLElement;
     expect(agentBubble).toHaveClass(
       "bg-transparent",
       "border-0",
       "shadow-none",
-      "max-w-[min(42rem,100%)]",
+      "max-w-full",
       "leading-[1.5]",
       "text-[16px]",
     );
+    expect(agentBubble).not.toHaveClass("max-w-[min(42rem,100%)]");
 
-    const ownerRow = timeline.querySelector('[data-event-id="$owner-1"]') as HTMLElement;
+    const ownerRow = track.querySelector('[data-event-id="$owner-1"]') as HTMLElement;
     expect(ownerRow).toHaveAttribute("data-side", "right");
+    const ownerContent = ownerRow.querySelector(".waypoint-message-content") as HTMLElement;
+    expect(ownerContent).toHaveClass("max-w-[min(38rem,85%)]");
     const ownerBubble = ownerRow.querySelector(".waypoint-bubble") as HTMLElement;
     expect(ownerBubble).toHaveClass(
       "bg-primary",
@@ -465,11 +483,17 @@ describe("TimelineView (#89)", () => {
 
     const timeline = screen.getByRole("log", { name: "对话时间线" });
     expect(timeline).toHaveClass("overflow-x-hidden", "overflow-y-auto");
+    expect(timeline).not.toHaveClass("max-w-3xl", "mx-auto");
 
-    const agentRow = timeline.querySelector('[data-event-id="$agent-long"]') as HTMLElement;
+    const track = timeline.querySelector(".waypoint-timeline-track") as HTMLElement;
+    expect(track).not.toBeNull();
+    expect(track).toHaveClass("mx-auto", "w-full", "min-w-0", "max-w-3xl");
+
+    const agentRow = track.querySelector('[data-event-id="$agent-long"]') as HTMLElement;
     expect(agentRow).toHaveClass("min-w-0", "max-w-full");
     const agentBubble = agentRow.querySelector(".waypoint-bubble") as HTMLElement;
-    expect(agentBubble).toHaveClass("min-w-0", "max-w-[min(42rem,100%)]", "wrap-anywhere");
+    expect(agentBubble).toHaveClass("min-w-0", "max-w-full", "wrap-anywhere");
+    expect(agentBubble).not.toHaveClass("max-w-[min(42rem,100%)]");
     expect(agentBubble.querySelector('[data-streamdown="heading-1"]')).not.toBeNull();
     expect(agentBubble.querySelectorAll('[data-streamdown="list-item"]')).toHaveLength(2);
     expect(agentBubble.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
@@ -726,14 +750,33 @@ describe("ComposerView (#89)", () => {
 
     const safeArea = document.querySelector(".waypoint-composer-safe-area") as HTMLElement;
     expect(safeArea).toHaveAttribute("data-keyboard-inset", "0");
+    expect(safeArea).toHaveClass("pointer-events-none");
+    expect(safeArea).not.toHaveClass("max-w-3xl", "mx-auto");
+
+    const track = safeArea.querySelector(".waypoint-composer-track") as HTMLElement;
+    expect(track).not.toBeNull();
+    expect(track).toHaveClass("mx-auto", "w-full", "max-w-3xl", "pointer-events-none");
 
     const fab = screen.getByRole("button", { name: "回到底部" });
-    expect(fab).toHaveClass("waypoint-scroll-bottom-fab");
+    expect(fab).toHaveClass(
+      "waypoint-scroll-bottom-fab",
+      "pointer-events-auto",
+      "left-1/2",
+      "-translate-x-1/2",
+    );
     await user.click(fab);
     expect(onScrollToBottom).toHaveBeenCalledTimes(1);
 
-    expect(screen.getByRole("alert")).toHaveTextContent("发送失败提示");
-    expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("notes.md");
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("发送失败提示");
+    expect(track).toContainElement(alert);
+
+    const attachmentRegion = screen.getByRole("region", { name: "已选附件" });
+    expect(attachmentRegion).toHaveTextContent("notes.md");
+    expect(track).toContainElement(attachmentRegion);
+
+    const formInInitial = document.querySelector("form.waypoint-composer") as HTMLFormElement;
+    expect(track).toContainElement(formInInitial);
 
     const textarea = screen.getByRole("textbox", { name: "输入消息" });
     expect(textarea).not.toHaveAttribute("placeholder");
@@ -799,6 +842,8 @@ describe("ComposerView (#89)", () => {
     expect(form.className).not.toMatch(/before:(?:h-px|bg-border|border)/);
 
     const hintRegion = screen.getByRole("region", { name: "斜杠命令提示" });
+    expect(track).toContainElement(hintRegion);
+    expect(track).toContainElement(form);
     fireEvent.click(within(hintRegion).getByRole("button", { name: "/model" }));
     expect(onSelectSlashCommand).toHaveBeenCalledWith("/model");
   });

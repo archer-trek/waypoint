@@ -266,10 +266,11 @@ export function TimelineView({
       ref={timelineRef}
       role="log"
       aria-label="对话时间线"
-      className="waypoint-timeline relative flex-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 flex flex-col gap-4"
+      className="waypoint-timeline relative flex-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 py-5 sm:px-6 flex flex-col"
       onScroll={onScroll}
     >
-      {items.map((item) =>
+      <div className="waypoint-timeline-track mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-4">
+        {items.map((item) =>
         item.kind === "day-separator" ? (
           <div
             key={item.key}
@@ -366,7 +367,7 @@ export function TimelineView({
                   "waypoint-bubble min-w-0 wrap-anywhere",
                   item.side === "right"
                     ? "max-w-full bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
-                    : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-[min(42rem,100%)] text-[16px] leading-[1.5] text-foreground",
+                    : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-full text-[16px] leading-[1.5] text-foreground",
                 )}
                 onTouchStart={(e) => handleTouchStart(e, item)}
                 onTouchMove={handleTouchMove}
@@ -512,6 +513,7 @@ export function TimelineView({
           </div>
         ),
       )}
+      </div>
       {contextMenuItem !== null ? (
         <ActionSheet
           open
