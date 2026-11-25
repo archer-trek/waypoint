@@ -265,8 +265,9 @@ jobs:
       - name: Upload Android APK artifact
         uses: actions/upload-artifact@v7
         with:
-          name: waypoint-android-apk
+          # Single-file upload. archive: false keeps the APK itself; the artifact name is the filename.
           path: artifacts/android/*.apk
+          archive: false
           retention-days: 14
 
   macos-build:
@@ -313,8 +314,9 @@ jobs:
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v7
         with:
-          name: waypoint-macos-dmg
+          # Single-file upload. archive: false keeps the DMG itself; the artifact name is the filename.
           path: artifacts/macos/*.dmg
+          archive: false
           retention-days: 14
 
   windows-build:
@@ -359,6 +361,7 @@ jobs:
       - name: Upload Windows NSIS artifact
         uses: actions/upload-artifact@v7
         with:
-          name: waypoint-windows-nsis
+          # Single-file upload. archive: false keeps the installer itself; the artifact name is the filename.
           path: artifacts/windows/*.exe
+          archive: false
           retention-days: 14

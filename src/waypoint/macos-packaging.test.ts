@@ -242,6 +242,9 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(ciYml).toContain("node scripts/build-macos-dmg.mjs");
     expect(ciYml).toContain("actions/upload-artifact@v7");
     expect(ciYml).toContain(".dmg");
+    const macosBuildSection = ciYml.split("\n  macos-build:")[1]?.split("\n  windows-build:")[0] ?? "";
+    expect(macosBuildSection).toContain("archive: false");
+    expect(macosBuildSection).not.toContain("waypoint-macos-dmg");
   });
 
   test("release.yml builds release DMG on v* tags or manual dispatch as a draft release", () => {
@@ -266,5 +269,6 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("isDraft");
     expect(releaseYml).toContain("gh release create");
     expect(releaseYml).toContain("--draft");
+    expect(releaseYml.match(/archive: false/g)?.length).toBeGreaterThanOrEqual(2);
   });
 });

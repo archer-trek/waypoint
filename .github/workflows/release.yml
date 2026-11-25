@@ -250,8 +250,9 @@ jobs:
       - name: Upload macOS Release artifact
         uses: actions/upload-artifact@v7
         with:
-          name: waypoint-macos-release-${{ needs.meta.outputs.macos_target }}
+          # Single-file upload. archive: false keeps the DMG itself; the artifact name is the filename.
           path: artifacts/macos/*.dmg
+          archive: false
           retention-days: 30
 
   build-windows:
@@ -305,8 +306,9 @@ jobs:
       - name: Upload Windows Release artifact
         uses: actions/upload-artifact@v7
         with:
-          name: waypoint-windows-release-${{ needs.meta.outputs.windows_target }}
+          # Single-file upload. archive: false keeps the installer itself; the artifact name is the filename.
           path: artifacts/windows/*.exe
+          archive: false
           retention-days: 30
 
   draft-release:
