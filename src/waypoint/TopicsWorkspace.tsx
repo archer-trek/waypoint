@@ -112,6 +112,7 @@ export function TopicsWorkspace({
   );
   const [, setRevision] = useState(0);
   const [, setMediaRevision] = useState(0);
+  const [respondingTick, setRespondingTick] = useState(0);
   const [backfillTick, setBackfillTick] = useState(0);
   const [creating, setCreating] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -351,7 +352,35 @@ export function TopicsWorkspace({
   );
   const rooms = client.rooms();
   const roomList = Object.values(rooms);
-  const topics = deriveTopics(rooms, registeredAgents, client.ownerId, client.pendingRoomEvents());
+  const nowMs = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+  const topics = deriveTopics(rooms, registeredAgents, client.ownerId, client.pendingRoomEvents(), {
+    nowMs,
+    syncPaused: reauthRequired,
+  });
+  const nextRespondingExpiryMs = topics.reduce<number | undefined>((earliest, topic) => {
+    if (!topic.responding || topic.respondingExpiresAtMs === undefined) {
+      return earliest;
+    }
+    return earliest === undefined
+      ? topic.respondingExpiresAtMs
+      : Math.min(earliest, topic.respondingExpiresAtMs);
+  }, undefined);
+  useEffect(() => {
+    void respondingTick;
+    if (nextRespondingExpiryMs === undefined) {
+      return undefined;
+    }
+    const currentNow = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
+    const delayMs = Math.min(Math.max(0, nextRespondingExpiryMs - currentNow), 2_147_483_647);
+    const timerId = clock.setTimeout(() => {
+      if (mountedRef.current) {
+        setRespondingTick((value) => value + 1);
+      }
+    }, delayMs);
+    return () => {
+      clock.clearTimeout(timerId);
+    };
+  }, [nextRespondingExpiryMs, respondingTick, clock]);
   const activeTopic = activeTopicId
     ? topics.find((topic) => topic.roomId === activeTopicId)
     : undefined;
@@ -370,7 +399,6 @@ export function TopicsWorkspace({
       return nextId && visibleComposerRoomId ? { roomId: visibleComposerRoomId, id: nextId } : null;
     });
   }
-  const nowMs = clock.currentTimeMs ? clock.currentTimeMs() : Date.now();
   const activeTimelineItems = activeTopic
     ? deriveRoomTimelineItems(
         rooms[activeTopic.roomId],
@@ -380,7 +408,7 @@ export function TopicsWorkspace({
         nowMs,
       )
     : [];
-  const timelineContentKey = activeTimelineItems
+  const timelineContentKey = `${activeTopic?.responding ? "1" : "0"}\0${activeTimelineItems
     .map((item) => {
       if (item.kind === "day-separator") {
         return `s:${item.key}`;
@@ -388,9 +416,9 @@ export function TopicsWorkspace({
       const promptSig = item.prompt
         ? `${item.prompt.kind}:${item.prompt.answered ? 1 : 0}:${item.prompt.superseded ? 1 : 0}:${item.prompt.queuedKey ?? ""}:${item.prompt.options.map((o) => `${o.key}${o.redacted ? "!" : ""}`).join(",")}`
         : "";
-      return `m:${item.key}:${item.status}:${item.responding ? 1 : 0}:${item.reactions?.join(",") ?? ""}:${promptSig}:${item.media?.mxcUrl ?? ""}:${item.media?.filename ?? ""}:${item.body}`;
+      return `m:${item.key}:${item.status}:${item.reactions?.join(",") ?? ""}:${promptSig}:${item.media?.mxcUrl ?? ""}:${item.media?.filename ?? ""}:${item.body}`;
     })
-    .join("\0");
+    .join("\0")}`;
 
   const navDepthRef = useRef(0);
   const targetDepth =
@@ -1487,6 +1515,10 @@ export function TopicsWorkspace({
       parseRegisteredAgents(client.accountData("im.waypoint.agents"), client.ownerId),
       client.ownerId,
       client.pendingRoomEvents(),
+      {
+        nowMs: clock.currentTimeMs ? clock.currentTimeMs() : Date.now(),
+        syncPaused: reauthRequiredRef.current,
+      },
     );
     const selectedId = activeTopicIdRef.current;
     if (selectedId && !currentTopics.some((topic) => topic.roomId === selectedId)) {
@@ -3670,6 +3702,7 @@ export function TopicsWorkspace({
             <TimelineView
               timelineRef={timelineRef}
               items={activeTimelineItems}
+              responding={activeTopic.responding}
               isNarrow={isNarrow}
               safeInset={safeInset}
               activeTopicUnavailable={activeTopic.unavailable}

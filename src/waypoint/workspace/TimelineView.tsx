@@ -24,10 +24,12 @@ import {
 import { cn } from "@/lib/utils";
 import { MessageBody } from "../MessageBody";
 import type { TimelineItem, TimelineMedia } from "../topics";
+import { RespondingIndicator } from "./RespondingIndicator";
 
 export type TimelineViewProps = {
   timelineRef: RefObject<HTMLDivElement | null>;
   items: TimelineItem[];
+  responding?: boolean;
   activeTopicUnavailable: boolean;
   reauthRequired: boolean;
   openFailedMenuId: string | null;
@@ -146,6 +148,7 @@ function extractCodeSnippet(target: HTMLElement | null): string | undefined {
 export function TimelineView({
   timelineRef,
   items,
+  responding = false,
   activeTopicUnavailable,
   reauthRequired,
   openFailedMenuId,
@@ -291,69 +294,6 @@ export function TimelineView({
             data-side={item.side}
             data-event-id={item.eventId}
           >
-            {item.status === "unconfirmed" ? (
-              <span
-                role="status"
-                aria-label="未确认"
-                className="waypoint-unconfirmed-spinner inline-block size-3.5 rounded-full border-2 border-muted-foreground border-t-transparent animate-spin shrink-0 mt-1"
-              />
-            ) : item.status === "failed" && item.localId ? (
-              <div className="waypoint-failed-controls relative inline-flex items-center gap-1 shrink-0 mt-1">
-                <DropdownMenu
-                  modal={false}
-                  open={openFailedMenuId === item.localId}
-                  onOpenChange={(nextOpen) => {
-                    const isOpen = openFailedMenuId === item.localId;
-                    if (nextOpen !== isOpen) {
-                      onToggleFailedMenu(item.localId!);
-                    }
-                  }}
-                >
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      aria-label="更多操作"
-                      className="waypoint-bubble-menu-trigger size-5 min-w-5 rounded-full p-0 text-muted-foreground hover:text-foreground"
-                    >
-                      <MoreHorizontal aria-hidden="true" className="size-3.5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    aria-labelledby={undefined}
-                    aria-label="消息操作"
-                    side="top"
-                    align="end"
-                    sideOffset={4}
-                    className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1 rounded-lg border-border/80 bg-popover/95 backdrop-blur-md shadow-md"
-                    onPointerDown={(event) => {
-                      event.stopPropagation();
-                      event.nativeEvent.stopPropagation();
-                    }}
-                  >
-                    <DropdownMenuItem
-                      variant="destructive"
-                      className="min-h-8 px-2 py-1.5 text-sm"
-                      onSelect={() => onDiscardFailed(item.localId!)}
-                    >
-                      丢掉
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="icon"
-                  aria-label="失败"
-                  className="waypoint-failed-button size-4.5 min-w-4.5 rounded-full p-0 text-xs font-bold leading-none shrink-0"
-                  disabled={reauthRequired}
-                  onClick={() => onResendFailed(item.localId!)}
-                >
-                  !
-                </Button>
-              </div>
-            ) : null}
             <div
               className={cn(
                 "waypoint-message-content flex flex-col min-w-0 gap-1",
@@ -438,6 +378,63 @@ export function TimelineView({
                   />
                 )}
               </div>
+              {item.status === "failed" && item.localId ? (
+                <div className="waypoint-failed-controls relative inline-flex items-center justify-end gap-1.5 pr-0.5">
+                  <DropdownMenu
+                    modal={false}
+                    open={openFailedMenuId === item.localId}
+                    onOpenChange={(nextOpen) => {
+                      const isOpen = openFailedMenuId === item.localId;
+                      if (nextOpen !== isOpen) {
+                        onToggleFailedMenu(item.localId!);
+                      }
+                    }}
+                  >
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        aria-label="更多操作"
+                        className="waypoint-bubble-menu-trigger size-6 min-w-6 rounded-full p-0 text-muted-foreground hover:text-foreground hover:bg-accent/60"
+                      >
+                        <MoreHorizontal aria-hidden="true" className="size-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      aria-labelledby={undefined}
+                      aria-label="消息操作"
+                      side="bottom"
+                      align="end"
+                      sideOffset={4}
+                      className="waypoint-failed-menu waypoint-failed-controls min-w-20 p-1 rounded-lg border-border/80 bg-popover/95 backdrop-blur-md shadow-md"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        event.nativeEvent.stopPropagation();
+                      }}
+                    >
+                      <DropdownMenuItem
+                        variant="destructive"
+                        className="min-h-8 px-2 py-1.5 text-sm"
+                        onSelect={() => onDiscardFailed(item.localId!)}
+                      >
+                        丢掉
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="icon"
+                    aria-label="失败"
+                    className="waypoint-failed-button size-5 min-w-5 rounded-full p-0 text-[12px] font-bold leading-none shrink-0"
+                    disabled={reauthRequired}
+                    onClick={() => onResendFailed(item.localId!)}
+                  >
+                    !
+                  </Button>
+                </div>
+              ) : null}
               {item.reactions && item.reactions.length > 0 ? (
                 <div className="waypoint-message-reactions flex flex-wrap gap-1">
                   {item.reactions.map((key) => (
@@ -504,15 +501,18 @@ export function TimelineView({
                   })}
                 </div>
               ) : null}
-              {item.responding ? (
-                <div className="waypoint-message-responding text-xs font-medium text-muted-foreground px-1">
-                  正在回应
-                </div>
-              ) : null}
             </div>
           </div>
         ),
       )}
+        {responding ? (
+          <RespondingIndicator
+            size="timeline"
+            role="status"
+            aria-label="正在回应"
+            className="waypoint-timeline-responding self-start py-1.5"
+          />
+        ) : null}
       </div>
       {contextMenuItem !== null ? (
         <ActionSheet

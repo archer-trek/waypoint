@@ -979,10 +979,12 @@ test("断线后保留同步游标，只有服务器不认游标时才丢掉并�
   await login(user);
   await user.click(await screen.findByRole("button", { name: "游标恢复话题" }));
 
-  // 交出一条未确认消息，保持在重试队列里
+  // 交出一条未确认消息，保持在重试队列里（不渲染未确认转圈）
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列里的消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+  const timelineBefore = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => expect(timelineBefore).toHaveTextContent("队列里的消息"));
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 第2轮：网络错误（保留游标）
   await act(async () => { clock.advance(1000); });
@@ -1008,7 +1010,8 @@ test("断线后保留同步游标，只有服务器不认游标时才丢掉并�
   expect(timeline).toHaveTextContent("错过的消息");
   expect(timeline).toHaveTextContent("队列里的消息");
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(4);
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 没有重新登录
   expect(homeserver.requests.filter((r) => r.method === "POST" && r.url.endsWith("/_matrix/client/v3/login"))).toHaveLength(1);
@@ -1018,8 +1021,9 @@ test("断线后保留同步游标，只有服务器不认游标时才丢掉并�
   await act(async () => { clock.advance(30000); });
   await waitFor(() => {
     expect(syncStage).toBeGreaterThanOrEqual(7);
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$ev-sent"]')).not.toBeNull();
   });
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(0);
 });
 
 test("limited 缺口先记着不在后台补完且列表照常更新，每房间每轮同步最多处理 20 条时间线事件", async () => {
@@ -1253,7 +1257,10 @@ test("限流留在重试队列退避后再试，其他 4xx 不进入自动重试
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被限流的消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(sendCount).toBe(1));
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(timeline).toHaveTextContent("被限流的消息");
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   await act(async () => { clock.advance(999); });
   expect(sendCount).toBe(1);
@@ -1265,8 +1272,9 @@ test("限流留在重试队列退避后再试，其他 4xx 不进入自动重试
   await act(async () => { clock.advance(1); });
   await waitFor(() => expect(sendCount).toBe(3));
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$ev-rate-ok"]')).not.toBeNull();
   });
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(0);
 
   // 2) 其他 4xx (403)：不自动重试
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "被永久拒绝的消息");
@@ -1355,7 +1363,8 @@ test("服务器不认 token 时暂停同步和重试队列，不丢队列也不�
   const timeline = screen.getByRole("log", { name: "对话时间线" });
   expect(timeline).toHaveTextContent("已有本地消息");
   expect(timeline).toHaveTextContent("暂停在队列的消息");
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   const syncsAtPause = syncCalls;
   await act(async () => {
@@ -1431,12 +1440,14 @@ test("重新连上后同步立刻恢复，重试队列按交出顺序重放且�
   await act(async () => { clock.advance(1000); });
   await waitFor(() => expect(syncCalls).toBe(2));
 
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(1));
+  await waitFor(() => expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
+  await waitFor(() => expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(2));
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 推进 1s 让队列再失败一次，进入 2s 退避等待
   await act(async () => { clock.advance(1000); });
@@ -1454,7 +1465,7 @@ test("重新连上后同步立刻恢复，重试队列按交出顺序重放且�
     expect(sentBodies).toEqual(["第一条", "第二条"]);
   });
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(0);
   });
 
   // 随后同步完成
@@ -1537,7 +1548,9 @@ test("进程被回收后重新打开，恢复凭证、游标、本地时间线�
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线第二条");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(offlineTxns.length).toBeGreaterThanOrEqual(1));
-  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
+  const firstTimeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => expect(firstTimeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(2));
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 模拟进程被系统回收
   first.unmount();
@@ -1712,6 +1725,7 @@ test("同步从断线退避中恢复时立刻唤醒处于退避中的重试队�
   await act(async () => { first.clock.advance(2000); });
   await waitFor(() => {
     expect(sendCalls).toBe(4);
+    expect(screen.getByRole("log", { name: "对话时间线" }).querySelector('[data-event-id="$ev-send-4"]')).not.toBeNull();
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   });
 
@@ -4032,7 +4046,10 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
     const composer = screen.getByLabelText("输入消息");
     await user.type(composer, "未确认排队消息");
     await user.click(screen.getByRole("button", { name: "发送" }));
-    expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认排队消息");
+    });
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
     await user.type(screen.getByLabelText("输入消息"), "还没发出的草稿");
     await user.click(screen.getByRole("button", { name: "删除" }));
@@ -4056,7 +4073,7 @@ test("确认删除先发 leave；leave 失败时删除未生效，Topic、本地
     await user.click(await screen.findByRole("button", { name: "保留验证话题" }));
     expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("已有历史消息");
     expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认排队消息");
-    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("输入消息")).toHaveValue("还没发出的草稿");
 
     // 重试确认删除，leave 成功后立即移除
@@ -4201,7 +4218,10 @@ test("leave 一成功就立即移除 Topic、清掉本地时间线、草稿与�
     await user.click(await screen.findByRole("button", { name: "要删掉的 Topic" }));
     await user.type(screen.getByLabelText("输入消息"), "将被删掉的未确认消息");
     await user.click(screen.getByRole("button", { name: "发送" }));
-    expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("将被删掉的未确认消息");
+    });
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
     await user.type(screen.getByLabelText("输入消息"), "将被删掉的草稿");
 
     // 另一条留下的 Topic 也放一条未确认消息（仍在重试队列里）
@@ -4544,7 +4564,7 @@ test("leave 成功后按顺序尽力 forget 与清理 m.direct（仅在包含时
   }
 });
 
-test("消息被 Homeserver 永久拒绝（其他 4xx）时转圈换成红叹号，不写失败或错误码，重启后仍留原地且不自动重发；网络错误和限流不变红叹号", async () => {
+test("消息被 Homeserver 永久拒绝（其他 4xx）时显示红叹号，不写失败或错误码，重启后仍留原地且不自动重发；网络错误和限流不变红叹号", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let sendCalls = 0;
@@ -4626,18 +4646,19 @@ test("消息被 Homeserver 永久拒绝（其他 4xx）时转圈换成红叹号�
   expect(rows[1]).toHaveTextContent("被拒绝的文本");
   expect(rows[1].contains(failBtn)).toBe(true);
 
-  // 2) 网络错误和限流不变红叹号，仍保留在重试队列（转圈）
+  // 2) 网络错误和限流不变红叹号，仍保留在重试队列（无未确认转圈）
   sendMode = "429";
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "限流消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(sendCalls).toBe(2));
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(timeline).toHaveTextContent("限流消息");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
 
   sendMode = "network";
   await act(async () => { first.clock.advance(1000); });
   await waitFor(() => expect(sendCalls).toBe(3));
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
 
   // 3) 重启恢复后，失败气泡仍在原地且不自动重发，只有未确认项在重试队列
@@ -4653,7 +4674,9 @@ test("消息被 Homeserver 永久拒绝（其他 4xx）时转圈换成红叹号�
   expect(restoredRows[1]).toHaveTextContent("被拒绝的文本");
   expect(restoredRows[1].contains(screen.getByRole("button", { name: "失败" }))).toBe(true);
   expect(restoredRows[2]).toHaveTextContent("限流消息");
-  expect(restoredRows[2].contains(screen.getByRole("status", { name: "未确认" }))).toBe(true);
+  expect(restoredRows[2]).not.toHaveAttribute("data-event-id");
+  expect(within(restoredRows[2] as HTMLElement).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   second.unmount();
 });

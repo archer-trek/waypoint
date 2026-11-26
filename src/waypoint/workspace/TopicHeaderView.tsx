@@ -59,6 +59,8 @@ export function TopicHeaderView({
   const editOrDeleteDisabled = editing || deleteConfirmOpen || deleting;
   const pinLabel = topic.pinned ? "取消置顶" : "置顶";
   const isElevated = elevated ?? !isNarrow;
+  const botName = topic.botDisplayName?.trim() || undefined;
+  const hasDescription = Boolean(topic.description);
 
   return (
     <header
@@ -94,20 +96,49 @@ export function TopicHeaderView({
           <h2 className="m-0 text-[19px] sm:text-[20px] font-bold leading-snug tracking-tight text-foreground truncate">
             {topic.name}
           </h2>
-          {topic.description ? (
-            <button
-              type="button"
+          {botName || hasDescription ? (
+            <div
               className={cn(
-                "waypoint-topic-description block w-full text-left bg-transparent border-0 p-0 m-0 mt-0.5 text-[14px] leading-[1.35] text-muted-foreground hover:text-foreground cursor-pointer",
-                descriptionExpanded
-                  ? "expanded whitespace-pre-wrap overflow-visible"
-                  : "truncate",
+                "waypoint-topic-header-meta mt-0.5 flex min-w-0 text-[13px] leading-[1.35] text-muted-foreground",
+                hasDescription && descriptionExpanded
+                  ? "flex-col items-stretch gap-0.5"
+                  : "flex-row items-baseline gap-1.5",
               )}
-              aria-expanded={descriptionExpanded}
-              onClick={onToggleDescription}
             >
-              {topic.description}
-            </button>
+              {botName ? (
+                <span
+                  className={cn(
+                    "waypoint-topic-bot-name min-w-0 truncate",
+                    hasDescription && !descriptionExpanded && "shrink-0 max-w-[50%]",
+                  )}
+                >
+                  {botName}
+                </span>
+              ) : null}
+              {botName && hasDescription && !descriptionExpanded ? (
+                <span
+                  aria-hidden="true"
+                  className="waypoint-topic-meta-separator shrink-0 text-muted-foreground/70"
+                >
+                  ·
+                </span>
+              ) : null}
+              {hasDescription ? (
+                <button
+                  type="button"
+                  className={cn(
+                    "waypoint-topic-description text-left bg-transparent border-0 p-0 m-0 text-[13px] leading-[1.35] text-muted-foreground hover:text-foreground cursor-pointer",
+                    descriptionExpanded
+                      ? "expanded block w-full whitespace-pre-wrap overflow-visible"
+                      : "min-w-0 flex-1 truncate",
+                  )}
+                  aria-expanded={descriptionExpanded}
+                  onClick={onToggleDescription}
+                >
+                  {topic.description}
+                </button>
+              ) : null}
+            </div>
           ) : null}
         </div>
         <div className="waypoint-header-actions-group flex items-center gap-1.5 shrink-0">

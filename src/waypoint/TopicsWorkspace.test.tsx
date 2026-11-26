@@ -594,11 +594,13 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("缓存历史消息");
     await waitFor(() => expect(syncCalls).toBe(1));
 
-    // Send a message while offline -> enters RetryQueue backoff
+    // Send a message while offline -> enters RetryQueue backoff (no unconfirmed spinner rendered)
     await user.type(screen.getByRole("textbox", { name: "输入消息" }), "离线暂存发送");
     await user.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(sendAttempted).toBe(1));
-    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("离线暂存发送");
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
 
     // Advance 1000ms -> sync #2 and retry #2 both still fail -> both enter 2000ms backoff
     await advanceWhenTimerScheduled(clock, 1000);
@@ -617,9 +619,9 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     await waitFor(() => {
       expect(syncCalls).toBeGreaterThanOrEqual(3);
       expect(sendAttempted).toBe(3);
-      expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
       expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("网络恢复后的同步消息");
     });
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
     view.unmount();
   });
@@ -1004,22 +1006,25 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     await user.type(composer, "自动重试成功消息");
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    // Initial transient failure -> stays unconfirmed in timeline & sidebar
+    // Initial transient failure -> stays unconfirmed in timeline & sidebar without spinner indicators
     await waitFor(() => expect(sendAttempts).toBe(1));
     expect(composer).toHaveValue("");
-    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
-    expect(within(row).getByRole("img", { name: "未确认" })).toBeInTheDocument();
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    expect(timeline).toHaveTextContent("自动重试成功消息");
+    expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+    expect(timeline.querySelectorAll("[data-event-id]")).toHaveLength(0);
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(within(row).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+    expect(within(row).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
 
     // Advance 1000ms for RetryQueue backoff -> retries same txnId and reconciles in-place
     await advanceWhenTimerScheduled(clock, 1000);
     await waitFor(() => {
       expect(sendAttempts).toBe(2);
-      expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+      expect(timeline.querySelectorAll('[data-event-id="$reconciled-auto"]')).toHaveLength(1);
     });
     expect(sentTxnIds[0]).toBe(sentTxnIds[1]);
     expect(within(row).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
-    const timeline = screen.getByRole("log", { name: "对话时间线" });
-    expect(timeline.querySelectorAll('[data-event-id="$reconciled-auto"]')).toHaveLength(1);
     expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
   });
 
@@ -1108,19 +1113,19 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     // Resend first failed message -> transitions to unconfirmed; sync echo arrives before PUT response
     await user.click(screen.getAllByRole("button", { name: "失败" })[0]!);
     await waitFor(() => expect(resentTxnId).not.toBe(""));
-    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
 
     await advanceWhenTimerScheduled(clock, 1000);
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
     await waitFor(() => {
-      expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+      expect(timeline.querySelector('[data-event-id="$echo-resent"]')).not.toBeNull();
     });
 
     // Late HTTP 200 does not create duplicate bubble
     await act(async () => {
       pendingResend.resolve({ type: "response", status: 200, body: { event_id: "$echo-resent" } });
     });
-    const timeline = screen.getByRole("log", { name: "对话时间线" });
     const getBodies = () =>
       Array.from(timeline.querySelectorAll("[data-side] .waypoint-bubble")).map((el) => el.textContent);
     expect(getBodies()).toEqual(["重发的消息", "丢掉的消息"]);
@@ -1188,7 +1193,8 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
     const composer = screen.getByRole("textbox", { name: "输入消息" });
     await user.type(composer, "待发送队列消息");
     await user.click(screen.getByRole("button", { name: "发送" }));
-    await waitFor(() => expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("待发送队列消息"));
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
     // Type a new draft while first message is waiting in RetryQueue backoff
     await waitFor(() => expect(composer).toBeEnabled());
@@ -2486,6 +2492,204 @@ describe("TopicsWorkspace state-transition integration tests (#95)", () => {
       });
       pushStateSpy.mockRestore();
       backSpy.mockRestore();
+    }
+  });
+
+  test("schedules single responding expiry timer and clears timeline and sidebar indicators at exact 5-minute boundary (#166)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        return { type: "response", status: 200, body: { next_batch: "batch-next" } };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const eyesTs = clock.now - 10_000;
+    const harness = makePlatformHarness("wide");
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!resp-timeout:example.com": makeStoredRoom({
+          name: "超时收敛话题",
+          messages: [
+            makeTextEvent("$u1", "@alice:example.com", "请处理", eyesTs - 1000),
+            {
+              type: "m.reaction",
+              event_id: "$eyes-1",
+              sender: "@bot:example.com",
+              origin_server_ts: eyesTs,
+              content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u1", key: "👀" } },
+            },
+          ],
+        }),
+      },
+    });
+
+    const view = render(
+      <TopicsWorkspace
+        client={client}
+        clock={clock}
+        platform={harness.platform}
+        viewportMode="wide"
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /超时收敛话题/ });
+    expect(row.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+    await user.click(row);
+    expect(screen.getByRole("status", { name: "正在回应" })).toHaveClass("waypoint-timeline-responding");
+
+    // Initial sync timer (1000ms) + single responding expiry timer (290_000ms)
+    expect(clock.timerCount).toBe(2);
+
+    // Advance 289_999ms (total 299_999ms since eyesTs): still responding
+    await act(async () => {
+      clock.advance(289_999);
+    });
+    expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+    expect(row.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+
+    // Advance final 1ms (total 300_000ms since eyesTs): both indicators converge off automatically
+    await act(async () => {
+      clock.advance(1);
+    });
+    expect(screen.queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+    expect(row.querySelector(".waypoint-topic-row-responding")).toBeNull();
+
+    view.unmount();
+    expect(clock.timerCount).toBe(0);
+  });
+
+  test("keeps timeline pinned to bottom when Topic-level responding indicator appears unless user scrolled up (#166)", async () => {
+    const user = userEvent.setup();
+    const homeserver = new FakeHomeserver();
+    let syncCount = 0;
+    let emitEyesInRoom: "a" | "b" | null = null;
+    const baseTs = Date.UTC(2026, 10, 14, 12, 0, 0);
+
+    homeserver.handler = async (input) => {
+      if (input.url.includes("/sync")) {
+        syncCount += 1;
+        const targetRoom = emitEyesInRoom === "a" ? "!scroll-a:example.com" : emitEyesInRoom === "b" ? "!scroll-b:example.com" : null;
+        const suffix = emitEyesInRoom;
+        emitEyesInRoom = null;
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: `batch-${syncCount}`,
+            ...(targetRoom && suffix
+              ? {
+                  rooms: {
+                    join: {
+                      [targetRoom]: {
+                        timeline: {
+                          events: [
+                            {
+                              type: "m.reaction",
+                              event_id: `$eyes-${suffix}`,
+                              sender: "@bot:example.com",
+                              origin_server_ts: baseTs,
+                              content: {
+                                "m.relates_to": {
+                                  rel_type: "m.annotation",
+                                  event_id: `$u-${suffix}`,
+                                  key: "👀",
+                                },
+                              },
+                            },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                }
+              : {}),
+          },
+        };
+      }
+      throw new Error(`Unexpected request: ${input.method} ${input.url}`);
+    };
+
+    const clock = new ManualClock();
+    const client = await seedRestoredClient({
+      homeserver,
+      rooms: {
+        "!scroll-a:example.com": makeStoredRoom({
+          name: "贴底同步话题",
+          messages: [
+            makeTextEvent("$a-old", "@bot:example.com", "历史一", baseTs - 4000),
+            makeTextEvent("$u-a", "@alice:example.com", "最新问题", baseTs - 1000),
+          ],
+        }),
+        "!scroll-b:example.com": makeStoredRoom({
+          name: "上滑浏览话题",
+          messages: [
+            makeTextEvent("$b-old", "@bot:example.com", "历史一", baseTs - 4000),
+            makeTextEvent("$u-b", "@alice:example.com", "最新问题", baseTs - 1000),
+          ],
+        }),
+      },
+    });
+
+    const clientHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
+    const scrollHeightDesc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
+    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) return 300;
+        return clientHeightDesc?.get ? clientHeightDesc.get.call(this) : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        if (this.classList?.contains("waypoint-timeline")) {
+          const hasIndicator = Boolean(this.querySelector(".waypoint-timeline-responding"));
+          return 900 + (hasIndicator ? 32 : 0);
+        }
+        return scrollHeightDesc?.get ? scrollHeightDesc.get.call(this) : 0;
+      },
+    });
+
+    try {
+      const harness = makePlatformHarness("wide");
+      const view = render(
+        <TopicsWorkspace
+          client={client}
+          clock={clock}
+          platform={harness.platform}
+          viewportMode="wide"
+        />,
+      );
+
+      // Case A: stopped at bottom -> scrollTop advances from 600 to 632 when indicator appears
+      await user.click(screen.getByRole("button", { name: /贴底同步话题/ }));
+      const timeline = screen.getByRole("log", { name: "对话时间线" });
+      expect(timeline.scrollTop).toBe(600);
+
+      emitEyesInRoom = "a";
+      await advanceWhenTimerScheduled(clock, 1000);
+      await screen.findByRole("status", { name: "正在回应" });
+      expect(timeline.scrollTop).toBe(632);
+
+      // Case B: scrolled up -> scrollTop stays at 100 when indicator appears
+      await user.click(screen.getByRole("button", { name: /上滑浏览话题/ }));
+      expect(timeline.scrollTop).toBe(600);
+      timeline.scrollTop = 100;
+      fireEvent.scroll(timeline);
+
+      emitEyesInRoom = "b";
+      await advanceWhenTimerScheduled(clock, 1000);
+      await screen.findByRole("status", { name: "正在回应" });
+      expect(timeline.scrollTop).toBe(100);
+
+      view.unmount();
+    } finally {
+      if (clientHeightDesc) Object.defineProperty(HTMLElement.prototype, "clientHeight", clientHeightDesc);
+      if (scrollHeightDesc) Object.defineProperty(HTMLElement.prototype, "scrollHeight", scrollHeightDesc);
     }
   });
 });

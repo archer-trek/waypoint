@@ -1,5 +1,7 @@
 # 不做思考/工具面板
 
+> 注：本记录中「👀 还在正在回应就在（含延迟撤回）」、「✅ 和 ❌ 留在原消息上不藏」以及「在挂着 👀 的消息下方展示正在回应」的规则已由 [ADR-0034](./0034-topic-level-responding-and-message-status-cleanup.md) 修订为 Topic 级无文字三点动效、四条异常自愈规则以及隐藏绑定 Agent 打在 Owner 消息上的 ✅/❌ 徽章；不做思考/工具面板、不认 typing、以及审批/选择器依赖预种 reaction 的规则继续生效。
+
 正在回应只认消息上的 👀。思考和工具不是独立事件，Waypoint 不把它们收成面板。Hermes 的进度文字就是普通消息，编辑按渲染决定收成一条。
 
 ## Considered Options

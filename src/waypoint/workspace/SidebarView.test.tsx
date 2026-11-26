@@ -133,23 +133,36 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(activeRow.querySelector(".waypoint-topic-name")).toHaveClass("unread");
     expect(activeRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "700" });
     expect(activeRow.querySelector(".waypoint-topic-row-pin")).toHaveAttribute("data-slot", "badge");
-    expect(within(activeRow).getByRole("img", { name: "失败" })).toHaveClass("bg-destructive");
+    const activeHeader = activeRow.querySelector(".waypoint-topic-row-header") as HTMLElement;
+    expect(activeHeader.querySelector(".waypoint-topic-row-failed")).toBeNull();
     expect(activeRow.querySelector(".waypoint-topic-row-time")).toHaveClass("font-sans", "tabular-nums");
     expect(activeRow.querySelector(".waypoint-topic-row-time")).not.toHaveClass("font-mono");
 
     expect(activeRow.querySelector(".waypoint-topic-row-bot")).toBeNull();
     expect(activeRow).not.toHaveTextContent("Hermes");
-    const preview = activeRow.querySelector(".waypoint-topic-row-preview");
+    const activeSecondary = activeRow.querySelector(".waypoint-topic-row-secondary") as HTMLElement;
+    const preview = activeSecondary.querySelector(".waypoint-topic-row-preview");
     expect(preview).toHaveTextContent("最新一条消息单行摘要");
     expect(preview).toHaveClass("truncate", "text-muted-foreground", "leading-snug");
-    expect(activeRow.querySelector(".waypoint-topic-row-responding")).toHaveTextContent("正在回应");
+    const activeStatus = activeSecondary.querySelector(".waypoint-topic-row-status") as HTMLElement;
+    expect(activeStatus).not.toBeNull();
+    expect(activeStatus).toHaveClass("ml-auto");
+    const rowResponding = activeStatus.querySelector(".waypoint-topic-row-responding") as HTMLElement;
+    expect(rowResponding).not.toBeNull();
+    expect(rowResponding).toHaveAttribute("aria-label", "正在回应");
+    expect(rowResponding.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+    expect(rowResponding).toHaveTextContent("");
+    expect(activeRow).not.toHaveTextContent("正在回应");
+    expect(within(activeStatus).getByRole("img", { name: "失败" })).toHaveClass("bg-destructive");
 
     const secondRow = screen.getByRole("button", { name: "发送中话题" });
     expect(secondRow).toHaveClass("unavailable");
     expect(secondRow).toHaveAttribute("data-unavailable", "true");
     expect(secondRow.querySelector(".waypoint-topic-name")).toHaveStyle({ fontWeight: "500" });
     expect(secondRow.querySelector(".waypoint-topic-row-unavailable")).toHaveAttribute("data-slot", "badge");
-    expect(within(secondRow).getByRole("img", { name: "未确认" })).toHaveClass("animate-spin");
+    expect(within(secondRow).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+    expect(secondRow.querySelector(".waypoint-unconfirmed-spinner")).toBeNull();
+    expect(within(secondRow).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
     expect(secondRow.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("[图片] 架构草图");
 
     fireEvent.click(activeRow);
@@ -164,6 +177,56 @@ describe("SidebarView & EmptyDetailView", () => {
     expect(row.querySelector(".waypoint-topic-row-secondary")).toBeNull();
     expect(row.querySelector(".waypoint-topic-row-preview")).toBeNull();
     expect(row.querySelector(".waypoint-topic-row-bot")).toBeNull();
+  });
+
+  test("renders secondary row with right-aligned 3-dot responding and failed indicators beneath timestamp when topic has no preview (#166)", () => {
+    const { rerender } = render(
+      <SidebarView
+        pageEnterClass=""
+        reauthRequired={false}
+        showDetail={false}
+        reauthBanner={null}
+        topics={[makeTopic({ lastMessagePreview: undefined, responding: true })]}
+        nowMs={Date.UTC(2026, 10, 14, 12, 0, 0)}
+        isNarrow={false}
+        onOpenSettings={vi.fn()}
+        onOpenCreateForm={vi.fn()}
+        onOpenTopic={vi.fn()}
+      />,
+    );
+    const row = screen.getByRole("button", { name: "架构讨论" });
+    const secondary = row.querySelector(".waypoint-topic-row-secondary") as HTMLElement;
+    expect(secondary).not.toBeNull();
+    expect(secondary.querySelector(".waypoint-topic-row-preview")).toBeNull();
+    const statusGroup = secondary.querySelector(".waypoint-topic-row-status") as HTMLElement;
+    expect(statusGroup).not.toBeNull();
+    expect(statusGroup).toHaveClass("ml-auto");
+    const rowResponding = statusGroup.querySelector(".waypoint-topic-row-responding") as HTMLElement;
+    expect(rowResponding).not.toBeNull();
+    expect(rowResponding).toHaveAttribute("aria-label", "正在回应");
+    expect(rowResponding.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+    expect(row).not.toHaveTextContent("正在回应");
+
+    rerender(
+      <SidebarView
+        pageEnterClass=""
+        reauthRequired={false}
+        showDetail={false}
+        reauthBanner={null}
+        topics={[makeTopic({ lastMessagePreview: undefined, responding: false, sendStatus: "failed" })]}
+        nowMs={Date.UTC(2026, 10, 14, 12, 0, 0)}
+        isNarrow={false}
+        onOpenSettings={vi.fn()}
+        onOpenCreateForm={vi.fn()}
+        onOpenTopic={vi.fn()}
+      />,
+    );
+    const failedSecondary = row.querySelector(".waypoint-topic-row-secondary") as HTMLElement;
+    expect(failedSecondary).not.toBeNull();
+    const failedStatusGroup = failedSecondary.querySelector(".waypoint-topic-row-status") as HTMLElement;
+    expect(failedStatusGroup).toHaveClass("ml-auto");
+    expect(within(failedStatusGroup).getByRole("img", { name: "失败" })).toHaveClass("bg-destructive");
+    expect((row.querySelector(".waypoint-topic-row-header") as HTMLElement).querySelector(".waypoint-topic-row-failed")).toBeNull();
   });
 
   test("renders empty list guidance on narrow viewport and EmptyDetailView on wide viewport", () => {

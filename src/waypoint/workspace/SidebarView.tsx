@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatTopicListTime, type TopicSummary } from "../topics";
 import { EmptyInvitation } from "./EmptyDetailView";
+import { RespondingIndicator } from "./RespondingIndicator";
 
 export type SidebarViewProps = {
   pageEnterClass: string;
@@ -45,7 +46,10 @@ function TopicRow({
   nowMs,
   onOpenTopic,
 }: TopicRowProps) {
-  const showSecondary = Boolean(topic.lastMessagePreview) || topic.responding;
+  const showSecondary =
+    Boolean(topic.lastMessagePreview) ||
+    topic.responding ||
+    topic.sendStatus === "failed";
   return (
     <li>
       <button
@@ -106,21 +110,6 @@ function TopicRow({
                 置顶
               </Badge>
             ) : null}
-            {topic.sendStatus === "failed" ? (
-              <span
-                role="img"
-                aria-label="失败"
-                className="waypoint-topic-row-failed inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-destructive text-xs font-bold leading-none text-destructive-foreground"
-              >
-                !
-              </span>
-            ) : topic.sendStatus === "unconfirmed" ? (
-              <span
-                role="img"
-                aria-label="未确认"
-                className="waypoint-unconfirmed-spinner inline-block size-3.5 shrink-0 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"
-              />
-            ) : null}
             {topic.lastActivityTs !== undefined ? (
               <span
                 className={cn(
@@ -146,18 +135,24 @@ function TopicRow({
                 {topic.lastMessagePreview}
               </span>
             ) : null}
-            {topic.responding ? (
-              <span
-                className={cn(
-                  "waypoint-topic-row-responding ml-auto inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap font-medium text-foreground",
-                  isNarrow ? "text-[12.5px]" : "text-[12px]",
-                )}
-              >
-                <span
-                  aria-hidden="true"
-                  className="size-1.5 rounded-full bg-foreground animate-pulse motion-reduce:animate-none"
-                />
-                <span>正在回应</span>
+            {topic.responding || topic.sendStatus === "failed" ? (
+              <span className="waypoint-topic-row-status ml-auto inline-flex shrink-0 items-center gap-1.5">
+                {topic.responding ? (
+                  <RespondingIndicator
+                    size="row"
+                    aria-label="正在回应"
+                    className="waypoint-topic-row-responding shrink-0"
+                  />
+                ) : null}
+                {topic.sendStatus === "failed" ? (
+                  <span
+                    role="img"
+                    aria-label="失败"
+                    className="waypoint-topic-row-failed inline-flex size-4 shrink-0 items-center justify-center rounded-full bg-destructive text-[11px] font-bold leading-none text-destructive-foreground"
+                  >
+                    !
+                  </span>
+                ) : null}
               </span>
             ) : null}
           </span>

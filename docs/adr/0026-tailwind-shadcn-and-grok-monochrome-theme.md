@@ -1,5 +1,7 @@
 # 采用 Tailwind CSS v4、shadcn/ui 原语体系与 Grokbot 高对比黑白灰 Light/Dark 主题
 
+> 注：下文引用的「贴顶 Docked Header 仅展示 Topic 名与 Description」已由 [ADR-0035](./0035-topic-header-bound-bot-display.md) 修订为顶栏第二行同时展示绑定 Bot 名字；失败消息 `⋯` 菜单按钮与红叹号 `!` 的布局已由 [ADR-0034](./0034-topic-level-responding-and-message-status-cleanup.md) 修订为置于失败 Owner 气泡下方右对齐（仍沿用 `DropdownMenu`）。主题 Token 与 shadcn/ui 组件体系规则继续生效。
+
 Waypoint 弃用旧版暖纸色/夜读配色与散落在 `src/App.css` 中的手写样式及自制浮层/确认框实现，全面引入 Tailwind CSS v4 与基于 Radix UI 原语的 `shadcn/ui` 组件体系，统一采用对标 Grokbot 的高对比黑白灰（Neutral/Zinc）Light/Dark 主题，并在「设置 → 这台设备」提供仅作用于本机的外观三档切换，以实现双端稳定一致的原生交互与视觉约束。
 
 ## Considered Options
