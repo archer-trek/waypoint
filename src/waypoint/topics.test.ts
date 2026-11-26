@@ -1,11 +1,18 @@
-import { describe, expect, test } from "vitest";
-import type { PendingRoomEvent, StoredRoomEvents } from "./session-store";
+import { IDBFactory } from "fake-indexeddb";
+import { beforeEach, describe, expect, test } from "vitest";
+import type { HomeserverTransport } from "../adapters/types";
+import { MatrixClient } from "./matrix-client";
+import { saveSession, type PendingRoomEvent, type StoredRoomEvents } from "./session-store";
 import {
+  deleteTopicMessage,
   deriveLatestMessagePreview,
   deriveRoomTimelineItems,
+  deriveTopicFavorites,
   deriveTopics,
+  FAVORITES_ACCOUNT_DATA_TYPE,
   formatMessagePreviewText,
   RESPONDING_INACTIVITY_TIMEOUT_MS,
+  toggleMessageFavorite,
 } from "./topics";
 
 describe("formatMessagePreviewText", () => {
@@ -872,5 +879,256 @@ describe("deriveTopics self-healing responding rules (#166)", () => {
     const fallback = deriveOne(fallbackTargetTsRoom, 11_000);
     expect(fallback.responding).toBe(true);
     expect(fallback.respondingExpiresAtMs).toBe(10_000 + 300_000);
+  });
+});
+
+describe("deleteTopicMessage, toggleMessageFavorite, and deriveTopicFavorites", () => {
+  beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
+  });
+
+  const owner = "@alice:example.com";
+  const agent = "@bot:example.com";
+
+  test("deriveTopicFavorites resolves live edits and media previews, hides redacted entries, and falls back to snapshot for unloaded cold messages", () => {
+    const room: StoredRoomEvents = {
+      stateEvents: [
+        { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: agent } },
+      ],
+      timelineEvents: [
+        {
+          type: "m.room.message",
+          event_id: "$msg-edit",
+          sender: agent,
+          origin_server_ts: 1000,
+          content: { msgtype: "m.text", body: "旧草稿 ▉" },
+        },
+        {
+          type: "m.room.message",
+          event_id: "$msg-edit-v2",
+          sender: agent,
+          origin_server_ts: 1100,
+          content: {
+            msgtype: "m.text",
+            body: "* **新版本** 内容",
+            "m.relates_to": { rel_type: "m.replace", event_id: "$msg-edit" },
+            "m.new_content": { msgtype: "m.text", body: "**最终定稿** 说明" },
+          },
+        },
+        {
+          type: "m.room.message",
+          event_id: "$msg-img",
+          sender: owner,
+          origin_server_ts: 2000,
+          content: { msgtype: "m.image", body: "photo.png", url: "mxc://example.com/p" },
+        },
+        {
+          type: "m.room.message",
+          event_id: "$msg-gone",
+          sender: owner,
+          origin_server_ts: 3000,
+          content: { msgtype: "m.text", body: "已被撤回" },
+        },
+        {
+          type: "m.room.redaction",
+          event_id: "$red-gone",
+          redacts: "$msg-gone",
+          sender: owner,
+        },
+      ],
+      favorites: [
+        { eventId: "$msg-edit", favoritedAt: 100, senderSide: "left", preview: "旧快照", ts: 1000 },
+        { eventId: "$msg-cold", favoritedAt: 300, senderSide: "right", preview: "冷块里的重要结论", ts: 500 },
+        { eventId: "$msg-img", favoritedAt: 200 },
+        { eventId: "$msg-gone", favoritedAt: 400, senderSide: "right", preview: "已被撤回", ts: 3000 },
+      ],
+    };
+
+    const derived = deriveTopicFavorites(room, owner, agent);
+    expect(derived.items.map((item) => item.eventId)).toEqual([
+      "$msg-cold",
+      "$msg-img",
+      "$msg-edit",
+    ]);
+    expect(derived.items[0]).toEqual({
+      eventId: "$msg-cold",
+      favoritedAt: 300,
+      senderSide: "right",
+      preview: "冷块里的重要结论",
+      ts: 500,
+    });
+    expect(derived.items[1]).toEqual({
+      eventId: "$msg-img",
+      favoritedAt: 200,
+      senderSide: "right",
+      preview: "[图片]",
+      ts: 2000,
+    });
+    expect(derived.items[2]).toEqual({
+      eventId: "$msg-edit",
+      favoritedAt: 100,
+      senderSide: "left",
+      preview: "最终定稿 说明",
+      ts: 1000,
+    });
+    expect(Array.from(derived.favoritedEventIds).sort()).toEqual([
+      "$msg-cold",
+      "$msg-edit",
+      "$msg-img",
+    ]);
+  });
+
+  test("deleteTopicMessage blocks unavailable topics, preserves message on failure without raw server error leak, and prunes favorites on 200", async () => {
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    let nextRedactResult: { status: number; body: unknown } = {
+      status: 403,
+      body: { errcode: "M_FORBIDDEN", error: "CANARY_RAW_FORBIDDEN" },
+    };
+    let failAccountDataPut = false;
+
+    const transport: HomeserverTransport = {
+      request: async (req) => {
+        calls.push({ method: req.method, url: req.url, body: req.body });
+        if (req.url.includes("/redact/")) {
+          return { type: "response", status: nextRedactResult.status, body: nextRedactResult.body };
+        }
+        if (req.url.includes(`/account_data/${FAVORITES_ACCOUNT_DATA_TYPE}`)) {
+          if (failAccountDataPut) {
+            return { type: "failure", failure: { type: "network" } };
+          }
+          return { type: "response", status: 200, body: {} };
+        }
+        return { type: "response", status: 200, body: {} };
+      },
+    };
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: owner,
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      rooms: {
+        "!r-ok:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: agent } },
+          ],
+          timelineEvents: [
+            {
+              type: "m.room.message",
+              event_id: "$a1",
+              sender: agent,
+              origin_server_ts: 1000,
+              content: { msgtype: "m.text", body: "Agent 错误回答" },
+            },
+          ],
+          favorites: [{ eventId: "$a1", favoritedAt: 50, senderSide: "left", preview: "Agent 错误回答", ts: 1000 }],
+        },
+        "!r-unavail:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: agent } },
+            { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+          ],
+          timelineEvents: [
+            {
+              type: "m.room.message",
+              event_id: "$u1",
+              sender: owner,
+              origin_server_ts: 1000,
+              content: { msgtype: "m.text", body: "加密话题里的消息" },
+            },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(transport);
+    await client.restore();
+
+    // Unavailable topic blocks deleteTopicMessage without hitting network
+    const blocked = await deleteTopicMessage(client, "!r-unavail:example.com", "$u1");
+    expect(blocked.ok).toBe(false);
+    expect(calls).toHaveLength(0);
+
+    // Server 403 -> message stays intact, no raw English leakage
+    const failed = await deleteTopicMessage(client, "!r-ok:example.com", "$a1");
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) {
+      expect(failed.message).not.toContain("CANARY_RAW_FORBIDDEN");
+      expect(failed.message).not.toContain("M_FORBIDDEN");
+    }
+    expect(client.rooms()["!r-ok:example.com"]!.timelineEvents).toHaveLength(1);
+
+    // Server 200 (even if best-effort favorites sync fails) -> message and favorite removed locally
+    nextRedactResult = { status: 200, body: { event_id: "$red-a1" } };
+    failAccountDataPut = true;
+    const ok = await deleteTopicMessage(client, "!r-ok:example.com", "$a1");
+    expect(ok).toEqual({ ok: true });
+    expect(client.rooms()["!r-ok:example.com"]!.timelineEvents).toHaveLength(0);
+    expect(client.rooms()["!r-ok:example.com"]!.favorites).toBeUndefined();
+  });
+
+  test("toggleMessageFavorite works in unavailable topics and rolls back cleanly on server failure", async () => {
+    let shouldFail = true;
+    const transport: HomeserverTransport = {
+      request: async () =>
+        shouldFail
+          ? { type: "failure", failure: { type: "network" } }
+          : { type: "response", status: 200, body: {} },
+    };
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: owner,
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      rooms: {
+        "!r-unavail:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: agent } },
+            { type: "m.room.encryption", state_key: "", content: { algorithm: "m.megolm.v1.aes-sha2" } },
+          ],
+          timelineEvents: [
+            {
+              type: "m.room.message",
+              event_id: "$u1",
+              sender: owner,
+              origin_server_ts: 1000,
+              content: { msgtype: "m.text", body: "重要历史" },
+            },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(transport);
+    await client.restore();
+
+    const failRes = await toggleMessageFavorite(
+      client,
+      "!r-unavail:example.com",
+      { eventId: "$u1", favoritedAt: 500, senderSide: "right", preview: "重要历史", ts: 1000 },
+      false,
+    );
+    expect(failRes.ok).toBe(false);
+    expect(client.rooms()["!r-unavail:example.com"]!.favorites).toBeUndefined();
+
+    shouldFail = false;
+    const okAdd = await toggleMessageFavorite(
+      client,
+      "!r-unavail:example.com",
+      { eventId: "$u1", favoritedAt: 500, senderSide: "right", preview: "重要历史", ts: 1000 },
+      false,
+    );
+    expect(okAdd.ok).toBe(true);
+    expect(client.rooms()["!r-unavail:example.com"]!.favorites?.map((f) => f.eventId)).toEqual(["$u1"]);
+
+    const okRemove = await toggleMessageFavorite(
+      client,
+      "!r-unavail:example.com",
+      { eventId: "$u1", favoritedAt: 500, senderSide: "right", preview: "重要历史", ts: 1000 },
+      true,
+    );
+    expect(okRemove.ok).toBe(true);
+    expect(client.rooms()["!r-unavail:example.com"]!.favorites).toBeUndefined();
   });
 });

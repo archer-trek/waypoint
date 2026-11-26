@@ -996,3 +996,222 @@ describe("MatrixClient v2 persistence, blob decoupling, and commit-before-mutate
     expect(afterBackfill.coldLatestPreview).toBeUndefined();
   });
 });
+
+describe("MatrixClient message redaction and room favorites persistence", () => {
+  beforeEach(() => {
+    globalThis.indexedDB = new IDBFactory();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("redactRoomEvent sends PUT redact request and applyConfirmedRedaction removes event, updates readPosition, prunes favorite, and persists", async () => {
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const transport: HomeserverTransport = {
+      request: async (req) => {
+        requests.push({ method: req.method, url: req.url, body: req.body });
+        return { type: "response", status: 200, body: { event_id: "$red-confirm" } };
+      },
+    };
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: [
+            {
+              type: "m.room.message",
+              event_id: "$m1",
+              sender: "@alice:example.com",
+              origin_server_ts: 1000,
+              content: { msgtype: "m.text", body: "第一条" },
+            },
+            {
+              type: "m.room.message",
+              event_id: "$m2",
+              sender: "@bot:example.com",
+              origin_server_ts: 2000,
+              content: { msgtype: "m.text", body: "第二条" },
+            },
+          ],
+          readPositionEventId: "$m2",
+          favorites: [
+            { eventId: "$m1", favoritedAt: 100, senderSide: "right", preview: "第一条", ts: 1000 },
+            { eventId: "$m2", favoritedAt: 200, senderSide: "left", preview: "第二条", ts: 2000 },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(transport);
+    await client.restore();
+
+    const res = await client.redactRoomEvent("!r1:example.com", "$m2", "txn-red-1");
+    expect(res).toEqual({ type: "response", status: 200, body: { event_id: "$red-confirm" } });
+    expect(requests).toEqual([
+      {
+        method: "PUT",
+        url: "https://matrix.example.com/_matrix/client/v3/rooms/!r1%3Aexample.com/redact/%24m2/txn-red-1",
+        body: {},
+      },
+    ]);
+
+    await client.applyConfirmedRedaction("!r1:example.com", "$m2", "$red-confirm");
+
+    const room = client.rooms()["!r1:example.com"]!;
+    expect(room.timelineEvents.map((ev) => ev.event_id)).toEqual(["$m1"]);
+    expect(room.readPositionEventId).toBe("$m1");
+    expect(room.favorites?.map((f) => f.eventId)).toEqual(["$m1"]);
+
+    // Verify persisted to IndexedDB across restore
+    const restored = new MatrixClient(noopTransport());
+    await restored.restore();
+    const restoredRoom = restored.rooms()["!r1:example.com"]!;
+    expect(restoredRoom.timelineEvents.map((ev) => ev.event_id)).toEqual(["$m1"]);
+    expect(restoredRoom.readPositionEventId).toBe("$m1");
+    expect(restoredRoom.favorites?.map((f) => f.eventId)).toEqual(["$m1"]);
+  });
+
+  test("putRoomAccountData + retainRoomFavorites persist, sync im.waypoint.favorites respects favoriteGeneration lock, and incoming redactions prune favorites", async () => {
+    const requests: Array<{ method: string; url: string; body?: unknown }> = [];
+    const transport: HomeserverTransport = {
+      request: async (req) => {
+        requests.push({ method: req.method, url: req.url, body: req.body });
+        if (req.url.includes("/_matrix/client/v3/sync")) {
+          return {
+            type: "response",
+            status: 200,
+            body: {
+              next_batch: "batch-2",
+              rooms: {
+                join: {
+                  "!r1:example.com": {
+                    account_data: {
+                      events: [
+                        {
+                          type: "im.waypoint.favorites",
+                          content: {
+                            v: 1,
+                            favorites: [
+                              { eventId: "$m1", favoritedAt: 100, senderSide: "right", preview: "第一条", ts: 1000 },
+                            ],
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        return { type: "response", status: 200, body: {} };
+      },
+    };
+
+    await saveSession({
+      baseUrl: "https://matrix.example.com",
+      userId: "@alice:example.com",
+      accessToken: "tok-1",
+      deviceId: "DEV1",
+      syncCursor: "batch-1",
+      rooms: {
+        "!r1:example.com": {
+          stateEvents: [
+            { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+          ],
+          timelineEvents: [
+            {
+              type: "m.room.message",
+              event_id: "$m1",
+              sender: "@alice:example.com",
+              origin_server_ts: 1000,
+              content: { msgtype: "m.text", body: "第一条" },
+            },
+            {
+              type: "m.room.message",
+              event_id: "$m2",
+              sender: "@bot:example.com",
+              origin_server_ts: 2000,
+              content: { msgtype: "m.text", body: "第二条" },
+            },
+          ],
+        },
+      },
+    });
+
+    const client = new MatrixClient(transport);
+    await client.restore();
+
+    // Start sync before local favorite write completes
+    const attempt = await client.sync();
+
+    const favs = [{ eventId: "$m2", favoritedAt: 500, senderSide: "left" as const, preview: "第二条", ts: 2000 }];
+    const putRes = await client.putRoomAccountData("!r1:example.com", "im.waypoint.favorites", {
+      v: 1,
+      favorites: favs,
+    });
+    expect(putRes.type).toBe("response");
+    expect(requests.some((r) =>
+      r.method === "PUT" &&
+      r.url === "https://matrix.example.com/_matrix/client/v3/user/%40alice%3Aexample.com/rooms/!r1%3Aexample.com/account_data/im.waypoint.favorites",
+    )).toBe(true);
+
+    await client.retainRoomFavorites("!r1:example.com", favs);
+    // In-flight sync must not clobber newer local favorite
+    await client.retainSync(attempt);
+    expect(client.rooms()["!r1:example.com"]!.favorites?.map((f) => f.eventId)).toEqual(["$m2"]);
+
+    // Subsequent sync updates favorites and prunes any target redacted in the same sync
+    await client.retainSync({
+      result: {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-3",
+          rooms: {
+            join: {
+              "!r1:example.com": {
+                timeline: {
+                  events: [{ type: "m.room.redaction", redacts: "$m2", event_id: "$red2", sender: "@alice:example.com" }],
+                },
+                account_data: {
+                  events: [
+                    {
+                      type: "im.waypoint.favorites",
+                      content: {
+                        v: 1,
+                        favorites: [
+                          { eventId: "$m1", favoritedAt: 100 },
+                          { eventId: "$m2", favoritedAt: 500 },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+      incremental: true,
+      leaveGeneration: client.currentLeaveGeneration,
+      tagGeneration: client.currentTagGeneration,
+      favoriteGeneration: client.currentFavoriteGeneration,
+    });
+
+    expect(client.rooms()["!r1:example.com"]!.favorites?.map((f) => f.eventId)).toEqual(["$m1"]);
+
+    const restored = new MatrixClient(noopTransport());
+    await restored.restore();
+    expect(restored.rooms()["!r1:example.com"]!.favorites?.map((f) => f.eventId)).toEqual(["$m1"]);
+  });
+});

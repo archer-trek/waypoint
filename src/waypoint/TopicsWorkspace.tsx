@@ -40,10 +40,15 @@ import {
   buildRenameAgentContent,
   computeTargetReadPosition,
   createTopicRoom,
+  deleteTopicMessage,
   deleteTopicRoom,
+  deriveFavoritePreviewForTimelineItem,
   deriveRoomAvailability,
+  deriveTopicFavorites,
   type BubbleVisibility,
+  type TimelineItem,
   type TimelineMedia,
+  type TopicFavoriteItem,
   deriveRoomTimelineItems,
   hasLimitedGapAfterReadPosition,
   deriveTopics,
@@ -51,12 +56,15 @@ import {
   resolvePreselectedBotId,
   saveRegisteredAgents,
   setTopicPinned,
+  toggleMessageFavorite,
   updateTopicDetails,
   validateAgentUserId,
 } from "./topics";
 import { ComposerView } from "./workspace/ComposerView";
 import { CreateTopicView } from "./workspace/CreateTopicView";
+import { DeleteMessageDialog } from "./workspace/DeleteMessageDialog";
 import { DeleteTopicDialog } from "./workspace/DeleteTopicDialog";
+import { TopicFavoritesDialog } from "./workspace/TopicFavoritesDialog";
 import { EditTopicView } from "./workspace/EditTopicView";
 import { EmptyDetailView } from "./workspace/EmptyDetailView";
 import { ReauthBanner } from "./workspace/ReauthBanner";
@@ -147,6 +155,18 @@ export function TopicsWorkspace({
   const [deleteError, setDeleteError] = useState<string | undefined>(undefined);
   const [pinPendingByRoom, setPinPendingByRoom] = useState<Record<string, boolean>>({});
   const pinPendingRef = useRef<Set<string>>(new Set());
+  const [deleteMessageTarget, setDeleteMessageTarget] = useState<{
+    roomId: string;
+    eventId: string;
+  } | null>(null);
+  const [deletingMessage, setDeletingMessage] = useState(false);
+  const deletingMessageRef = useRef(false);
+  const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [favoritePendingKeys, setFavoritePendingKeys] = useState<string[]>([]);
+  const favoritePendingRef = useRef<Set<string>>(new Set());
+  const [highlightedEventId, setHighlightedEventId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<number | undefined>(undefined);
+  const pendingJumpRequestRef = useRef<{ roomId: string; eventId: string } | null>(null);
   const [toastNotice, setToastNotice] = useState<string | undefined>(undefined);
   const toastNoticeTimerRef = useRef<number | undefined>(undefined);
   const draftManager = useMemo(
@@ -408,6 +428,22 @@ export function TopicsWorkspace({
         nowMs,
       )
     : [];
+  const activeFavorites = activeTopic
+    ? deriveTopicFavorites(
+        rooms[activeTopic.roomId],
+        client.ownerId,
+        activeTopic.agentUserId,
+      )
+    : { items: [], favoritedEventIds: new Set<string>() };
+  const activeFavoritePendingEventIds = new Set<string>();
+  if (activeTopic) {
+    const prefix = `${activeTopic.roomId}\n`;
+    for (const key of favoritePendingKeys) {
+      if (key.startsWith(prefix)) {
+        activeFavoritePendingEventIds.add(key.slice(prefix.length));
+      }
+    }
+  }
   const timelineContentKey = `${activeTopic?.responding ? "1" : "0"}\0${activeTimelineItems
     .map((item) => {
       if (item.kind === "day-separator") {
@@ -473,7 +509,7 @@ export function TopicsWorkspace({
     setEditPendingFields({ name: true, description: true });
   }
 
-  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting || reauthSubmitting;
+  const anyFormSubmitting = submitting || quickSubmitting || agentsSubmitting || editSubmitting || exiting || deleting || deletingMessage || reauthSubmitting;
 
   const createIsDirty = Boolean(
     nameInput.trim() ||
@@ -535,6 +571,13 @@ export function TopicsWorkspace({
       setPendingDiscardAction(null);
       return true;
     }
+    if (deleteMessageTarget !== null) {
+      restoreNarrowNavDepthAfterIntercept();
+      if (!deletingMessage) {
+        setDeleteMessageTarget(null);
+      }
+      return true;
+    }
     if (deleteConfirmOpen) {
       restoreNarrowNavDepthAfterIntercept();
       if (!deleting) {
@@ -554,6 +597,11 @@ export function TopicsWorkspace({
       if (!agentsSubmitting) {
         cancelAgentsAction();
       }
+      return true;
+    }
+    if (favoritesOpen) {
+      restoreNarrowNavDepthAfterIntercept();
+      setFavoritesOpen(false);
       return true;
     }
     if (messageContextMenuOpen) {
@@ -614,6 +662,8 @@ export function TopicsWorkspace({
 
   const canHandleSystemBack =
     pendingDiscardAction !== null ||
+    deleteMessageTarget !== null ||
+    favoritesOpen ||
     deleteConfirmOpen ||
     exitConfirmOpen ||
     agentsForm?.mode === "remove" ||
@@ -668,6 +718,12 @@ export function TopicsWorkspace({
       } else if (editing) {
         if (editSubmitting) return;
         requestGuardedExit(editIsDirty, closeEditForm);
+      } else if (deleteMessageTarget !== null) {
+        if (!deletingMessage) {
+          setDeleteMessageTarget(null);
+        }
+      } else if (favoritesOpen) {
+        setFavoritesOpen(false);
       } else if (deleteConfirmOpen) {
         cancelDeleteConfirm();
       } else if (exitConfirmOpen) {
@@ -1086,6 +1142,10 @@ export function TopicsWorkspace({
     resetEditForm();
     setDeleteConfirmOpen(false);
     setDeleteError(undefined);
+    setDeleteMessageTarget(null);
+    setFavoritesOpen(false);
+    setHighlightedEventId(null);
+    pendingJumpRequestRef.current = null;
     setHeaderElevated(false);
     setActiveTopicId(roomId);
     setDescriptionExpanded(false);
@@ -1162,6 +1222,256 @@ export function TopicsWorkspace({
     }
   }
 
+  const onFavoriteJumpLanded = useEffectEvent((eventId: string, showFab: boolean) => {
+    setShowScrollBottomFab(showFab);
+    if (highlightTimerRef.current !== undefined) {
+      clock.clearTimeout(highlightTimerRef.current);
+      highlightTimerRef.current = undefined;
+    }
+    setHighlightedEventId(eventId);
+    highlightTimerRef.current = clock.setTimeout(() => {
+      highlightTimerRef.current = undefined;
+      if (mountedRef.current) {
+        setHighlightedEventId((prev) => (prev === eventId ? null : prev));
+      }
+    }, 2200);
+  });
+
+  async function submitFavoriteToggle(
+    roomId: string,
+    entry: {
+      eventId: string;
+      favoritedAt: number;
+      senderSide?: "left" | "right";
+      preview: string;
+      ts?: number;
+    },
+    currentlyFavorited: boolean,
+  ) {
+    if (exiting || reauthRequiredRef.current) {
+      return;
+    }
+    const key = `${roomId}\n${entry.eventId}`;
+    if (favoritePendingRef.current.has(key)) {
+      return;
+    }
+    favoritePendingRef.current.add(key);
+    setFavoritePendingKeys(Array.from(favoritePendingRef.current));
+    try {
+      const result = await toggleMessageFavorite(client, roomId, entry, currentlyFavorited);
+      if (!mountedRef.current || !client.hasToken) {
+        return;
+      }
+      if (!result.ok) {
+        showToastNotice(result.message);
+        return;
+      }
+      setRevision((value) => value + 1);
+    } finally {
+      favoritePendingRef.current.delete(key);
+      if (mountedRef.current) {
+        setFavoritePendingKeys(Array.from(favoritePendingRef.current));
+      }
+    }
+  }
+
+  async function handleToggleFavorite(
+    roomId: string,
+    item: Extract<TimelineItem, { kind: "message" }>,
+  ) {
+    if (!item.eventId || item.status !== "confirmed") {
+      return;
+    }
+    const existingFavorites = client.rooms()[roomId]?.favorites ?? [];
+    const currentlyFavorited = existingFavorites.some((f) => f.eventId === item.eventId);
+    await submitFavoriteToggle(
+      roomId,
+      {
+        eventId: item.eventId,
+        favoritedAt: clock.currentTimeMs ? clock.currentTimeMs() : Date.now(),
+        senderSide: item.side,
+        preview: deriveFavoritePreviewForTimelineItem(item),
+        ...(item.ts !== undefined ? { ts: item.ts } : {}),
+      },
+      currentlyFavorited,
+    );
+  }
+
+  async function handleRemoveFavoriteFromDialog(
+    roomId: string,
+    favItem: TopicFavoriteItem,
+  ) {
+    await submitFavoriteToggle(
+      roomId,
+      {
+        eventId: favItem.eventId,
+        favoritedAt: favItem.favoritedAt,
+        ...(favItem.senderSide ? { senderSide: favItem.senderSide } : {}),
+        preview: favItem.preview,
+        ...(favItem.ts !== undefined ? { ts: favItem.ts } : {}),
+      },
+      true,
+    );
+  }
+
+  function handleRequestDeleteMessage(
+    roomId: string,
+    item: Extract<TimelineItem, { kind: "message" }>,
+  ) {
+    if (
+      !item.eventId ||
+      item.status !== "confirmed" ||
+      deletingMessageRef.current ||
+      anyFormSubmitting ||
+      exiting ||
+      reauthRequiredRef.current
+    ) {
+      return;
+    }
+    if (deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable) {
+      return;
+    }
+    setDeleteMessageTarget({ roomId, eventId: item.eventId });
+  }
+
+  async function confirmDeleteMessage() {
+    if (deletingMessageRef.current || !deleteMessageTarget) {
+      return;
+    }
+    const target = deleteMessageTarget;
+    deletingMessageRef.current = true;
+    setDeletingMessage(true);
+    try {
+      const result = await deleteTopicMessage(client, target.roomId, target.eventId);
+      if (!mountedRef.current) {
+        return;
+      }
+      setDeleteMessageTarget(null);
+      if (!result.ok) {
+        showToastNotice(result.message);
+        return;
+      }
+      setRevision((value) => value + 1);
+    } finally {
+      deletingMessageRef.current = false;
+      if (mountedRef.current) {
+        setDeletingMessage(false);
+      }
+    }
+  }
+
+  async function handleSelectFavoriteJump(roomId: string, eventId: string) {
+    setFavoritesOpen(false);
+    awaitingReadPosLandingRoomRef.current = null;
+    userScrolledRoomRef.current = roomId;
+
+    const currentRoom = client.rooms()[roomId];
+    if (currentRoom && timelineIndexOf(currentRoom.timelineEvents, eventId) !== -1) {
+      pendingJumpRequestRef.current = { roomId, eventId };
+      setRevision((value) => value + 1);
+      return;
+    }
+
+    const myEpoch = syncEpochRef.current;
+    const leaveGen = client.currentLeaveGeneration;
+    pendingJumpRequestRef.current = { roomId, eventId };
+
+    while (
+      mountedRef.current &&
+      activeVisibleRoomRef.current === roomId &&
+      syncEpochRef.current === myEpoch &&
+      pendingJumpRequestRef.current?.roomId === roomId &&
+      pendingJumpRequestRef.current?.eventId === eventId
+    ) {
+      const latestRoom = client.rooms()[roomId];
+      if (!latestRoom) {
+        pendingJumpRequestRef.current = null;
+        return;
+      }
+      if (timelineIndexOf(latestRoom.timelineEvents, eventId) !== -1) {
+        setRevision((value) => value + 1);
+        return;
+      }
+      if (!latestRoom.favorites?.some((f) => f.eventId === eventId)) {
+        pendingJumpRequestRef.current = null;
+        showToastNotice("该消息已被删除。");
+        setRevision((value) => value + 1);
+        return;
+      }
+      if (client.hasOlderLocalChunks(roomId)) {
+        const loaded = await client.loadNextOlderLocalChunk(roomId);
+        if (loaded === 0) {
+          continue;
+        }
+        continue;
+      }
+      if (pausedRef.current || reauthRequiredRef.current || !client.hasToken) {
+        pendingJumpRequestRef.current = null;
+        return;
+      }
+      const target = nextBackfillTargetForScrollUp(latestRoom);
+      if (!target) {
+        pendingJumpRequestRef.current = null;
+        showToastNotice("未能定位到该消息。");
+        return;
+      }
+      let result: TransportResult;
+      try {
+        result = await client.roomMessagesBackward(roomId, target.fromToken, BACKFILL_PAGE_LIMIT);
+      } catch {
+        pendingJumpRequestRef.current = null;
+        showToastNotice("暂时无法加载更早的消息，请检查网络后重试。");
+        return;
+      }
+      if (
+        !mountedRef.current ||
+        activeVisibleRoomRef.current !== roomId ||
+        syncEpochRef.current !== myEpoch
+      ) {
+        return;
+      }
+      if (isCredentialRejected(result)) {
+        pendingJumpRequestRef.current = null;
+        pauseForCredentialRejection();
+        return;
+      }
+      if (result.type !== "response" || result.status !== 200) {
+        pendingJumpRequestRef.current = null;
+        showToastNotice("暂时无法加载更早的消息，请稍后重试。");
+        return;
+      }
+      const applied = await client.applyBackfillPage(roomId, {
+        fromToken: target.fromToken,
+        body: result.body,
+        gapIndex: target.gapIndex,
+        leaveGeneration: leaveGen,
+      });
+      if (applied.prependedCount === 0 && applied.reachedStart) {
+        break;
+      }
+    }
+
+    if (
+      mountedRef.current &&
+      activeVisibleRoomRef.current === roomId &&
+      pendingJumpRequestRef.current?.roomId === roomId &&
+      pendingJumpRequestRef.current?.eventId === eventId
+    ) {
+      const finalRoom = client.rooms()[roomId];
+      if (finalRoom && timelineIndexOf(finalRoom.timelineEvents, eventId) !== -1) {
+        setRevision((value) => value + 1);
+      } else {
+        pendingJumpRequestRef.current = null;
+        if (finalRoom && !finalRoom.favorites?.some((f) => f.eventId === eventId)) {
+          showToastNotice("该消息已被删除。");
+          setRevision((value) => value + 1);
+        } else {
+          showToastNotice("未能定位到该消息。");
+        }
+      }
+    }
+  }
+
   async function confirmDeleteTopic() {
     if (deletingRef.current || !activeTopic) {
       return;
@@ -1218,6 +1528,10 @@ export function TopicsWorkspace({
     setDescriptionExpanded(false);
     setDeleteConfirmOpen(false);
     setDeleteError(undefined);
+    setDeleteMessageTarget(null);
+    setFavoritesOpen(false);
+    setHighlightedEventId(null);
+    pendingJumpRequestRef.current = null;
   }
 
   function goBack() {
@@ -1747,6 +2061,10 @@ export function TopicsWorkspace({
       if (toastNoticeTimerRef.current !== undefined) {
         clock.clearTimeout(toastNoticeTimerRef.current);
         toastNoticeTimerRef.current = undefined;
+      }
+      if (highlightTimerRef.current !== undefined) {
+        clock.clearTimeout(highlightTimerRef.current);
+        highlightTimerRef.current = undefined;
       }
       unsubVisibility();
       unsubResume();
@@ -2481,6 +2799,45 @@ export function TopicsWorkspace({
         (!reauthRequired && Boolean(nextBackfillTargetForReadPosition(rooms[visibleComposerRoomId])))) &&
       !openBackfillStoppedRoomsRef.current.has(visibleComposerRoomId);
 
+    const pendingJump = pendingJumpRequestRef.current;
+    if (pendingJump && pendingJump.roomId === visibleComposerRoomId) {
+      const targetEl = Array.from(
+        container.querySelectorAll<HTMLElement>("[data-event-id]"),
+      ).find((el) => el.dataset.eventId === pendingJump.eventId);
+      if (targetEl) {
+        pendingJumpRequestRef.current = null;
+        lastLandedRoomRef.current = visibleComposerRoomId;
+        awaitingReadPosLandingRoomRef.current = null;
+        pendingScrollPreserveRef.current = null;
+        const containerRect = container.getBoundingClientRect();
+        const targetRect = targetEl.getBoundingClientRect();
+        const maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+        if (containerRect.height > 0 && targetRect.height > 0) {
+          const desiredTop =
+            container.scrollTop +
+            (targetRect.top - containerRect.top) -
+            Math.max(0, (container.clientHeight - targetRect.height) / 3);
+          setTimelineScrollTop(
+            container,
+            maxScroll > 0 ? Math.max(0, Math.min(desiredTop, maxScroll)) : Math.max(0, desiredTop),
+          );
+        } else if (container.clientHeight > 0) {
+          setTimelineScrollTop(
+            container,
+            Math.max(0, Math.min(targetEl.offsetTop, maxScroll)),
+          );
+        }
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        isAtBottomRef.current = distanceFromBottom <= AT_BOTTOM_THRESHOLD_PX;
+        prevTimelineKeyRef.current = timelineContentKey;
+        prevTimelineClientHeightRef.current = container.clientHeight;
+        onFavoriteJumpLanded(pendingJump.eventId, distanceFromBottom > 60);
+        syncHeaderElevation(container);
+        evaluateVisibleReadPosition(visibleComposerRoomId);
+        return;
+      }
+    }
     if (lastLandedRoomRef.current !== visibleComposerRoomId) {
       lastLandedRoomRef.current = visibleComposerRoomId;
       if (shouldWaitForBackfill) {
@@ -3637,7 +3994,12 @@ export function TopicsWorkspace({
           deleting={deleting}
           reauthRequired={reauthRequired}
           pinPending={Boolean(pinPendingByRoom[roomId])}
+          favoriteCount={activeFavorites.items.length}
           onGoBack={goBack}
+          onOpenFavorites={() => {
+            setOverflowMenuOpen(false);
+            setFavoritesOpen(true);
+          }}
           onToggleDescription={() =>
             setDescriptionExpanded((expanded) => !expanded)
           }
@@ -3668,6 +4030,33 @@ export function TopicsWorkspace({
             deleteError={deleteError}
             onConfirm={() => void confirmDeleteTopic()}
             onCancel={cancelDeleteConfirm}
+          />
+        ) : null}
+        {deleteMessageTarget !== null ? (
+          <DeleteMessageDialog
+            deleting={deletingMessage}
+            onConfirm={() => void confirmDeleteMessage()}
+            onCancel={() => {
+              if (!deletingMessage) {
+                setDeleteMessageTarget(null);
+              }
+            }}
+          />
+        ) : null}
+        {favoritesOpen ? (
+          <TopicFavoritesDialog
+            open
+            items={activeFavorites.items}
+            botDisplayName={activeTopic.botDisplayName}
+            nowMs={nowMs}
+            pendingEventIds={activeFavoritePendingEventIds}
+            onClose={() => setFavoritesOpen(false)}
+            onSelectFavorite={(eventId) =>
+              void handleSelectFavoriteJump(roomId, eventId)
+            }
+            onRemoveFavorite={(favItem) =>
+              void handleRemoveFavoriteFromDialog(roomId, favItem)
+            }
           />
         ) : null}
         <main
@@ -3708,6 +4097,9 @@ export function TopicsWorkspace({
               activeTopicUnavailable={activeTopic.unavailable}
               reauthRequired={reauthRequired}
               openFailedMenuId={openFailedMenuId}
+              favoritedEventIds={activeFavorites.favoritedEventIds}
+              favoritePendingEventIds={activeFavoritePendingEventIds}
+              highlightedEventId={highlightedEventId}
               getLocalImageUrl={getLocalImageUrl}
               getDownloadedImageUrl={(mxcUrl) =>
                 downloadedMediaCacheRef.current.get(mxcUrl)?.imageUrl
@@ -3727,6 +4119,10 @@ export function TopicsWorkspace({
               }
               onOpenMedia={(media) => void handleOpenMedia(media)}
               onOpenExternalUrl={handleOpenExternalUrl}
+              onToggleFavorite={(item) => void handleToggleFavorite(roomId, item)}
+              onRequestDeleteMessage={(item) =>
+                handleRequestDeleteMessage(roomId, item)
+              }
               onSelectPromptOption={(eventId, optionKey) =>
                 void handleSelectPromptOption(roomId, eventId, optionKey)
               }

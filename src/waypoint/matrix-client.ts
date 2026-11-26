@@ -26,6 +26,7 @@ import {
   saveRoomMeta,
   saveRoomMetaAndReadMarker,
   saveSyncBatch,
+  sanitizeFavoritesList,
   saveUploadedMediaUrl,
   scanRoomChunksBackward,
   splitTimelineEventsIntoChunks,
@@ -35,6 +36,7 @@ import {
   type ColdUnreadState,
   type DraftAttachment,
   type DraftRecord,
+  type FavoriteMessageEntry,
   type PendingReadMarker,
   type PendingRoomEvent,
   type RawMatrixEvent,
@@ -54,6 +56,7 @@ export type SyncAttempt = {
   incremental: boolean;
   leaveGeneration?: number;
   tagGeneration?: number;
+  favoriteGeneration?: number;
 };
 
 export type LocalMessageStatus = "unconfirmed" | "failed";
@@ -86,6 +89,8 @@ export class MatrixClient {
   private leftAtGeneration = new Map<string, number>();
   private tagGeneration = 0;
   private tagUpdatedAtGeneration = new Map<string, number>();
+  private favoriteGeneration = 0;
+  private favoriteUpdatedAtGeneration = new Map<string, number>();
   private optimisticReadPositions = new Map<string, string>();
   private persistTail: Promise<void> = Promise.resolve();
   private persistActiveCount = 0;
@@ -137,6 +142,8 @@ export class MatrixClient {
     this.leftAtGeneration.clear();
     this.tagGeneration = 0;
     this.tagUpdatedAtGeneration.clear();
+    this.favoriteGeneration = 0;
+    this.favoriteUpdatedAtGeneration.clear();
   }
 
   loadBlob(attachmentId: string): Promise<BlobRecord | undefined> {
@@ -902,6 +909,8 @@ export class MatrixClient {
       this.leftAtGeneration.clear();
       this.tagGeneration = 0;
       this.tagUpdatedAtGeneration.clear();
+      this.favoriteGeneration = 0;
+      this.favoriteUpdatedAtGeneration.clear();
     });
   }
 
@@ -992,6 +1001,7 @@ export class MatrixClient {
     const cursor = this.syncCursor;
     const generation = this.leaveGeneration;
     const tagGen = this.tagGeneration;
+    const favoriteGen = this.favoriteGeneration;
     const url = cursor
       ? `${matrixUrl(this.baseUrl, "/_matrix/client/v3/sync")}?since=${encodeURIComponent(cursor)}`
       : matrixUrl(this.baseUrl, "/_matrix/client/v3/sync");
@@ -1000,6 +1010,7 @@ export class MatrixClient {
       incremental: Boolean(cursor),
       leaveGeneration: generation,
       tagGeneration: tagGen,
+      favoriteGeneration: favoriteGen,
     }));
   }
 
@@ -1032,6 +1043,8 @@ export class MatrixClient {
         this.leftAtGeneration,
         attempt.tagGeneration,
         this.tagUpdatedAtGeneration,
+        attempt.favoriteGeneration,
+        this.favoriteUpdatedAtGeneration,
       );
       const pendingMerge = reconcilePendingWithSync(this.storedPendingEvents, body);
       const markerMerge = reconcilePendingReadMarkersWithSync(
@@ -1225,6 +1238,14 @@ export class MatrixClient {
     return this.leaveGeneration;
   }
 
+  get currentTagGeneration(): number {
+    return this.tagGeneration;
+  }
+
+  get currentFavoriteGeneration(): number {
+    return this.favoriteGeneration;
+  }
+
   getAccountData(type: string): Promise<TransportResult> {
     if (!this.accessToken || !this.userId) {
       return Promise.reject(new Error("没有 access token"));
@@ -1350,6 +1371,146 @@ export class MatrixClient {
       await saveRoomMeta(roomId, extractRoomMeta(nextRoom));
       this.tagGeneration += 1;
       this.tagUpdatedAtGeneration.set(roomId, this.tagGeneration);
+      this.storedRooms = {
+        ...this.storedRooms,
+        [roomId]: nextRoom,
+      };
+    });
+  }
+
+  putRoomAccountData(
+    roomId: string,
+    type: string,
+    content: unknown,
+  ): Promise<TransportResult> {
+    if (!this.accessToken || !this.userId) {
+      return Promise.reject(new Error("没有 access token"));
+    }
+    return this.authedRequest({
+      method: "PUT",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/user/${encodeURIComponent(this.userId)}/rooms/${encodeURIComponent(roomId)}/account_data/${encodeURIComponent(type)}`,
+      ),
+      json: true,
+      body: content,
+    });
+  }
+
+  async retainRoomFavorites(
+    roomId: string,
+    favorites: FavoriteMessageEntry[],
+  ): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const existing = this.storedRooms[roomId];
+      if (!existing) {
+        return;
+      }
+      const sanitized = sanitizeFavoritesList(favorites);
+      const nextRoom: StoredRoomEvents = {
+        ...existing,
+      };
+      if (sanitized.length > 0) {
+        nextRoom.favorites = sanitized;
+      } else {
+        delete nextRoom.favorites;
+      }
+      await saveRoomMeta(roomId, extractRoomMeta(nextRoom));
+      this.favoriteGeneration += 1;
+      this.favoriteUpdatedAtGeneration.set(roomId, this.favoriteGeneration);
+      this.storedRooms = {
+        ...this.storedRooms,
+        [roomId]: nextRoom,
+      };
+    });
+  }
+
+  redactRoomEvent(
+    roomId: string,
+    eventId: string,
+    txnId = this.nextTxnId(),
+  ): Promise<TransportResult> {
+    return this.authedRequest({
+      method: "PUT",
+      url: matrixUrl(
+        this.baseUrl,
+        `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(txnId)}`,
+      ),
+      json: true,
+      body: {},
+    });
+  }
+
+  async applyConfirmedRedaction(
+    roomId: string,
+    targetEventId: string,
+    redactionEventId?: string,
+  ): Promise<void> {
+    await this.enqueuePersist(async () => {
+      if (!this.accessToken) {
+        return;
+      }
+      const existing = this.storedRooms[roomId];
+      if (!existing) {
+        return;
+      }
+      const prevFavCount = existing.favorites?.length ?? 0;
+      const syntheticSync = {
+        rooms: {
+          join: {
+            [roomId]: {
+              timeline: {
+                limited: false,
+                events: [
+                  {
+                    type: "m.room.redaction",
+                    redacts: targetEventId,
+                    ...(redactionEventId ? { event_id: redactionEventId } : {}),
+                    sender: this.userId,
+                  },
+                ],
+              },
+            },
+          },
+        },
+      };
+      const existingChunkState = this.roomChunkStates.get(roomId);
+      const singleChunkMap = new Map<string, RoomChunkState>();
+      if (existingChunkState) {
+        singleChunkMap.set(roomId, existingChunkState);
+      }
+      const roomMerge = await mergeSyncRoomsChunked(
+        { [roomId]: existing },
+        singleChunkMap,
+        syntheticSync,
+        this.userId,
+      );
+      const nextRoom = roomMerge.rooms[roomId];
+      if (!nextRoom) {
+        return;
+      }
+      await saveSyncBatch({
+        putRooms: roomMerge.metaChangedRoomIds.includes(roomId)
+          ? [[roomId, extractRoomMeta(nextRoom)]]
+          : [],
+        deleteRoomIds: [],
+        chunkWrites: roomMerge.chunkWrites,
+        deletePendingTxnIds: [],
+        deleteReadMarkerRoomIds: [],
+        deleteDraftRoomIds: [],
+        deleteBlobIds: [],
+      });
+      const updatedChunkState = roomMerge.chunkStates.get(roomId);
+      if (updatedChunkState) {
+        this.roomChunkStates.set(roomId, updatedChunkState);
+      }
+      if ((nextRoom.favorites?.length ?? 0) !== prevFavCount) {
+        this.favoriteGeneration += 1;
+        this.favoriteUpdatedAtGeneration.set(roomId, this.favoriteGeneration);
+      }
       this.storedRooms = {
         ...this.storedRooms,
         [roomId]: nextRoom,
@@ -2391,6 +2552,8 @@ export class MatrixClient {
       this.leftAtGeneration.clear();
       this.tagGeneration = 0;
       this.tagUpdatedAtGeneration.clear();
+      this.favoriteGeneration = 0;
+      this.favoriteUpdatedAtGeneration.clear();
     });
   }
 
@@ -2785,6 +2948,9 @@ function normalizeStoredRoomMetaObj(
     ...(raw.privateReadEventId ? { privateReadEventId: raw.privateReadEventId } : {}),
     ...(isPlainObject(raw.tags) && Object.keys(raw.tags).length > 0
       ? { tags: cloneValue(raw.tags) as Record<string, unknown> }
+      : {}),
+    ...(Array.isArray(raw.favorites) && raw.favorites.length > 0
+      ? { favorites: sanitizeFavoritesList(raw.favorites) }
       : {}),
     ...(raw.encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
     ...(raw.inviteFailed ? { inviteFailed: true as const } : {}),
@@ -3289,6 +3455,8 @@ async function mergeSyncRoomsChunked(
   leftAtGeneration?: Map<string, number>,
   tagGeneration?: number,
   tagUpdatedAtGeneration?: Map<string, number>,
+  favoriteGeneration?: number,
+  favoriteUpdatedAtGeneration?: Map<string, number>,
 ): Promise<{
   rooms: Record<string, StoredRoomEvents>;
   chunkStates: Map<string, RoomChunkState>;
@@ -3710,6 +3878,20 @@ async function mergeSyncRoomsChunked(
         tagUpdatedAtGeneration !== undefined &&
         (tagUpdatedAtGeneration.get(roomId) ?? 0) > tagGeneration;
       const nextTags = tagLocked ? existing.tags : (syncTags ?? existing.tags);
+
+      const syncFavorites = extractRoomFavorites(roomSync);
+      const favoriteLocked =
+        favoriteGeneration !== undefined &&
+        favoriteUpdatedAtGeneration !== undefined &&
+        (favoriteUpdatedAtGeneration.get(roomId) ?? 0) > favoriteGeneration;
+      const baseFavorites = favoriteLocked
+        ? existing.favorites
+        : (syncFavorites ?? existing.favorites);
+      const nextFavorites = baseFavorites
+        ? baseFavorites.filter((item) => !redactedIds.has(item.eventId))
+        : undefined;
+      const favoritesPruned =
+        (existing.favorites?.length ?? 0) !== (nextFavorites?.length ?? 0);
       const syncFullyReadId = extractFullyReadEventId(roomSync);
       const syncPrivateReadIds = extractPrivateReadEventIds(roomSync, ownerUserId);
       const nextFullyReadEventId = syncFullyReadId ?? existing.fullyReadEventId;
@@ -3837,6 +4019,7 @@ async function mergeSyncRoomsChunked(
         ...(nextFullyReadEventId ? { fullyReadEventId: nextFullyReadEventId } : {}),
         ...(nextPrivateReadEventId ? { privateReadEventId: nextPrivateReadEventId } : {}),
         ...(nextTags && Object.keys(nextTags).length > 0 ? { tags: nextTags } : {}),
+        ...(nextFavorites && nextFavorites.length > 0 ? { favorites: nextFavorites } : {}),
         ...(encryptedIrreversible ? { encryptedIrreversible: true as const } : {}),
         ...(inviteFailed ? { inviteFailed: true as const } : {}),
         ...(nextLastActivityTs !== undefined ? { lastActivityTs: nextLastActivityTs } : {}),
@@ -3920,6 +4103,8 @@ async function mergeSyncRoomsChunked(
         nextBackwardToken !== existing.backwardToken ||
         nextReachedStart !== Boolean(existing.reachedStart) ||
         syncTags !== undefined ||
+        (!favoriteLocked && syncFavorites !== undefined) ||
+        favoritesPruned ||
         encryptedIrreversible !== existing.encryptedIrreversible ||
         inviteFailed !== existing.inviteFailed ||
         didRoomChunkMetaChange(existing, nextRoom) ||
@@ -3966,6 +4151,25 @@ async function mergeSyncRoomsChunked(
     deletedRoomIds,
     removedAttachmentIds,
   };
+}
+
+function extractRoomFavorites(roomSync: Record<string, unknown>): FavoriteMessageEntry[] | undefined {
+  if (!isPlainObject(roomSync.account_data) || !Array.isArray(roomSync.account_data.events)) {
+    return undefined;
+  }
+  let found: FavoriteMessageEntry[] | undefined;
+  for (const event of roomSync.account_data.events) {
+    if (
+      isPlainObject(event) &&
+      event.type === "im.waypoint.favorites" &&
+      isPlainObject(event.content) &&
+      event.content.v === 1 &&
+      Array.isArray(event.content.favorites)
+    ) {
+      found = sanitizeFavoritesList(event.content.favorites);
+    }
+  }
+  return found;
 }
 
 function extractRoomTags(roomSync: Record<string, unknown>): Record<string, unknown> | undefined {
@@ -4426,6 +4630,12 @@ async function applyRoomBackfillPageChunked(
     ...(room.privateReadEventId ? { privateReadEventId: room.privateReadEventId } : {}),
     ...(isPlainObject(room.tags) && Object.keys(room.tags).length > 0
       ? { tags: cloneValue(room.tags) as Record<string, unknown> }
+      : {}),
+    ...(Array.isArray(room.favorites) && room.favorites.length > 0
+      ? (() => {
+          const remaining = room.favorites.filter((f) => !redactedIds.has(f.eventId));
+          return remaining.length > 0 ? { favorites: remaining } : {};
+        })()
       : {}),
     ...(hasEnc ? { encryptedIrreversible: true as const } : {}),
     ...(room.inviteFailed ? { inviteFailed: true as const } : {}),

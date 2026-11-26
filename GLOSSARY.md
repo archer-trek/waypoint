@@ -68,6 +68,14 @@ _Avoid_: 乐观队列, outbox, 未发送消息, 缓存
 一条 Topic 的处理中状态，由绑定 Agent 对 Owner 消息打出的 👀 触发；当 👀 被撤回、目标消息或更新一轮已终结、Topic 不可用、同步暂停或长时间无 Agent 活动时结束。
 _Avoid_: typing, 思考中, 生成中, streaming
 
+**删除消息**:
+将一条已确认消息从所有设备的当前 Topic 中永久移除，不留占位，不可恢复，也不让 Agent 遗忘。不是删除 Topic，也不是丢掉。
+_Avoid_: 撤回, 丢掉, 隐藏, 已撤回, 已删除
+
+**收藏**:
+Owner 为了以后找回而记住的一条已确认消息，只在它所在的那条 Topic 里看，不是跨 Topic 的一份列表。只属于 Owner，各台设备同一份。不是置顶，Agent 看不见，也不是给 Agent 的指令。
+_Avoid_: 置顶, pinned message, 星标, 书签, favourite
+
 **Session**:
 Hermes 当前用于一条 Topic 的那段交流记录，中文称为会话。换一段不会换 Topic，也不会换掉该 Agent 的人设、记忆、工具或工作目录。
 _Avoid_: 转录, transcript, history, chat

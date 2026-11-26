@@ -5,7 +5,9 @@ import userEvent from "@testing-library/user-event";
 import { MessageBody } from "../MessageBody";
 import type { TopicSummary, TimelineItem } from "../topics";
 import { ComposerView } from "./ComposerView";
+import { DeleteMessageDialog } from "./DeleteMessageDialog";
 import { TimelineView } from "./TimelineView";
+import { TopicFavoritesDialog } from "./TopicFavoritesDialog";
 import { TopicHeaderView } from "./TopicHeaderView";
 
 const sampleTopic: TopicSummary = {
@@ -735,12 +737,17 @@ describe("TimelineView (#89)", () => {
         />,
       );
 
-      // 1. Empty media-only bubble should not open ActionSheet on long-press
+      // 1. Confirmed captionless media-only bubble opens ActionSheet with 收藏 & 删除消息 (no copy items)
       const imgBtn = screen.getByRole("button", { name: "查看图片 photo.png" });
       fireEvent.touchStart(imgBtn, { touches: [{ clientX: 50, clientY: 50 }] });
       act(() => {
         vi.advanceTimersByTime(550);
       });
+      const mediaMenu = screen.getByRole("menu", { name: "消息操作" });
+      expect(within(mediaMenu).queryByRole("menuitem", { name: "复制纯文本" })).not.toBeInTheDocument();
+      expect(within(mediaMenu).getByRole("menuitem", { name: "收藏" })).toBeInTheDocument();
+      expect(within(mediaMenu).getByRole("menuitem", { name: "删除消息" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "取消" }));
       expect(screen.queryByRole("dialog", { name: "消息操作" })).not.toBeInTheDocument();
 
       // 2. Non-code Streamdown elements (inline code, heading, blockquote, table, code-block header) must NOT show 复制代码
@@ -1123,3 +1130,237 @@ describe("Theme hygiene (#89)", () => {
     expect(container.textContent).toContain("invalidcommand");
   });
 });
+
+describe("Message delete & favorites UI components", () => {
+  test("TopicHeaderView hides favorites button at 0 and shows count entry when >= 1", async () => {
+    const user = userEvent.setup();
+    const onOpenFavorites = vi.fn();
+    const baseProps = {
+      isNarrow: false,
+      topic: sampleTopic,
+      descriptionExpanded: false,
+      overflowMenuOpen: false,
+      overflowMenuRef: createRef<HTMLDivElement>(),
+      editing: false,
+      editSubmitting: false,
+      deleteConfirmOpen: false,
+      deleting: false,
+      reauthRequired: false,
+      pinPending: false,
+      onGoBack: vi.fn(),
+      onToggleDescription: vi.fn(),
+      onToggleOverflowMenu: vi.fn(),
+      onCloseOverflowMenu: vi.fn(),
+      onTogglePin: vi.fn(),
+      onOpenEditForm: vi.fn(),
+      onOpenDeleteConfirm: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <TopicHeaderView {...baseProps} favoriteCount={0} onOpenFavorites={onOpenFavorites} />,
+    );
+    expect(screen.queryByRole("button", { name: /^收藏/ })).not.toBeInTheDocument();
+
+    rerender(
+      <TopicHeaderView {...baseProps} favoriteCount={3} onOpenFavorites={onOpenFavorites} />,
+    );
+    const favBtn = screen.getByRole("button", { name: "收藏 (3)" });
+    expect(favBtn).toHaveTextContent("3");
+    await user.click(favBtn);
+    expect(onOpenFavorites).toHaveBeenCalledTimes(1);
+  });
+
+  test("TimelineView mobile long-press works on captionless image and disabled delete in unavailable topic while keeping favorite enabled", async () => {
+    vi.useFakeTimers();
+    const onToggleFavorite = vi.fn();
+    const onRequestDeleteMessage = vi.fn();
+    const items: TimelineItem[] = [
+      {
+        kind: "message",
+        key: "$img-1",
+        eventId: "$img-1",
+        side: "left",
+        body: "pic.png",
+        media: { kind: "image", msgtype: "m.image", filename: "pic.png", mxcUrl: "mxc://example.com/1" },
+        status: "confirmed",
+        ts: 1000,
+      },
+    ];
+
+    render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={items}
+        activeTopicUnavailable={true}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        isNarrow={true}
+        favoritedEventIds={new Set()}
+        getLocalImageUrl={() => undefined}
+        getDownloadedImageUrl={() => "blob:pic"}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+        onToggleFavorite={onToggleFavorite}
+        onRequestDeleteMessage={onRequestDeleteMessage}
+      />,
+    );
+
+    const imgBtn = screen.getByRole("button", { name: "查看图片 pic.png" });
+    fireEvent.touchStart(imgBtn, { touches: [{ clientX: 20, clientY: 20 }] });
+    await act(async () => {
+      vi.advanceTimersByTime(550);
+    });
+
+    const menu = screen.getByRole("menu", { name: "消息操作" });
+    expect(within(menu).queryByRole("menuitem", { name: "复制纯文本" })).not.toBeInTheDocument();
+    const favItem = within(menu).getByRole("menuitem", { name: "收藏" });
+    const delItem = within(menu).getByRole("menuitem", { name: "删除消息" });
+    expect(favItem).not.toBeDisabled();
+    expect(delItem).toBeDisabled();
+
+    fireEvent.click(favItem);
+    expect(onToggleFavorite).toHaveBeenCalledWith(expect.objectContaining({ eventId: "$img-1" }));
+    vi.useRealTimers();
+  });
+
+  test("TimelineView desktop shows right-click / hover menu on confirmed messages, inline favorite badge, and highlight state", async () => {
+    const user = userEvent.setup();
+    const onToggleFavorite = vi.fn();
+    const onRequestDeleteMessage = vi.fn();
+    const items: TimelineItem[] = [
+      {
+        kind: "message",
+        key: "$m-1",
+        eventId: "$m-1",
+        side: "left",
+        body: "重点结论",
+        status: "confirmed",
+        ts: 1000,
+      },
+      {
+        kind: "message",
+        key: "pending-1",
+        localId: "pending-1",
+        side: "right",
+        body: "未确认消息",
+        status: "unconfirmed",
+      },
+    ];
+
+    const { container } = render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={items}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        isNarrow={false}
+        favoritedEventIds={new Set(["$m-1"])}
+        highlightedEventId="$m-1"
+        getLocalImageUrl={() => undefined}
+        getDownloadedImageUrl={() => undefined}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+        onToggleFavorite={onToggleFavorite}
+        onRequestDeleteMessage={onRequestDeleteMessage}
+      />,
+    );
+
+    const row = container.querySelector('[data-event-id="$m-1"]') as HTMLElement;
+    expect(row).toHaveAttribute("data-favorited", "true");
+    expect(row).toHaveAttribute("data-highlighted", "true");
+    expect(within(row).getByLabelText("已收藏")).toBeInTheDocument();
+
+    // Right-click on unconfirmed message does nothing
+    fireEvent.contextMenu(screen.getByText("未确认消息"));
+    expect(screen.queryByRole("menu", { name: "消息操作" })).not.toBeInTheDocument();
+
+    // Resting state has no ⋯ button mounted; hovering reveals it and clicking opens menu
+    expect(within(row).queryByRole("button", { name: "消息操作" })).not.toBeInTheDocument();
+    fireEvent.mouseEnter(row);
+    const hoverBtn = within(row).getByRole("button", { name: "消息操作" });
+    await user.click(hoverBtn);
+    const hoverMenu = await screen.findByRole("menu", { name: "消息操作" });
+    expect(within(hoverMenu).getByRole("menuitem", { name: "取消收藏" })).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    fireEvent.mouseLeave(row);
+    expect(within(row).queryByRole("button", { name: "消息操作" })).not.toBeInTheDocument();
+
+    // Right-click on confirmed message opens menu with 取消收藏 + 删除消息
+    fireEvent.contextMenu(screen.getByText("重点结论"));
+    const menu = await screen.findByRole("menu", { name: "消息操作" });
+    expect(within(menu).getByRole("menuitem", { name: "复制纯文本" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "复制 Markdown" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "取消收藏" })).toBeInTheDocument();
+    await user.click(within(menu).getByRole("menuitem", { name: "删除消息" }));
+    expect(onRequestDeleteMessage).toHaveBeenCalledWith(expect.objectContaining({ eventId: "$m-1" }));
+  });
+});
+
+  test("DeleteMessageDialog confirms or cancels and locks buttons while deleting", async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    const { rerender } = render(
+      <DeleteMessageDialog deleting={false} onConfirm={onConfirm} onCancel={onCancel} />,
+    );
+    const dialog = screen.getByRole("alertdialog", { name: "确认删除这条消息？" });
+    expect(dialog).toHaveTextContent("所有设备上的当前 Topic 都会永久移除这条消息");
+    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+
+    rerender(<DeleteMessageDialog deleting={true} onConfirm={onConfirm} onCancel={onCancel} />);
+    expect(within(dialog).getByRole("button", { name: "正在删除…" })).toBeDisabled();
+    expect(within(dialog).getByRole("button", { name: "取消" })).toBeDisabled();
+  });
+
+  test("TopicFavoritesDialog renders items newest first, jumps on click, and unfavorites directly", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const onSelectFavorite = vi.fn();
+    const onRemoveFavorite = vi.fn();
+    const items = [
+      { eventId: "$e2", favoritedAt: 200, senderSide: "left" as const, preview: "最新收藏的回复", ts: 1000 },
+      { eventId: "$e1", favoritedAt: 100, senderSide: "right" as const, preview: "早些的提问", ts: 500 },
+    ];
+
+    render(
+      <TopicFavoritesDialog
+        open={true}
+        items={items}
+        botDisplayName="Architect Bot"
+        nowMs={2000}
+        pendingEventIds={new Set()}
+        onClose={onClose}
+        onSelectFavorite={onSelectFavorite}
+        onRemoveFavorite={onRemoveFavorite}
+      />,
+    );
+
+    const dialog = screen.getByRole("dialog", { name: "收藏（2）" });
+    expect(dialog).toHaveTextContent("收藏（2）");
+    expect(dialog).toHaveTextContent("Architect Bot");
+    expect(dialog).toHaveTextContent("你");
+
+    await user.click(within(dialog).getByText("最新收藏的回复"));
+    expect(onSelectFavorite).toHaveBeenCalledWith("$e2");
+
+    const removeButtons = within(dialog).getAllByRole("button", { name: "取消收藏" });
+    await user.click(removeButtons[1]!);
+    expect(onRemoveFavorite).toHaveBeenCalledWith(items[1]);
+  });

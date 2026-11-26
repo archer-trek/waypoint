@@ -5,7 +5,7 @@ import {
   isViewportKeyboardConstrained,
 } from "@/lib/viewport-lock";
 import { copyToClipboard } from "@/lib/utils";
-import { Code2, Copy, FileText, MoreHorizontal } from "lucide-react";
+import { Bookmark, Code2, Copy, FileText, MoreHorizontal, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
@@ -44,7 +45,12 @@ export type TimelineViewProps = {
   onDiscardFailed: (localId: string) => void;
   onOpenMedia: (media: TimelineMedia) => void;
   onOpenExternalUrl: (url: string) => void;
+  favoritedEventIds?: ReadonlySet<string>;
+  favoritePendingEventIds?: ReadonlySet<string>;
+  highlightedEventId?: string | null;
   onSelectPromptOption: (eventId: string, optionKey: string) => void;
+  onToggleFavorite?: (item: Extract<TimelineItem, { kind: "message" }>) => void;
+  onRequestDeleteMessage?: (item: Extract<TimelineItem, { kind: "message" }>) => void;
   onCopyFeedback?: (message: string) => void;
   onContextMenuOpenChange?: (open: boolean) => void;
   onRegisterContextMenuDismiss?: (dismiss: (() => void) | null) => void;
@@ -144,6 +150,22 @@ function extractCodeSnippet(target: HTMLElement | null): string | undefined {
   return undefined;
 }
 
+function extractCopyableMarkdown(
+  item: Extract<TimelineItem, { kind: "message" }>,
+): string {
+  if (item.media) {
+    return item.media.caption?.trim() ? item.media.caption : "";
+  }
+  return item.body.trim() ? item.body : "";
+}
+
+type MessageMenuPayload = {
+  item: Extract<TimelineItem, { kind: "message" }>;
+  plainText: string;
+  markdownText: string;
+  codeSnippet?: string;
+};
+
 /** Scrollable timeline log rendering day separators, message bubbles, media, reactions, and prompts. */
 export function TimelineView({
   timelineRef,
@@ -162,8 +184,13 @@ export function TimelineView({
   onResendFailed,
   onDiscardFailed,
   onOpenMedia,
+  favoritedEventIds,
+  favoritePendingEventIds,
+  highlightedEventId,
   onOpenExternalUrl,
   onSelectPromptOption,
+  onToggleFavorite,
+  onRequestDeleteMessage,
   onCopyFeedback,
   onContextMenuOpenChange,
   onRegisterContextMenuDismiss,
@@ -187,12 +214,9 @@ export function TimelineView({
     });
   }, [timelineRef]);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
-  const [contextMenuItem, setContextMenuItem] = useState<{
-    item: TimelineItem;
-    plainText: string;
-    markdownText: string;
-    codeSnippet?: string;
-  } | null>(null);
+  const [contextMenuItem, setContextMenuItem] = useState<MessageMenuPayload | null>(null);
+  const [desktopMenuState, setDesktopMenuState] = useState<MessageMenuPayload | null>(null);
+  const [hoveredEventId, setHoveredEventId] = useState<string | null>(null);
   const notifyContextMenuOpen = useEffectEvent((open: boolean) => {
     onContextMenuOpenChange?.(open);
   });
@@ -201,7 +225,10 @@ export function TimelineView({
   });
 
   useEffect(() => {
-    registerContextMenuDismiss(() => setContextMenuItem(null));
+    registerContextMenuDismiss(() => {
+      setContextMenuItem(null);
+      setDesktopMenuState(null);
+    });
     return () => {
       registerContextMenuDismiss(null);
       notifyContextMenuOpen(false);
@@ -209,28 +236,40 @@ export function TimelineView({
   }, []);
 
   useEffect(() => {
-    notifyContextMenuOpen(contextMenuItem !== null);
-  }, [contextMenuItem]);
+    notifyContextMenuOpen(contextMenuItem !== null || desktopMenuState !== null);
+  }, [contextMenuItem, desktopMenuState]);
+
+  function buildMenuPayload(
+    item: Extract<TimelineItem, { kind: "message" }>,
+    bubbleEl: HTMLElement | null,
+    targetEl: HTMLElement | null,
+  ): MessageMenuPayload {
+    const markdownText = extractCopyableMarkdown(item);
+    const plainText = markdownText
+      ? extractPlainTextFromBubble(bubbleEl) || markdownText
+      : "";
+    const codeSnippet = markdownText ? extractCodeSnippet(targetEl) : undefined;
+    return { item, plainText, markdownText, codeSnippet };
+  }
 
   function handleTouchStart(e: React.TouchEvent<HTMLDivElement>, item: TimelineItem) {
     if (isNarrow === false || e.touches.length !== 1 || item.kind !== "message") return;
-    const markdownText = item.body?.trim()
-      ? item.body
-      : item.media?.caption?.trim()
-        ? item.media.caption
-        : "";
-    if (!markdownText) return;
+    const markdownText = extractCopyableMarkdown(item);
+    const isConfirmed = item.status === "confirmed" && Boolean(item.eventId);
+    if (!markdownText && !isConfirmed) return;
 
     const touch = e.touches[0]!;
     const bubbleEl = e.currentTarget;
     const targetEl = e.target as HTMLElement | null;
     touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
-    const codeSnippet = extractCodeSnippet(targetEl);
+    const codeSnippet = markdownText ? extractCodeSnippet(targetEl) : undefined;
     longPressTimerRef.current = window.setTimeout(() => {
       longPressTimerRef.current = null;
       touchStartPosRef.current = null;
       window.getSelection()?.removeAllRanges();
-      const plainText = extractPlainTextFromBubble(bubbleEl) || markdownText;
+      const plainText = markdownText
+        ? extractPlainTextFromBubble(bubbleEl) || markdownText
+        : "";
       setContextMenuItem({ item, plainText, markdownText, codeSnippet });
     }, 500);
   }
@@ -255,8 +294,27 @@ export function TimelineView({
     touchStartPosRef.current = null;
   }
 
+  function handleDesktopMenuOpenChange(
+    item: Extract<TimelineItem, { kind: "message" }>,
+    nextOpen: boolean,
+  ) {
+    if (!nextOpen) {
+      setDesktopMenuState(null);
+      return;
+    }
+    if (!item.eventId) {
+      return;
+    }
+    const rowEl = document.querySelector<HTMLElement>(
+      `[data-event-id="${CSS.escape(item.eventId)}"]`,
+    );
+    const bubbleEl = rowEl?.querySelector<HTMLElement>(".waypoint-bubble") ?? null;
+    setDesktopMenuState(buildMenuPayload(item, bubbleEl, null));
+  }
+
   function performCopy(text: string) {
     setContextMenuItem(null);
+    setDesktopMenuState(null);
     void copyToClipboard(text).then((ok) => {
       if (ok) {
         onCopyFeedback?.("已复制");
@@ -283,17 +341,150 @@ export function TimelineView({
           >
             {item.label}
           </div>
-        ) : (
+        ) : (() => {
+          const isConfirmed = item.status === "confirmed" && Boolean(item.eventId);
+          const isFavorited = Boolean(
+            isConfirmed && item.eventId && favoritedEventIds?.has(item.eventId),
+          );
+          const isFavoritePending = Boolean(
+            isConfirmed && item.eventId && favoritePendingEventIds?.has(item.eventId),
+          );
+          const isHighlighted = Boolean(
+            isConfirmed && item.eventId && highlightedEventId === item.eventId,
+          );
+          const desktopMenuOpen = Boolean(
+            isNarrow === false &&
+              isConfirmed &&
+              desktopMenuState?.item.eventId === item.eventId,
+          );
+          const showDesktopMenu =
+            isNarrow === false &&
+            isConfirmed &&
+            Boolean(item.eventId) &&
+            (hoveredEventId === item.eventId || desktopMenuOpen);
+          const activeDesktopPayload = desktopMenuOpen ? desktopMenuState : null;
+          const desktopMenu =
+            showDesktopMenu ? (
+              <DropdownMenu
+                modal={false}
+                open={desktopMenuOpen}
+                onOpenChange={(nextOpen) => handleDesktopMenuOpenChange(item, nextOpen)}
+              >
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="消息操作"
+                    className={cn(
+                      "waypoint-message-menu-trigger size-7 min-w-7 rounded-full p-0 text-muted-foreground hover:text-foreground hover:bg-accent/70 shrink-0",
+                      item.side === "left"
+                        ? "absolute top-0.5 right-0 bg-background/85 backdrop-blur-xs"
+                        : "self-center",
+                    )}
+                  >
+                    <MoreHorizontal aria-hidden="true" className="size-3.5" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  aria-labelledby={undefined}
+                  aria-label="消息操作"
+                  side="bottom"
+                  align={item.side === "right" ? "end" : "start"}
+                  sideOffset={4}
+                  className="waypoint-message-dropdown min-w-40 p-1 rounded-xl border-border/80 bg-popover/95 backdrop-blur-md shadow-lg"
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    event.nativeEvent.stopPropagation();
+                  }}
+                >
+                  {activeDesktopPayload?.markdownText ? (
+                    <>
+                      <DropdownMenuItem
+                        className="min-h-8 gap-2 px-2.5 text-sm"
+                        onSelect={() => performCopy(activeDesktopPayload.plainText)}
+                      >
+                        <Copy aria-hidden="true" className="size-3.5 text-muted-foreground" />
+                        <span>复制纯文本</span>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="min-h-8 gap-2 px-2.5 text-sm"
+                        onSelect={() => performCopy(activeDesktopPayload.markdownText)}
+                      >
+                        <FileText aria-hidden="true" className="size-3.5 text-muted-foreground" />
+                        <span>复制 Markdown</span>
+                      </DropdownMenuItem>
+                      {activeDesktopPayload.codeSnippet ? (
+                        <DropdownMenuItem
+                          className="min-h-8 gap-2 px-2.5 text-sm"
+                          onSelect={() => performCopy(activeDesktopPayload.codeSnippet!)}
+                        >
+                          <Code2 aria-hidden="true" className="size-3.5 text-muted-foreground" />
+                          <span>复制代码</span>
+                        </DropdownMenuItem>
+                      ) : null}
+                      <DropdownMenuSeparator />
+                    </>
+                  ) : null}
+                  <DropdownMenuItem
+                    className="min-h-8 gap-2 px-2.5 text-sm"
+                    disabled={isFavoritePending || reauthRequired}
+                    onSelect={() => {
+                      setDesktopMenuState(null);
+                      onToggleFavorite?.(item);
+                    }}
+                  >
+                    <Bookmark
+                      aria-hidden="true"
+                      className={cn(
+                        "size-3.5 text-muted-foreground",
+                        isFavorited && "fill-current text-foreground",
+                      )}
+                    />
+                    <span>{isFavorited ? "取消收藏" : "收藏"}</span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    className="min-h-8 gap-2 px-2.5 text-sm"
+                    disabled={activeTopicUnavailable || reauthRequired}
+                    onSelect={() => {
+                      setDesktopMenuState(null);
+                      onRequestDeleteMessage?.(item);
+                    }}
+                  >
+                    <Trash2 aria-hidden="true" className="size-3.5" />
+                    <span>删除消息</span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            ) : null;
+
+          return (
           <div
             key={item.key}
             className={cn(
-              "waypoint-message-row flex items-start gap-2 w-full min-w-0 max-w-full box-border",
+              "waypoint-message-row group/row relative flex items-start gap-2 w-full min-w-0 max-w-full box-border transition-colors duration-200",
               item.side,
               item.side === "right" ? "justify-end" : "justify-start",
+              isHighlighted && "rounded-xl bg-accent/50 ring-1 ring-ring/40",
             )}
             data-side={item.side}
             data-event-id={item.eventId}
+            data-favorited={isFavorited ? "true" : undefined}
+            data-highlighted={isHighlighted ? "true" : undefined}
+            onMouseEnter={
+              isNarrow === false && isConfirmed && item.eventId
+                ? () => setHoveredEventId(item.eventId!)
+                : undefined
+            }
+            onMouseLeave={
+              isNarrow === false && isConfirmed && item.eventId
+                ? () =>
+                    setHoveredEventId((prev) => (prev === item.eventId ? null : prev))
+                : undefined
+            }
           >
+            {item.side === "right" ? desktopMenu : null}
             <div
               className={cn(
                 "waypoint-message-content flex flex-col min-w-0 gap-1",
@@ -319,7 +510,18 @@ export function TimelineView({
                         event.preventDefault();
                         onOpenFailedMenu(item.localId!);
                       }
-                    : undefined
+                    : isNarrow === false && isConfirmed
+                      ? (event) => {
+                          event.preventDefault();
+                          setDesktopMenuState(
+                            buildMenuPayload(
+                              item,
+                              event.currentTarget,
+                              event.target as HTMLElement | null,
+                            ),
+                          );
+                        }
+                      : undefined
                 }
               >
                 {item.media ? (
@@ -501,9 +703,24 @@ export function TimelineView({
                   })}
                 </div>
               ) : null}
+              {isFavorited ? (
+                <div
+                  className={cn(
+                    "waypoint-favorite-indicator inline-flex items-center gap-1 text-[12px] text-muted-foreground",
+                    item.side === "right" ? "self-end pr-0.5" : "self-start",
+                  )}
+                >
+                  <Bookmark
+                    aria-label="已收藏"
+                    className="size-3 fill-current"
+                  />
+                </div>
+              ) : null}
             </div>
+            {item.side === "left" ? desktopMenu : null}
           </div>
-        ),
+          );
+        })(),
       )}
         {responding ? (
           <RespondingIndicator
@@ -528,33 +745,79 @@ export function TimelineView({
           >
             <ActionSheetCard>
               <div role="menu" aria-label="消息操作" className="flex flex-col">
-                <ActionSheetItem
-                  icon={<Copy className="size-4" aria-hidden="true" />}
-                  onClick={() => {
-                    performCopy(contextMenuItem.plainText);
-                  }}
-                >
-                  复制纯文本
-                </ActionSheetItem>
-                <ActionSheetItem
-                  icon={<FileText className="size-4" aria-hidden="true" />}
-                  onClick={() => {
-                    performCopy(contextMenuItem.markdownText);
-                  }}
-                >
-                  复制 Markdown
-                </ActionSheetItem>
-                {contextMenuItem.codeSnippet ? (
-                  <ActionSheetItem
-                    icon={<Code2 className="size-4" aria-hidden="true" />}
-                    onClick={() => {
-                      if (contextMenuItem.codeSnippet) {
-                        performCopy(contextMenuItem.codeSnippet);
+                {contextMenuItem.markdownText ? (
+                  <>
+                    <ActionSheetItem
+                      icon={<Copy className="size-4" aria-hidden="true" />}
+                      onClick={() => {
+                        performCopy(contextMenuItem.plainText);
+                      }}
+                    >
+                      复制纯文本
+                    </ActionSheetItem>
+                    <ActionSheetItem
+                      icon={<FileText className="size-4" aria-hidden="true" />}
+                      onClick={() => {
+                        performCopy(contextMenuItem.markdownText);
+                      }}
+                    >
+                      复制 Markdown
+                    </ActionSheetItem>
+                    {contextMenuItem.codeSnippet ? (
+                      <ActionSheetItem
+                        icon={<Code2 className="size-4" aria-hidden="true" />}
+                        onClick={() => {
+                          if (contextMenuItem.codeSnippet) {
+                            performCopy(contextMenuItem.codeSnippet);
+                          }
+                        }}
+                      >
+                        复制代码
+                      </ActionSheetItem>
+                    ) : null}
+                  </>
+                ) : null}
+                {contextMenuItem.item.status === "confirmed" && contextMenuItem.item.eventId ? (
+                  <>
+                    <ActionSheetItem
+                      icon={
+                        <Bookmark
+                          className={cn(
+                            "size-4",
+                            favoritedEventIds?.has(contextMenuItem.item.eventId) &&
+                              "fill-current text-foreground",
+                          )}
+                          aria-hidden="true"
+                        />
                       }
-                    }}
-                  >
-                    复制代码
-                  </ActionSheetItem>
+                      disabled={
+                        Boolean(
+                          favoritePendingEventIds?.has(contextMenuItem.item.eventId),
+                        ) || reauthRequired
+                      }
+                      onClick={() => {
+                        const target = contextMenuItem.item;
+                        setContextMenuItem(null);
+                        onToggleFavorite?.(target);
+                      }}
+                    >
+                      {favoritedEventIds?.has(contextMenuItem.item.eventId)
+                        ? "取消收藏"
+                        : "收藏"}
+                    </ActionSheetItem>
+                    <ActionSheetItem
+                      variant="destructive"
+                      icon={<Trash2 className="size-4 text-destructive" aria-hidden="true" />}
+                      disabled={activeTopicUnavailable || reauthRequired}
+                      onClick={() => {
+                        const target = contextMenuItem.item;
+                        setContextMenuItem(null);
+                        onRequestDeleteMessage?.(target);
+                      }}
+                    >
+                      删除消息
+                    </ActionSheetItem>
+                  </>
                 ) : null}
               </div>
             </ActionSheetCard>

@@ -6,7 +6,13 @@ import {
   isRecord,
   transportFailureMessage,
 } from "./matrix-errors";
-import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
+import {
+  sanitizeFavoritesList,
+  type FavoriteMessageEntry,
+  type PendingRoomEvent,
+  type RawMatrixEvent,
+  type StoredRoomEvents,
+} from "./session-store";
 
 export const RESPONDING_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -83,6 +89,131 @@ export async function setTopicPinned(
       serverErrorReason: "服务器暂时无法响应，请稍后重试。",
       rejectedReason: "服务器拒绝了该请求。",
     })}`,
+  };
+}
+
+export const FAVORITES_ACCOUNT_DATA_TYPE = "im.waypoint.favorites";
+
+export type DeleteMessageResult = { ok: true } | { ok: false; message: string };
+
+export async function deleteTopicMessage(
+  client: MatrixClient,
+  roomId: string,
+  targetEventId: string,
+): Promise<DeleteMessageResult> {
+  if (!client.hasToken || !client.ownerId) {
+    return { ok: false, message: disconnectedMessage("删除消息") };
+  }
+  const room = client.rooms()[roomId];
+  if (deriveRoomAvailability(room, client.ownerId).unavailable) {
+    return { ok: false, message: "Topic 不可用，无法删除消息。" };
+  }
+  let result: TransportResult;
+  try {
+    result = await client.redactRoomEvent(roomId, targetEventId);
+  } catch {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure("删除消息", {
+        type: "failure",
+        failure: { type: "network" },
+      }),
+    };
+  }
+  if (result.type === "response" && result.status >= 200 && result.status < 300) {
+    const redactionEventId =
+      isRecord(result.body) &&
+      typeof result.body.event_id === "string" &&
+      result.body.event_id !== ""
+        ? result.body.event_id
+        : undefined;
+    const prevFavorites = client.rooms()[roomId]?.favorites;
+    const hadFavorite = Boolean(
+      prevFavorites?.some((entry) => entry.eventId === targetEventId),
+    );
+    try {
+      await client.applyConfirmedRedaction(roomId, targetEventId, redactionEventId);
+    } catch {
+      return {
+        ok: false,
+        message: "本地存储空间不足，未能更新消息列表，请清理空间后重试。",
+      };
+    }
+    if (hadFavorite && prevFavorites) {
+      const nextFavorites = prevFavorites.filter(
+        (entry) => entry.eventId !== targetEventId,
+      );
+      try {
+        await client.putRoomAccountData(roomId, FAVORITES_ACCOUNT_DATA_TYPE, {
+          v: 1,
+          favorites: nextFavorites,
+        });
+      } catch {
+        // Best-effort remote favorite cleanup; message deletion already succeeded.
+      }
+    }
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    message: formatMatrixActionFailure("删除消息", result, {
+      serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+      rejectedReason: "服务器拒绝了删除消息请求，请稍后重试。",
+    }),
+  };
+}
+
+export type ToggleFavoriteResult =
+  | { ok: true; favorites: FavoriteMessageEntry[] }
+  | { ok: false; message: string };
+
+export async function toggleMessageFavorite(
+  client: MatrixClient,
+  roomId: string,
+  entry: FavoriteMessageEntry,
+  currentlyFavorited: boolean,
+): Promise<ToggleFavoriteResult> {
+  const action = currentlyFavorited ? "取消收藏" : "收藏";
+  if (!client.hasToken || !client.ownerId) {
+    return { ok: false, message: disconnectedMessage(action) };
+  }
+  const existing = client.rooms()[roomId]?.favorites ?? [];
+  const nextFavorites = currentlyFavorited
+    ? existing.filter((item) => item.eventId !== entry.eventId)
+    : sanitizeFavoritesList([entry, ...existing.filter((item) => item.eventId !== entry.eventId)]);
+
+  let result: TransportResult;
+  try {
+    result = await client.putRoomAccountData(roomId, FAVORITES_ACCOUNT_DATA_TYPE, {
+      v: 1,
+      favorites: nextFavorites,
+    });
+  } catch {
+    return {
+      ok: false,
+      message: formatMatrixActionFailure(action, {
+        type: "failure",
+        failure: { type: "network" },
+      }),
+    };
+  }
+  if (result.type === "response" && result.status >= 200 && result.status < 300) {
+    try {
+      await client.retainRoomFavorites(roomId, nextFavorites);
+    } catch {
+      return {
+        ok: false,
+        message: "本地存储空间不足，未能保存收藏状态，请清理空间后重试。",
+      };
+    }
+    return { ok: true, favorites: nextFavorites };
+  }
+  return {
+    ok: false,
+    message: formatMatrixActionFailure(action, result, {
+      serverErrorReason: "服务器暂时无法响应，请稍后重试。",
+      rejectedReason: `${action}被服务器拒绝，请稍后重试。`,
+    }),
   };
 }
 
@@ -1254,6 +1385,7 @@ export type TimelineItem =
       body: string;
       media?: TimelineMedia;
       status: "confirmed" | "unconfirmed" | "failed";
+      ts?: number;
       localId?: string;
       reactions?: string[];
       prompt?: TimelinePrompt;
@@ -1405,7 +1537,7 @@ export function formatMessagePreviewText(rawBody: string): string {
   return rawBody.replace(/\s+/g, " ").trim();
 }
 
-function formatMediaPreview(media: TimelineMedia): string {
+export function formatMediaPreview(media: TimelineMedia): string {
   const caption = media.caption ? formatMessagePreviewText(media.caption) : "";
   if (media.msgtype === "m.image") {
     return caption ? `[图片] ${caption}` : "[图片]";
@@ -1743,6 +1875,7 @@ export function deriveRoomTimelineItems(
         body,
         ...(media ? { media } : {}),
         status: "confirmed",
+        ...(ts !== undefined ? { ts } : {}),
         ...(reactions && reactions.length > 0 ? { reactions } : {}),
         ...(prompt ? { prompt } : {}),
       });
@@ -2658,4 +2791,104 @@ function replaceTargetEventId(
   return typeof relatesTo.event_id === "string" && relatesTo.event_id !== ""
     ? relatesTo.event_id
     : undefined;
+}
+
+
+export type TopicFavoriteItem = {
+  eventId: string;
+  favoritedAt: number;
+  senderSide?: "left" | "right";
+  preview: string;
+  ts?: number;
+};
+
+export function deriveFavoritePreviewForTimelineItem(
+  item: Extract<TimelineItem, { kind: "message" }>,
+): string {
+  if (item.media) {
+    return formatMediaPreview(item.media);
+  }
+  return formatMessagePreviewText(item.body);
+}
+
+export function deriveTopicFavorites(
+  room: StoredRoomEvents | undefined,
+  ownerUserId: string,
+  agentUserId: string | undefined,
+): {
+  items: TopicFavoriteItem[];
+  favoritedEventIds: Set<string>;
+} {
+  if (!room || !Array.isArray(room.favorites) || room.favorites.length === 0) {
+    return { items: [], favoritedEventIds: new Set<string>() };
+  }
+
+  const redactedIds = collectRedactedEventIds(room.timelineEvents);
+  const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
+  const loadedById = new Map<string, RawMatrixEvent>();
+  for (const ev of room.timelineEvents) {
+    if (typeof ev.event_id === "string" && ev.event_id !== "" && !localPlaceholderOf(ev)) {
+      loadedById.set(ev.event_id, ev);
+    }
+  }
+
+  const sorted = sanitizeFavoritesList(room.favorites);
+  const items: TopicFavoriteItem[] = [];
+  const favoritedEventIds = new Set<string>();
+
+  for (const entry of sorted) {
+    if (redactedIds.has(entry.eventId)) {
+      continue;
+    }
+    const ev = loadedById.get(entry.eventId);
+    if (ev) {
+      if (isRedactedEvent(ev, redactedIds)) {
+        continue;
+      }
+      const sender = typeof ev.sender === "string" ? ev.sender : undefined;
+      const senderSide: "left" | "right" | undefined =
+        sender === ownerUserId
+          ? "right"
+          : agentUserId && sender === agentUserId
+            ? "left"
+            : entry.senderSide;
+      const ts = validTimestamp(ev.origin_server_ts) ?? entry.ts;
+      let preview = entry.preview ?? "已收藏消息";
+      if (isRecord(ev.content)) {
+        const media = extractMediaFromContent(ev.content);
+        if (media) {
+          preview = formatMediaPreview(media);
+        } else if (ev.content.msgtype === "m.text" && typeof ev.content.body === "string") {
+          const edit = latestEdits.get(entry.eventId);
+          const rawBody = edit ? edit.body : ev.content.body;
+          const cleanBody =
+            edit || senderSide === "left" ? stripStreamingCursor(rawBody) : rawBody;
+          const formatted = formatMessagePreviewText(cleanBody);
+          if (formatted) {
+            preview = formatted;
+          }
+        }
+      }
+      favoritedEventIds.add(entry.eventId);
+      items.push({
+        eventId: entry.eventId,
+        favoritedAt: entry.favoritedAt,
+        ...(senderSide ? { senderSide } : {}),
+        preview,
+        ...(ts !== undefined ? { ts } : {}),
+      });
+      continue;
+    }
+
+    favoritedEventIds.add(entry.eventId);
+    items.push({
+      eventId: entry.eventId,
+      favoritedAt: entry.favoritedAt,
+      ...(entry.senderSide ? { senderSide: entry.senderSide } : {}),
+      preview: entry.preview ?? "已收藏消息",
+      ...(entry.ts !== undefined ? { ts: entry.ts } : {}),
+    });
+  }
+
+  return { items, favoritedEventIds };
 }
