@@ -340,13 +340,19 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     });
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
-    // 未确认消息和已确认消息都没有菜单，右键也不能打开丢掉菜单
+    // 未确认消息没有菜单，已确认消息右键打开「消息操作」但绝不含「丢掉」；只有失败气泡有「更多操作」触发器
     const menuTriggers = screen.getAllByRole("button", { name: "更多操作" });
     expect(menuTriggers).toHaveLength(1);
     fireEvent.contextMenu(within(timeline).getByText("还在排队中的未确认消息"));
-    fireEvent.contextMenu(within(timeline).getByText("已确认的Bot消息"));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: "丢掉" })).not.toBeInTheDocument();
+    fireEvent.contextMenu(within(timeline).getByText("已确认的Bot消息"));
+    if (viewportMode === "wide") {
+      const confirmedMenu = screen.getByRole("menu", { name: "消息操作" });
+      expect(within(confirmedMenu).queryByRole("menuitem", { name: "丢掉" })).not.toBeInTheDocument();
+      await user.keyboard("{Escape}");
+    } else {
+      expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    }
     expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
 
     // 点击失败气泡的菜单触发按钮，打开只有「丢掉」的菜单，不显示时刻
@@ -5257,10 +5263,12 @@ test("Owner 消息上绑定 Agent 的 ✅ 和 ❌（含变体符）不渲染徽�
 
   expect(within(okMsgRow).queryByText("✅")).not.toBeInTheDocument();
   expect(within(timeline).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
-  expect(within(okMsgRow).queryByRole("button")).not.toBeInTheDocument();
+  expect(within(okMsgRow).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(within(okMsgRow).queryByRole("button", { name: "更多操作" })).not.toBeInTheDocument();
 
   expect(within(errMsgRow).queryByText("❌")).not.toBeInTheDocument();
-  expect(within(errMsgRow).queryByRole("button")).not.toBeInTheDocument();
+  expect(within(errMsgRow).queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(within(errMsgRow).queryByRole("button", { name: "更多操作" })).not.toBeInTheDocument();
   // 气泡正文保持纯净
   expect(okMsgRow.querySelector(".waypoint-bubble")).toHaveTextContent("执行任务一");
   expect(okMsgRow.querySelector(".waypoint-bubble")).not.toHaveTextContent("✅");

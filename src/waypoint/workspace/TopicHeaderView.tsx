@@ -1,5 +1,5 @@
 import type { RefObject } from "react";
-import { ArrowLeft, MoreHorizontal, PenLine, Pin, Trash2 } from "lucide-react";
+import { ArrowLeft, Bookmark, MoreHorizontal, PenLine, Pin, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -22,8 +22,10 @@ export type TopicHeaderViewProps = {
   deleting: boolean;
   reauthRequired: boolean;
   pinPending: boolean;
+  favoriteCount?: number;
   elevated?: boolean;
   onGoBack: () => void;
+  onOpenFavorites?: () => void;
   onToggleDescription: () => void;
   onToggleOverflowMenu: () => void;
   onCloseOverflowMenu: () => void;
@@ -45,7 +47,9 @@ export function TopicHeaderView({
   deleting,
   reauthRequired,
   pinPending,
+  favoriteCount = 0,
   onGoBack,
+  onOpenFavorites,
   onToggleDescription,
   onToggleOverflowMenu,
   onCloseOverflowMenu,
@@ -142,6 +146,24 @@ export function TopicHeaderView({
           ) : null}
         </div>
         <div className="waypoint-header-actions-group flex items-center gap-1.5 shrink-0">
+          {favoriteCount > 0 ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              aria-label={`收藏 (${favoriteCount})`}
+              className={cn(
+                "waypoint-topic-favorites-button rounded-full text-muted-foreground hover:text-foreground hover:bg-accent gap-1.5 font-medium tabular-nums",
+                isNarrow
+                  ? "h-11 min-w-11 px-3 active:scale-92"
+                  : "h-9 px-2.5",
+              )}
+              onClick={onOpenFavorites}
+            >
+              <Bookmark aria-hidden="true" className="size-4" />
+              <span className="text-[13px]">{favoriteCount}</span>
+            </Button>
+          ) : null}
           <div
             className="waypoint-overflow-wrapper relative inline-flex"
             ref={overflowMenuRef}

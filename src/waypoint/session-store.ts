@@ -13,6 +13,14 @@ export type ColdUnreadState = {
   readPositionUnknown: boolean;
 };
 
+export type FavoriteMessageEntry = {
+  eventId: string;
+  favoritedAt: number;
+  senderSide?: "left" | "right";
+  preview?: string;
+  ts?: number;
+};
+
 export type StoredRoomMeta = {
   stateEvents: RawMatrixEvent[];
   timelineGap?: StoredTimelineGap;
@@ -23,6 +31,7 @@ export type StoredRoomMeta = {
   fullyReadEventId?: string;
   privateReadEventId?: string;
   tags?: Record<string, unknown>;
+  favorites?: FavoriteMessageEntry[];
   encryptedIrreversible?: true;
   inviteFailed?: true;
   lastActivityTs?: number;
@@ -2086,6 +2095,7 @@ function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
     : undefined;
   const readPositionInLocal =
     typeof raw.readPositionInLocal === "boolean" ? raw.readPositionInLocal : undefined;
+  const favorites = sanitizeFavoritesList(raw.favorites);
   return {
     stateEvents,
     ...(timelineGaps.length > 0
@@ -2105,6 +2115,7 @@ function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
     ...(isPlainObject(raw.tags) && Object.keys(raw.tags).length > 0
       ? { tags: raw.tags }
       : {}),
+    ...(favorites.length > 0 ? { favorites } : {}),
     ...(raw.encryptedIrreversible === true ? { encryptedIrreversible: true as const } : {}),
     ...(raw.inviteFailed === true ? { inviteFailed: true as const } : {}),
     ...(lastActivityTs !== undefined ? { lastActivityTs } : {}),
@@ -2113,6 +2124,45 @@ function normalizeStoredRoomMeta(raw: Record<string, unknown>): StoredRoomMeta {
     ...(placeholderChunkSeqs && placeholderChunkSeqs.length > 0 ? { placeholderChunkSeqs } : {}),
     ...(readPositionInLocal !== undefined ? { readPositionInLocal } : {}),
   };
+}
+
+export function sanitizeFavoritesList(raw: unknown): FavoriteMessageEntry[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const byId = new Map<string, FavoriteMessageEntry>();
+  for (const item of raw) {
+    if (!isPlainObject(item)) {
+      continue;
+    }
+    const eventId =
+      typeof item.eventId === "string" && item.eventId.trim() !== ""
+        ? item.eventId
+        : undefined;
+    const favoritedAt =
+      typeof item.favoritedAt === "number" && Number.isFinite(item.favoritedAt)
+        ? item.favoritedAt
+        : undefined;
+    if (!eventId || favoritedAt === undefined) {
+      continue;
+    }
+    const entry: FavoriteMessageEntry = {
+      eventId,
+      favoritedAt,
+      ...(item.senderSide === "left" || item.senderSide === "right"
+        ? { senderSide: item.senderSide }
+        : {}),
+      ...(typeof item.preview === "string" && item.preview !== ""
+        ? { preview: item.preview }
+        : {}),
+      ...(typeof item.ts === "number" && Number.isFinite(item.ts) ? { ts: item.ts } : {}),
+    };
+    const prev = byId.get(eventId);
+    if (!prev || entry.favoritedAt >= prev.favoritedAt) {
+      byId.set(eventId, entry);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => b.favoritedAt - a.favoritedAt);
 }
 
 function normalizeAttachmentMeta(raw: unknown): AttachmentMeta | undefined {
