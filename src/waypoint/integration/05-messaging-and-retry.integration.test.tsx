@@ -19,7 +19,7 @@ import {
 
 setupIntegrationTestEnv();
 
-test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不挪末尾、无二次确认），断网转圈重试再失败回红叹号，确认后原地收成同一条气泡", async () => {
+test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不挪末尾、无二次确认），断网无转圈重试再失败回红叹号，确认后原地收成同一条气泡", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncCalls = 0;
@@ -186,7 +186,7 @@ test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不�
   sendBehavior = "offline";
   await user.click(screen.getByRole("button", { name: "失败" }));
 
-  // 立刻在原处变回转圈，不弹窗确认，不清掉草稿，不挪到末尾，发出新的 txnId
+  // 立刻在原处恢复为未确认（无转圈），不弹窗确认，不清掉草稿，不挪到末尾，发出新的 txnId
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("未发出的草稿");
   expect(screen.getByRole("region", { name: "已选附件" })).toHaveTextContent("draft.txt");
@@ -200,8 +200,9 @@ test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不�
   const secondAttemptTxnId = sentRequests[2]!.txnId;
   expect(secondAttemptTxnId).not.toBe(firstAttemptTxnId);
   expect(sentRequests[2]!.body).toEqual({ msgtype: "m.text", body: "第1条会失败的消息" });
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
-  expect(timeline.querySelectorAll("[data-side]")[1].contains(screen.getByRole("status", { name: "未确认" }))).toBe(true);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  expect(timeline.querySelectorAll("[data-side]")[1]).not.toHaveAttribute("data-event-id");
 
   // 重试队列 1s 后再试，这次又被 400 永久拒绝 -> 又变回红叹号，仍在原处
   sendBehavior = "400";
@@ -220,8 +221,9 @@ test("点一下红叹号就在原处再交出（新 txnId、不动草稿、不�
 
   await waitFor(() => {
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelectorAll("[data-side]")[1]).toHaveAttribute("data-event-id");
   });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(getBodies()).toEqual([
     "第0条Bot消息",
     "第1条会失败的消息",
@@ -330,15 +332,18 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     await user.click(screen.getByRole("button", { name: "发送" }));
     await screen.findByRole("button", { name: "失败" });
 
-    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "还在转圈的未确认消息");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "还在排队中的未确认消息");
     await user.click(screen.getByRole("button", { name: "发送" }));
-    await screen.findByRole("status", { name: "未确认" });
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    await waitFor(() => {
+      expect(timeline).toHaveTextContent("还在排队中的未确认消息");
+    });
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
     // 未确认消息和已确认消息都没有菜单，右键也不能打开丢掉菜单
-    const timeline = screen.getByRole("log", { name: "对话时间线" });
     const menuTriggers = screen.getAllByRole("button", { name: "更多操作" });
     expect(menuTriggers).toHaveLength(1);
-    fireEvent.contextMenu(within(timeline).getByText("还在转圈的未确认消息"));
+    fireEvent.contextMenu(within(timeline).getByText("还在排队中的未确认消息"));
     fireEvent.contextMenu(within(timeline).getByText("已确认的Bot消息"));
     expect(screen.queryByRole("menu")).not.toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: "丢掉" })).not.toBeInTheDocument();
@@ -364,7 +369,7 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     expect(screen.queryByText(/撤销/)).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("");
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
-    expect(within(timeline).getByText("还在转圈的未确认消息")).toBeInTheDocument();
+    expect(within(timeline).getByText("还在排队中的未确认消息")).toBeInTheDocument();
 
     // 重启后失败消息仍已彻底消失，未确认消息仍在
     view.unmount();
@@ -372,7 +377,7 @@ test("失败气泡在 macOS 和 Android 用同一个菜单且只有丢掉（无�
     await user.click(await screen.findByRole("button", { name: "丢掉菜单话题" }));
     const restoredTimeline = screen.getByRole("log", { name: "对话时间线" });
     expect(restoredTimeline).toHaveTextContent("已确认的Bot消息");
-    expect(restoredTimeline).toHaveTextContent("还在转圈的未确认消息");
+    expect(restoredTimeline).toHaveTextContent("还在排队中的未确认消息");
     expect(restoredTimeline).not.toHaveTextContent("要被丢掉的失败消息");
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
     restarted.unmount();
@@ -462,7 +467,10 @@ test("未确认和失败消息不推进已读位置、不重排 Topic 列表、�
 
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "本地未确认消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await screen.findByRole("status", { name: "未确认" });
+  await waitFor(() => {
+    expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("本地未确认消息");
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 不改变 Topic 列表顺序，不写 read_markers / account_data
   expect(listOrder()).toEqual(["新Topic", "旧Topic"]);
@@ -488,7 +496,7 @@ test("未确认和失败消息不推进已读位置、不重排 Topic 列表、�
   device2.unmount();
 });
 
-test("Topic 列表行最多显示一个发送状态标记且失败优先于未确认，不计条数、预览最新本地消息、点列表红叹号只打开 Topic 不重发，非消息待重放项不触发标记", async () => {
+test("Topic 列表行不显示未确认转圈且最多显示失败红叹号，预览最新本地消息、点列表红叹号只打开 Topic 不重发，非消息待重放项不触发标记 (#166)", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let sendBehavior: "offline" | "first-403-rest-offline" | "200" = "offline";
@@ -552,7 +560,7 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   const sidebar = await screen.findByRole("complementary", { name: "Topic 列表" });
   expect(within(sidebar).queryByRole("img")).not.toBeInTheDocument();
 
-  // 打开列表标记话题，离线连发两条消息 -> 列表行最多一个转圈，不显示条数，预览最新一条本地消息
+  // 打开列表标记话题，离线连发两条消息 -> 列表行与对话气泡均不显示未确认转圈，不显示条数，预览最新一条本地消息
   await user.click(within(sidebar).getByRole("button", { name: "列表标记话题" }));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "第一条秘密正文");
   await user.click(screen.getByRole("button", { name: "发送" }));
@@ -567,12 +575,14 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
     clone.querySelectorAll(".waypoint-topic-row-time").forEach((el) => el.remove());
     return clone.textContent ?? "";
   };
-  expect(within(row1).getAllByRole("img", { name: "未确认" })).toHaveLength(1);
+  expect(within(row1).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(row1.querySelector(".waypoint-unconfirmed-spinner")).toBeNull();
   expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
   expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("第二条秘密正文");
   expect(rowTextWithoutTime(row1)).not.toMatch(/2|第一条秘密正文/);
 
-  // 第一条被 403 永久拒绝，第二条仍未确认 -> 同一行既有失败又有未确认，优先显示红叹号（最多一个）
+  // 第一条被 403 永久拒绝，第二条仍未确认 -> 同一行既有失败又有未确认，显示红叹号（最多一个）
   sendBehavior = "first-403-rest-offline";
   await act(async () => { first.clock.advance(2000); });
   await screen.findByRole("button", { name: "失败" });
@@ -591,20 +601,24 @@ test("Topic 列表行最多显示一个发送状态标记且失败优先于未�
   expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("列表标记话题");
   expect(sendCalls).toBe(sendsBeforeRowClick);
 
-  // 丢掉失败消息后只剩未确认消息 -> 列表行从红叹号变回转圈
+  // 丢掉失败消息后只剩未确认消息 -> 列表行红叹号消失且不恢复未确认转圈，未确认消息仍在本地时间线并继续重放
   await user.click(screen.getByRole("button", { name: "更多操作" }));
   await user.click(within(screen.getByRole("menu", { name: "消息操作" })).getByRole("menuitem", { name: "丢掉" }));
   await waitFor(() => {
     expect(within(row1).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
   });
-  expect(within(row1).getByRole("img", { name: "未确认" })).toBeInTheDocument();
+  expect(within(row1).queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+  const timelineAfterDiscard = screen.getByRole("log", { name: "对话时间线" });
+  expect(timelineAfterDiscard).toHaveTextContent("第二条秘密正文");
+  expect(timelineAfterDiscard.querySelectorAll("[data-event-id]")).toHaveLength(0);
 
-  // 待未确认消息也确认 -> 列表行标记消失
+  // 待未确认消息也确认 -> 在原处确认且列表行无任何状态图标
   sendBehavior = "200";
   await act(async () => { first.clock.advance(30_000); });
   await waitFor(() => {
-    expect(within(row1).queryByRole("img")).not.toBeInTheDocument();
+    expect(timelineAfterDiscard.querySelectorAll("[data-event-id]")).toHaveLength(1);
   });
+  expect(within(row1).queryByRole("img")).not.toBeInTheDocument();
 
   // 给「另一条话题」持久化一个待重放的 reaction（非 m.room.message），重启后重试队列重放期间列表行不显示任何标记
   first.unmount();
@@ -761,13 +775,13 @@ test("原处重发时若同步回声先于发送响应到达，仍收成原处�
   // 点第一条的红叹号重发，让同步回声先到，PUT 200 后到
   await user.click(screen.getAllByRole("button", { name: "失败" })[0]!);
   await waitFor(() => expect(resentTxnId).not.toBe(""));
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: "失败" })).toHaveLength(1);
 
   await act(async () => { view.clock.advance(1000); });
   await waitFor(() => expect(syncCalls).toBeGreaterThanOrEqual(3));
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$resent-echo"]')).not.toBeNull();
   });
   expect(getBodies()).toEqual(["第一条失败", "第二条失败", "中间插入的Bot消息"]);
 
@@ -1658,9 +1672,12 @@ test("未确认和失败消息不提前修改列表行时刻也不重排，确�
   expect(pinOldRow().querySelector(".waypoint-topic-row-preview")).toHaveTextContent("不会改时刻的失败消息");
   expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
 
-  // 点红叹号重发（未确认状态），PUT 200 先到但尚无同步回声 -> 时刻仍是「昨天」，排序不变
+  // 点红叹号重发（未确认状态），PUT 200 先到但尚无同步回声 -> 时刻仍是「昨天」，排序不变，且不渲染未确认转圈
   await user.click(screen.getByRole("button", { name: "失败" }));
-  await screen.findByRole("status", { name: "未确认" });
+  await waitFor(() => {
+    expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(pinOldRow().querySelector(".waypoint-topic-row-time")).toHaveTextContent("昨天");
   expect(getTitles()).toEqual(["置顶新", "置顶旧", "普通话题"]);
 
@@ -1805,7 +1822,8 @@ test("已连接后服务器不认 token 时顶栏显示静默提示（不弹窗�
   expect(screen.getByLabelText("选择附件")).toBeDisabled();
   expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
   expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("未确认消息");
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
 
   // 4) 仍可只读切换并浏览本地时间线和已有草稿
   await user.click(screen.getByRole("button", { name: "草稿话题" }));
@@ -4473,7 +4491,9 @@ test("Topic 不可用时失败消息的红叹号仍在，点击马上又失败�
   await waitFor(() => {
     expect(sendAttempts).toBe(2);
   });
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(screen.getByRole("log", { name: "对话时间线" })).toHaveTextContent("排队中的消息");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
 
   const sendCountBeforeUnavailable = homeserver.requests.filter((r) =>
     r.url.includes("/send/m.room.message/"),
@@ -4689,7 +4709,11 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   await login(user);
 
   const row1 = await screen.findByRole("button", { name: "处理中话题" });
-  expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
+  const row1Responding = row1.querySelector(".waypoint-topic-row-responding") as HTMLElement;
+  expect(row1Responding).not.toBeNull();
+  expect(row1Responding).toHaveAttribute("aria-label", "正在回应");
+  expect(row1Responding.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+  expect(row1).not.toHaveTextContent("正在回应");
   expect(row1).not.toHaveAttribute("data-unread", "true");
   expect(row1.querySelector(".waypoint-topic-row-bot")).toBeNull();
   expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("已经出现的回答");
@@ -4699,19 +4723,22 @@ test("列表行正在回应只认绑定 Agent 未撤回的 👀，多条 👀 �
   expect(row2.querySelector(".waypoint-topic-row-responding")).toBeNull();
   expect(row2.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("纯文本");
 
-  // 撤回第一条 👀，第二条 👀 还在，依然显示一次正在回应
-  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
-  await act(async () => { clock.advance(1000); });
-  await waitFor(() => expect(syncRound).toBeGreaterThanOrEqual(2));
-  expect(within(row1).getAllByText("正在回应")).toHaveLength(1);
-
-  // 撤回第二条 👀，正在回应消失，预览仍保留
-  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
+  // 撤回第一条 👀，第二条 👀 还在，依然显示一次三点正在回应指示器
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThanOrEqual(2));
   await act(async () => { clock.advance(1000); });
   await waitFor(() => {
-    expect(row1).not.toHaveTextContent("正在回应");
+    expect(syncRound).toBeGreaterThanOrEqual(2);
+    expect(clock.timerCount).toBeGreaterThanOrEqual(2);
+    expect(row1.querySelectorAll(".waypoint-topic-row-responding")).toHaveLength(1);
   });
-  expect(row1.querySelector(".waypoint-topic-row-responding")).toBeNull();
+
+  // 撤回第二条 👀，正在回应消失，预览仍保留
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThanOrEqual(2));
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(row1.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  });
+  expect(row1).not.toHaveTextContent("正在回应");
   expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("已经出现的回答");
 });
 
@@ -4833,7 +4860,11 @@ test("多 Bot 时列表不展示 Bot 名字，最新消息预览与正在回应�
   expect(row1.querySelector(".waypoint-topic-row-bot")).toBeNull();
   expect(row1).not.toHaveTextContent("研究助理");
   expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("新进度消息");
-  expect(within(row1).getByText("正在回应")).toBeInTheDocument();
+  const initialResponding = row1.querySelector(".waypoint-topic-row-responding") as HTMLElement;
+  expect(initialResponding).not.toBeNull();
+  expect(initialResponding).toHaveAttribute("aria-label", "正在回应");
+  expect(initialResponding.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+  expect(row1).not.toHaveTextContent("正在回应");
   expect(row1.querySelector(".waypoint-topic-row-time")).not.toBeNull();
 
   // 在另一个 Topic 上发送失败，然后验证未读+置顶+最新预览+正在回应+失败红叹号五者共存
@@ -4846,16 +4877,17 @@ test("多 Bot 时列表不展示 Bot 名字，最新消息预览与正在回应�
   });
   expect(row1).not.toHaveTextContent("研究助理");
   expect(row1.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("这句会失败");
-  expect(within(row1).getByText("正在回应")).toBeInTheDocument();
+  expect(row1.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
   expect(within(row1).getByText("置顶")).toBeInTheDocument();
 
   const row2 = screen.getByRole("button", { name: "空闲多Bot话题" });
   expect(row2.querySelector(".waypoint-topic-row-bot")).toBeNull();
   expect(row2.querySelector(".waypoint-topic-row-preview")).toHaveTextContent("问编程助理");
+  expect(row2.querySelector(".waypoint-topic-row-responding")).toBeNull();
   expect(row2).not.toHaveTextContent("正在回应");
 });
 
-test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正在回应（不设全局横幅），进度文字按普通气泡渲染，撤回 👀 后消失", async () => {
+test("打开 Topic 时在时间线末尾左对齐展示唯一无文字三点正在回应指示器，不挂在单条气泡下也不设全局横幅，进度文字按普通气泡渲染，撤回全部 👀 后消失 (#166)", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncRound = 0;
@@ -5027,14 +5059,16 @@ test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正
   await login(user);
 
   const row = await screen.findByRole("button", { name: "对话内指示话题" });
-  expect(within(row).getAllByText("正在回应")).toHaveLength(1);
+  expect(row.querySelectorAll(".waypoint-topic-row-responding")).toHaveLength(1);
+  expect(row).not.toHaveTextContent("正在回应");
 
   await user.click(row);
   const timeline = screen.getByRole("log", { name: "对话时间线" });
 
-  // 不存在全局横幅：正在回应只在挂着 👀 的消息行内
+  // 不存在全局横幅，也不在单条消息气泡下方写「正在回应」文字
   const topicView = timeline.closest(".waypoint-topic-view") as HTMLElement;
   expect(topicView.querySelector(".waypoint-topic-header")).not.toHaveTextContent("正在回应");
+  expect(timeline).not.toHaveTextContent("正在回应");
 
   // 进度文字作为普通气泡渲染
   const bubbles = Array.from(timeline.querySelectorAll(".waypoint-bubble")).map((el) => el.textContent);
@@ -5046,28 +5080,34 @@ test("打开 Topic 时只在挂着绑定 Agent 的 👀 的消息下方显示正
   const msgQ2Row = timeline.querySelector("[data-event-id=\"$msg-q2\"]") as HTMLElement;
 
   expect(msgOldRow).not.toHaveTextContent("正在回应");
-  expect(msgQ1Row).toHaveTextContent("正在回应");
+  expect(msgQ1Row).not.toHaveTextContent("正在回应");
   expect(msgProgRow).not.toHaveTextContent("正在回应");
-  expect(msgQ2Row).toHaveTextContent("正在回应");
+  expect(msgQ2Row).not.toHaveTextContent("正在回应");
 
-  // 回答出现且撤回 $eyes-q1 后：$msg-q1 取消，但 $msg-q2 仍有 👀，所以 $msg-q2 和列表行仍在
+  const track = timeline.querySelector(".waypoint-timeline-track") as HTMLElement;
+  const timelineResponding = within(track).getByRole("status", { name: "正在回应" });
+  expect(timelineResponding).toHaveClass("waypoint-timeline-responding", "self-start");
+  expect(timelineResponding.closest(".waypoint-bubble")).toBeNull();
+  expect(timelineResponding.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+  expect(track.lastElementChild).toBe(timelineResponding);
+
+  // 回答出现且撤回 $eyes-q1 后：$msg-q2 仍有 👀，所以时间线末尾三点指示器与列表行指示器均保持一个
   await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
     expect(timeline.querySelector("[data-event-id=\"$msg-ans\"]")).not.toBeNull();
   });
-  expect(msgQ1Row).not.toHaveTextContent("正在回应");
-  expect(msgQ2Row).toHaveTextContent("正在回应");
-  expect(within(row).getAllByText("正在回应")).toHaveLength(1);
+  expect(within(track).getAllByRole("status", { name: "正在回应" })).toHaveLength(1);
+  expect(row.querySelectorAll(".waypoint-topic-row-responding")).toHaveLength(1);
 
-  // 撤回 $eyes-q2 后，所有正在回应消失
+  // 撤回 $eyes-q2 后，Topic 级正在回应从时间线末尾与列表行同时消失
   await advanceWhenTimerScheduled(clock, 1000);
   await waitFor(() => {
-    expect(msgQ2Row).not.toHaveTextContent("正在回应");
+    expect(within(track).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
   });
-  expect(row).not.toHaveTextContent("正在回应");
+  expect(row.querySelector(".waypoint-topic-row-responding")).toBeNull();
 });
 
-test("消息上的 ✅ 和 ❌ 留在原消息上可见，不藏起、不升级为正在回应或失败状态，撤回 👀 后 ✅ 仍保留", async () => {
+test("Owner 消息上绑定 Agent 的 ✅ 和 ❌（含变体符）不渲染徽章且立即终结 👀，非状态 reaction 保留，❌ 不当成发送失败 (#166)", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncRound = 0;
@@ -5202,37 +5242,40 @@ test("消息上的 ✅ 和 ❌ 留在原消息上可见，不藏起、不升级�
   const { clock } = renderApp(homeserver);
   await login(user);
 
-  // 仅 ✅/❌ 的 Topic 列表行不显示正在回应、也不显示失败红叹号
+  // 仅 ✅/❌ 的 Topic 列表行不显示正在回应、也不显示失败红叹号；$ok-msg 已收到 ✅ 且 👀 也立即失效
   const doneRow = await screen.findByRole("button", { name: "仅完成叉号话题" });
-  expect(doneRow).not.toHaveTextContent("正在回应");
+  expect(doneRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
   expect(within(doneRow).queryByRole("img", { name: "失败" })).not.toBeInTheDocument();
 
   const rxRow = screen.getByRole("button", { name: "反应保留话题" });
+  expect(rxRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
   await user.click(rxRow);
 
   const timeline = screen.getByRole("log", { name: "对话时间线" });
   const okMsgRow = timeline.querySelector("[data-event-id=\"$ok-msg\"]") as HTMLElement;
   const errMsgRow = timeline.querySelector("[data-event-id=\"$err-msg\"]") as HTMLElement;
 
-  expect(within(okMsgRow).getByText("✅")).toBeInTheDocument();
-  expect(okMsgRow).toHaveTextContent("正在回应");
+  expect(within(okMsgRow).queryByText("✅")).not.toBeInTheDocument();
+  expect(within(timeline).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
   expect(within(okMsgRow).queryByRole("button")).not.toBeInTheDocument();
 
-  expect(within(errMsgRow).getByText("❌")).toBeInTheDocument();
-  expect(errMsgRow).not.toHaveTextContent("正在回应");
+  expect(within(errMsgRow).queryByText("❌")).not.toBeInTheDocument();
   expect(within(errMsgRow).queryByRole("button")).not.toBeInTheDocument();
   // 气泡正文保持纯净
   expect(okMsgRow.querySelector(".waypoint-bubble")).toHaveTextContent("执行任务一");
   expect(okMsgRow.querySelector(".waypoint-bubble")).not.toHaveTextContent("✅");
 
-  // 撤回 👀 后，正在回应消失，但 ✅ 仍留在原消息上
-  await advanceWhenTimerScheduled(clock, 1000);
+  // 延迟撤回 👀 到达后，状态依然收敛且 ✅ 保持隐藏
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThan(0));
+  await act(async () => { clock.advance(1000); });
   await waitFor(() => {
-    expect(okMsgRow).not.toHaveTextContent("正在回应");
+    expect(syncRound).toBeGreaterThanOrEqual(2);
+    expect(clock.timerCount).toBeGreaterThan(0);
+    expect(within(timeline).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+    expect(within(okMsgRow).queryByText("✅")).not.toBeInTheDocument();
+    expect(within(errMsgRow).queryByText("❌")).not.toBeInTheDocument();
+    expect(rxRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
   });
-  expect(within(okMsgRow).getByText("✅")).toBeInTheDocument();
-  expect(within(errMsgRow).getByText("❌")).toBeInTheDocument();
-  expect(rxRow).not.toHaveTextContent("正在回应");
 });
 
 test("代码块横向滚动、不换行、可复制，且 mermaid 围栏只当代码块不作图 (#63)", async () => {
@@ -5634,4 +5677,457 @@ test("Agent 回复支持受控行内着色与 GFM Callout，非白名单 HTML �
   expect(ownerBubble.querySelector(".waypoint-callout")).toBeNull();
   expect(ownerBubble.querySelector('[data-streamdown="blockquote"]')).not.toBeNull();
   expect(ownerBubble.textContent).toContain('<span style="color: red">Owner纯文本</span>');
+});
+
+test("自愈正在回应：新回合 ✅/❌ 变体符清理旧泄漏 👀、非状态 reaction 保留、审批预种不误杀、进度编辑续期 5 分钟并在重启后精确超时收敛 (#166)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!heal:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 900_000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "自愈超时话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u1",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_000_000,
+                        content: { msgtype: "m.text", body: "旧回合问题" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_000_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u1", key: "👀" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$thumbs-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_000_150,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u1", key: "👍" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$u2",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_001_000,
+                        content: { msgtype: "m.text", body: "新回合问题" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$done-2",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_001_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u2", key: "✅\uFE0F" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!heal:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u3",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_002_000,
+                        content: { msgtype: "m.text", body: "并发审批问题" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-3",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_002_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u3", key: "👀" } },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$ap-msg",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_003_000,
+                        content: { msgtype: "m.text", body: "需要审批确认命令" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap-ok",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_003_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-msg", key: "✅" } },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$ap-no",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_003_200,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$ap-msg", key: "❌" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!heal:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$prog-1",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_100_000,
+                        content: { msgtype: "m.text", body: "🔧 执行步骤一 ▉" },
+                      },
+                      {
+                        type: "m.room.message",
+                        event_id: "$prog-1-edit",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_200_000,
+                        content: {
+                          msgtype: "m.text",
+                          body: "* 🔧 执行步骤二",
+                          "m.new_content": { msgtype: "m.text", body: "🔧 执行步骤二" },
+                          "m.relates_to": { rel_type: "m.replace", event_id: "$prog-1" },
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  const firstClock = new ManualClock();
+  firstClock.now = 1_005_000;
+  const first = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={firstClock}
+    />,
+  );
+  await login(user);
+
+  const row = await screen.findByRole("button", { name: "自愈超时话题" });
+  expect(row.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  await user.click(row);
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(screen.queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+  const u1Row = timeline.querySelector('[data-event-id="$u1"]') as HTMLElement;
+  const u2Row = timeline.querySelector('[data-event-id="$u2"]') as HTMLElement;
+  expect(within(u1Row).getByText("👍")).toBeInTheDocument();
+  expect(within(u2Row).queryByText("✅")).not.toBeInTheDocument();
+  expect(within(u2Row).queryByText("✅\uFE0F")).not.toBeInTheDocument();
+
+  // Sync 2: $u3 收到 👀，Agent 随后发出审批消息（预种 ✅/❌）不误杀正在回应
+  await advanceWhenTimerScheduled(firstClock, 1000);
+  await waitFor(() => {
+    expect(timeline.querySelector('[data-event-id="$ap-msg"]')).not.toBeNull();
+  });
+  const apRow = timeline.querySelector('[data-event-id="$ap-msg"]') as HTMLElement;
+  expect(within(apRow).getByRole("button", { name: /仅此次/ })).toBeEnabled();
+  expect(within(apRow).getByRole("button", { name: /拒绝/ })).toBeEnabled();
+  expect(screen.getByRole("status", { name: "正在回应" })).toHaveClass("waypoint-timeline-responding");
+  expect(row.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+
+  // Sync 3: Agent 进度消息 + m.replace 编辑将无活动超时终点续期至 1_200_000 + 300_000 = 1_500_000
+  await advanceWhenTimerScheduled(firstClock, 1000);
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("🔧 执行步骤二");
+  });
+  expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+  first.unmount();
+
+  // 重启到临近超时（1_499_999ms）：基于服务器时间戳继续倒计时，不重新计时
+  const restartClock = new ManualClock();
+  restartClock.now = 1_499_999;
+  const second = render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={restartClock}
+    />,
+  );
+  const restoredRow = await screen.findByRole("button", { name: "自愈超时话题" });
+  expect(restoredRow.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+  await user.click(restoredRow);
+  expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+
+  // 再推进 1ms（到达 1_500_000ms）：无需下次 sync，对话页与列表行同时自愈消失
+  await act(async () => {
+    restartClock.advance(1);
+  });
+  expect(screen.queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+  expect(restoredRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  second.unmount();
+});
+
+test("Topic 不可用、M_UNKNOWN_TOKEN 停同步与目标消息撤回对「正在回应」的阻断与恢复 (#166)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  let syncRound = 0;
+  let tokenValid = true;
+
+  homeserver.handler = async (input) => {
+    if (input.url.endsWith("/versions")) {
+      return { type: "response", status: 200, body: { versions: ["v1.11"] } };
+    }
+    if (input.method === "GET" && input.url.endsWith("/_matrix/client/v3/login")) {
+      return { type: "response", status: 200, body: { flows: [{ type: "m.login.password" }] } };
+    }
+    if (input.method === "POST" && input.url.endsWith("/_matrix/client/v3/login")) {
+      tokenValid = true;
+      return {
+        type: "response",
+        status: 200,
+        body: { user_id: "@alice:example.com", access_token: "tok-valid", device_id: "DEV1" },
+      };
+    }
+    if (input.url.includes("/sync")) {
+      if (!tokenValid) {
+        return {
+          type: "response",
+          status: 401,
+          body: { errcode: "M_UNKNOWN_TOKEN", error: "Token expired" },
+        };
+      }
+      syncRound += 1;
+      if (syncRound === 1) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-1",
+            account_data: validAgents,
+            rooms: {
+              join: {
+                "!gate:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 900_000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "门控恢复话题" } },
+                      { type: "m.room.member", state_key: "@alice:example.com", content: { membership: "join" } },
+                      { type: "m.room.member", state_key: "@bot:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u-gate",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_000_000,
+                        content: { msgtype: "m.text", body: "等待回应" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-gate",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_000_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u-gate", key: "👀" } },
+                      },
+                    ],
+                  },
+                },
+                "!redact-target:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.create", state_key: "", origin_server_ts: 800_000, content: {} },
+                      { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                      { type: "m.room.name", state_key: "", content: { name: "目标撤回话题" } },
+                    ],
+                  },
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.message",
+                        event_id: "$u-red",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_000_000,
+                        content: { msgtype: "m.text", body: "会被撤回的消息" },
+                      },
+                      {
+                        type: "m.reaction",
+                        event_id: "$eyes-red",
+                        sender: "@bot:example.com",
+                        origin_server_ts: 1_000_100,
+                        content: { "m.relates_to": { rel_type: "m.annotation", event_id: "$u-red", key: "👀" } },
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 2) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-2",
+            rooms: {
+              join: {
+                "!gate:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "join" } },
+                    ],
+                  },
+                },
+                "!redact-target:example.com": {
+                  timeline: {
+                    events: [
+                      {
+                        type: "m.room.redaction",
+                        event_id: "$red-msg",
+                        sender: "@alice:example.com",
+                        origin_server_ts: 1_002_000,
+                        redacts: "$u-red",
+                        content: {},
+                      },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      if (syncRound === 3) {
+        return {
+          type: "response",
+          status: 200,
+          body: {
+            next_batch: "batch-3",
+            rooms: {
+              join: {
+                "!gate:example.com": {
+                  state: {
+                    events: [
+                      { type: "m.room.member", state_key: "@eve:example.com", content: { membership: "leave" } },
+                    ],
+                  },
+                },
+              },
+            },
+          },
+        };
+      }
+      return { type: "response", status: 200, body: { next_batch: `batch-${syncRound}` } };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  };
+
+  const clock = new ManualClock();
+  clock.now = 1_005_000;
+  render(
+    <WaypointApp
+      homeserver={homeserver}
+      platform={{ deviceDisplayName: "Waypoint macOS" }}
+      clock={clock}
+    />,
+  );
+  await login(user);
+
+  const gateRow = await screen.findByRole("button", { name: "门控恢复话题" });
+  const redactRow = screen.getByRole("button", { name: "目标撤回话题" });
+  expect(gateRow.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+  expect(redactRow.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+
+  await user.click(gateRow);
+  expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+
+  // Sync 2: !gate 变不可用、!redact 目标消息被撤回 -> 两者正在回应均立即消失
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThanOrEqual(2));
+  await act(async () => { clock.advance(1000); });
+  await waitFor(() => {
+    expect(screen.getByRole("status", { name: "Topic 不可用" })).toBeInTheDocument();
+  });
+  expect(screen.queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+  expect(gateRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
+  expect(redactRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
+
+  // Sync 3: !gate 恢复可用且未超时 -> 正在回应恢复
+  await advanceWhenTimerScheduled(clock, 1000);
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "Topic 不可用" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+  expect(gateRow.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
+
+  // Sync 4: 401 M_UNKNOWN_TOKEN 停同步 -> 立即清除正在回应，重新验证后恢复
+  tokenValid = false;
+  await waitFor(() => expect(clock.timerCount).toBeGreaterThanOrEqual(2));
+  await act(async () => { clock.advance(1000); });
+  await screen.findByRole("status", { name: "重新验证提示" });
+  expect(screen.queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+  expect(gateRow.querySelector(".waypoint-topic-row-responding")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "重新验证" }));
+  await user.type(screen.getByLabelText("密码"), "secret");
+  await user.click(screen.getByRole("button", { name: "确认验证" }));
+  await waitFor(() => {
+    expect(screen.queryByRole("status", { name: "重新验证提示" })).not.toBeInTheDocument();
+  });
+  expect(screen.getByRole("status", { name: "正在回应" })).toBeInTheDocument();
+  expect(gateRow.querySelector(".waypoint-topic-row-responding")).not.toBeNull();
 });

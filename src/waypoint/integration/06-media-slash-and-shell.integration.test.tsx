@@ -941,7 +941,9 @@ test("Android 回到前台时立刻清零退避、携带已有同步游标增量
   await waitFor(() => expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue(""));
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "队列消息二");
   await user.click(screen.getByRole("button", { name: "发送" }));
-  await waitFor(() => expect(screen.getAllByRole("status", { name: "未确认" })).toHaveLength(2));
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(2));
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   await act(async () => { clock.advance(1000); });
   const syncCountBeforeBg = syncCalls;
@@ -974,6 +976,7 @@ test("Android 回到前台时立刻清零退避、携带已有同步游标增量
     expect(sentBodies).toEqual(["队列消息一", "队列消息二"]);
   });
   await waitFor(() => {
+    expect(timeline.querySelectorAll('[data-side="right"][data-event-id]')).toHaveLength(2);
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   });
 
@@ -1957,7 +1960,7 @@ test("选择器按预种顺序渲染 1 到 10 与 A/B 按钮，点选代发原 r
   expect(within(abRow).queryByText("🅱️")).not.toBeInTheDocument();
 });
 
-test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、且 👀 与原消息 ✅ ❌ 保留原样不变成按钮 (#57)", async () => {
+test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、且 👀 与 Owner 消息上绑定 Agent 的 ✅ ❌ 均隐藏不变成按钮 (#57)", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncRound = 0;
@@ -2156,10 +2159,10 @@ test("预种 reaction 被撤回、跨种类提示互不顶替、不猜超时、�
   const ap1Row = timeline.querySelector('[data-event-id="$ap-1"]') as HTMLElement;
   const sel1Row = timeline.querySelector('[data-event-id="$sel-1"]') as HTMLElement;
 
-  // Owner 消息上的 👀、✅、❌ 保留原样，绝不变成按钮
-  expect(ownerTaskRow).toHaveTextContent("正在回应");
-  expect(within(ownerTaskRow).getByText("✅")).toBeInTheDocument();
-  expect(within(ownerTaskRow).getByText("❌")).toBeInTheDocument();
+  // Owner 消息上隐藏绑定 Agent 的 ✅/❌ 徽章且 👀 立即终结，绝不变成按钮
+  expect(within(timeline).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
+  expect(within(ownerTaskRow).queryByText("✅")).not.toBeInTheDocument();
+  expect(within(ownerTaskRow).queryByText("❌")).not.toBeInTheDocument();
   expect(within(ownerTaskRow).queryAllByRole("button")).toHaveLength(0);
 
   // 即使有了更新的 selector ($sel-1)，不同种类的 approval ($ap-1) 仍然可用
@@ -2621,7 +2624,8 @@ test("发送单个附件：图片用 m.image、文件及音视频用 m.file，�
 
   const timeline1 = screen.getByRole("log", { name: "对话时间线" });
   expect(await within(timeline1).findByText("report.pdf")).toBeInTheDocument();
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(within(timeline1).getByText("report.pdf").closest("[data-side]")).not.toHaveAttribute("data-event-id");
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "已选附件" })).not.toBeInTheDocument();
 
   app1.unmount();
@@ -2642,6 +2646,7 @@ test("发送单个附件：图片用 m.image、文件及音视频用 m.file，�
     info: { mimetype: "application/pdf", size: pdfBytes.byteLength },
   });
   await waitFor(() => {
+    expect(screen.getByRole("log", { name: "对话时间线" }).querySelector('[data-event-id="$ev-3"]')).not.toBeNull();
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   });
   app2.unmount();
@@ -2800,10 +2805,10 @@ test("上传成功后记住媒体地址不重复上传，使用固定事务 ID�
   });
   const timeline2 = screen.getByRole("log", { name: "对话时间线" });
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline2.querySelector('[data-event-id="$echo-att-1"]')).not.toBeNull();
   });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(timeline2.querySelectorAll(".waypoint-bubble")).toHaveLength(1);
-  expect(timeline2.querySelector("[data-event-id=\"$echo-att-1\"]")).not.toBeNull();
 
   // 2. 发送阶段 4xx 永久失败后，点红叹号重发仍复用已记住的 mxc://，不重新上传
   sendMode = "4xx";
@@ -2819,6 +2824,7 @@ test("上传成功后记住媒体地址不重复上传，使用固定事务 ID�
   sendMode = "ok";
   await user.click(failBtn1);
   await waitFor(() => {
+    expect(timeline2.querySelectorAll("[data-event-id]")).toHaveLength(2);
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   });
@@ -2838,6 +2844,7 @@ test("上传成功后记住媒体地址不重复上传，使用固定事务 ID�
   uploadMode = "ok";
   await user.click(failBtn2);
   await waitFor(() => {
+    expect(timeline2.querySelectorAll("[data-event-id]")).toHaveLength(3);
     expect(screen.queryByRole("button", { name: "失败" })).not.toBeInTheDocument();
     expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   });

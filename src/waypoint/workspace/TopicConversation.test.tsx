@@ -59,13 +59,18 @@ describe("TopicHeaderView (#89)", () => {
     );
     expect(header).not.toHaveAttribute("data-elevated");
     expect(header).toHaveTextContent("Grokbot 架构讨论");
-    expect(header).not.toHaveTextContent("Architect Bot");
+    expect(header).not.toHaveTextContent("@bot:example.com");
+    const metaEl = header.querySelector(".waypoint-topic-header-meta") as HTMLElement;
+    expect(metaEl).not.toBeNull();
+    expect(metaEl).toHaveClass("flex-row");
+    expect(metaEl.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("Architect Bot");
+    expect(metaEl.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
 
     const backBtn = screen.getByRole("button", { name: "返回" });
     expect(backBtn).toHaveAttribute("data-slot", "button");
 
     const descBtn = screen.getByRole("button", { name: /第一行说明/ });
-    expect(descBtn).toHaveClass("waypoint-topic-description");
+    expect(descBtn).toHaveClass("waypoint-topic-description", "truncate");
     expect(descBtn).toHaveAttribute("aria-expanded", "false");
 
     // Elevated state on scroll
@@ -239,6 +244,90 @@ describe("TopicHeaderView (#89)", () => {
     expect(onOpenEditForm).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("menu", { name: "话题操作" })).not.toBeInTheDocument();
   });
+
+  test("renders compact two-line bound Bot + Description header, expands Description below Bot name, and handles bot-only or invalid binding (#166)", async () => {
+    const user = userEvent.setup();
+    const onToggleDescription = vi.fn();
+    const baseProps = {
+      isNarrow: true,
+      elevated: false,
+      overflowMenuOpen: false,
+      overflowMenuRef: createRef<HTMLDivElement>(),
+      editing: false,
+      editSubmitting: false,
+      deleteConfirmOpen: false,
+      deleting: false,
+      reauthRequired: false,
+      pinPending: false,
+      onGoBack: vi.fn(),
+      onToggleDescription,
+      onToggleOverflowMenu: vi.fn(),
+      onCloseOverflowMenu: vi.fn(),
+      onTogglePin: vi.fn(),
+      onOpenEditForm: vi.fn(),
+      onOpenDeleteConfirm: vi.fn(),
+    };
+
+    const { rerender } = render(
+      <TopicHeaderView {...baseProps} topic={sampleTopic} descriptionExpanded={false} />,
+    );
+    const header = screen.getByRole("banner");
+    const metaCollapsed = header.querySelector(".waypoint-topic-header-meta") as HTMLElement;
+    expect(metaCollapsed).toHaveClass("flex-row");
+    expect(metaCollapsed.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("Architect Bot");
+    expect(metaCollapsed.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
+    const descCollapsed = within(metaCollapsed).getByRole("button", { name: /第一行说明/ });
+    expect(descCollapsed).toHaveAttribute("aria-expanded", "false");
+    expect(descCollapsed).toHaveClass("truncate");
+
+    await user.click(descCollapsed);
+    expect(onToggleDescription).toHaveBeenCalledTimes(1);
+
+    rerender(<TopicHeaderView {...baseProps} topic={sampleTopic} descriptionExpanded={true} />);
+    const metaExpanded = header.querySelector(".waypoint-topic-header-meta") as HTMLElement;
+    expect(metaExpanded).toHaveClass("flex-col");
+    expect(metaExpanded.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+    const botExpanded = metaExpanded.querySelector(".waypoint-topic-bot-name") as HTMLElement;
+    const descExpanded = within(metaExpanded).getByRole("button", { name: /第一行说明/ });
+    expect(botExpanded).toHaveTextContent("Architect Bot");
+    expect(descExpanded).toHaveClass("expanded", "whitespace-pre-wrap");
+    expect(descExpanded).toHaveAttribute("aria-expanded", "true");
+    expect(botExpanded.compareDocumentPosition(descExpanded) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Bot without Description: shows Bot name only, no separator or description button
+    rerender(
+      <TopicHeaderView
+        {...baseProps}
+        topic={{ ...sampleTopic, description: undefined }}
+        descriptionExpanded={false}
+      />,
+    );
+    expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("Architect Bot");
+    expect(header.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+    expect(header.querySelector(".waypoint-topic-description")).toBeNull();
+
+    // Invalid binding with Description: omits Bot name and separator, shows Description only
+    rerender(
+      <TopicHeaderView
+        {...baseProps}
+        topic={{ ...sampleTopic, botDisplayName: undefined, description: "仅保留说明" }}
+        descriptionExpanded={false}
+      />,
+    );
+    expect(header.querySelector(".waypoint-topic-bot-name")).toBeNull();
+    expect(header.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+    expect(header.querySelector(".waypoint-topic-description")).toHaveTextContent("仅保留说明");
+
+    // Invalid binding without Description: omits second-line meta container entirely
+    rerender(
+      <TopicHeaderView
+        {...baseProps}
+        topic={{ ...sampleTopic, botDisplayName: undefined, description: undefined }}
+        descriptionExpanded={false}
+      />,
+    );
+    expect(header.querySelector(".waypoint-topic-header-meta")).toBeNull();
+  });
 });
 
 describe("TimelineView (#89)", () => {
@@ -252,7 +341,6 @@ describe("TimelineView (#89)", () => {
       body: "这是无框文档流回复。",
       status: "confirmed",
       reactions: ["✅"],
-      responding: true,
       prompt: {
         kind: "approval",
         answered: false,
@@ -301,6 +389,7 @@ describe("TimelineView (#89)", () => {
       <TimelineView
         timelineRef={createRef()}
         items={items}
+        responding={true}
         activeTopicUnavailable={false}
         reauthRequired={false}
         openFailedMenuId={null}
@@ -360,18 +449,35 @@ describe("TimelineView (#89)", () => {
       "text-[16px]",
     );
 
-    expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector(".waypoint-unconfirmed-spinner")).toBeNull();
     expect(timeline.querySelector(".waypoint-message-reaction")).toHaveTextContent("✅");
-    expect(screen.getByText("正在回应")).toBeInTheDocument();
+    expect(agentRow).not.toHaveTextContent("正在回应");
+    expect(screen.queryByText("正在回应")).not.toBeInTheDocument();
+    const respondingStatus = within(track).getByRole("status", { name: "正在回应" });
+    expect(respondingStatus).toHaveClass("waypoint-timeline-responding", "self-start");
+    expect(respondingStatus.closest(".waypoint-bubble")).toBeNull();
+    expect(respondingStatus.closest(".waypoint-message-row")).toBeNull();
+    expect(respondingStatus.querySelectorAll(".waypoint-responding-dot")).toHaveLength(3);
+    expect(track.lastElementChild).toBe(respondingStatus);
 
     const promptGroup = screen.getByRole("group", { name: "审批操作" });
     await user.click(within(promptGroup).getByRole("button", { name: /允许一次/ }));
     expect(onSelectPromptOption).toHaveBeenCalledWith("$agent-1", "once");
 
+    const failedBubble = screen.getByText("发送失败的消息").closest(".waypoint-bubble") as HTMLElement;
+    const failedRow = failedBubble.closest(".waypoint-message-row") as HTMLElement;
+    const failedContent = failedBubble.closest(".waypoint-message-content") as HTMLElement;
+    const failedControls = failedContent.querySelector(".waypoint-failed-controls") as HTMLElement;
+    expect(failedControls).not.toBeNull();
+    expect(failedRow.firstElementChild).toBe(failedContent);
+    expect(failedBubble.nextElementSibling).toBe(failedControls);
+    expect(within(failedControls).getByRole("button", { name: "失败" })).toBeInTheDocument();
+
     fireEvent.contextMenu(screen.getByText("发送失败的消息"));
     expect(onOpenFailedMenu).toHaveBeenCalledWith("local-failed");
 
-    const failedTrigger = screen.getByRole("button", { name: "更多操作" });
+    const failedTrigger = within(failedControls).getByRole("button", { name: "更多操作" });
     await user.click(failedTrigger);
     expect(onToggleFailedMenu).toHaveBeenCalledWith("local-failed");
 
@@ -379,6 +485,7 @@ describe("TimelineView (#89)", () => {
       <TimelineView
         timelineRef={createRef()}
         items={items}
+        responding={false}
         activeTopicUnavailable={false}
         reauthRequired={false}
         openFailedMenuId="local-failed"
@@ -394,6 +501,8 @@ describe("TimelineView (#89)", () => {
         onSelectPromptOption={onSelectPromptOption}
       />,
     );
+
+    expect(within(track).queryByRole("status", { name: "正在回应" })).not.toBeInTheDocument();
 
     const failedMenu = screen.getByRole("menu", { name: "消息操作" });
     expect(failedMenu).toHaveAttribute("data-slot", "dropdown-menu-content");
@@ -1000,6 +1109,7 @@ describe("Theme hygiene (#89)", () => {
       "src/waypoint/workspace/TopicHeaderView.tsx",
       "src/waypoint/workspace/TimelineView.tsx",
       "src/waypoint/workspace/ComposerView.tsx",
+      "src/waypoint/workspace/RespondingIndicator.tsx",
       "src/waypoint/MessageBody.tsx",
     ];
     for (const rel of files) {

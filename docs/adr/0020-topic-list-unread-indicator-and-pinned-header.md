@@ -1,6 +1,6 @@
 # Topic 列表行以前导圆点与标题加粗标示未读，打开 Topic 时主标题栏固定钉住
 
-> 注：本记录中「次行展示多 Bot 时的绑定 Bot 名字」的规则已由 [ADR-0032](./0032-topic-list-latest-message-preview.md) 修订为「次行左侧展示最新消息单行预览、右侧保留 `正在回应`，列表不展示 Bot 名字」；未读指示、三段式正交共存与打开 Topic 顶栏固定钉住的规则继续生效。
+> 注：本记录中列表行与顶栏的部分细节已由后续 ADR 修订：[ADR-0032](./0032-topic-list-latest-message-preview.md) 将次行改为最新消息单行预览且列表不展示 Bot 名字；[ADR-0034](./0034-topic-level-responding-and-message-status-cleanup.md) 移除未确认转圈，将「正在回应」收敛为第二行右侧无文字单色三点动效，并将失败红叹号 `!` 从第一行时刻旁移至第二行右侧（时刻正下方与三点动效正交并列），第一行右侧仅留 `置顶` 与最近活动时刻；[ADR-0035](./0035-topic-header-bound-bot-display.md) 确立打开 Topic 顶栏第二行紧凑展示绑定 Bot 名字与可折叠 `Description`。未读前导圆点、标题加粗与固定吸顶顶栏规则继续生效。
 
 Topic 列表行以左侧前导实心圆点配合 Topic 名字加粗提亮标示「未读」，并通过左、中、右三段固定分区与既有列表行元素正交共存；打开 Topic 后，顶部主标题栏始终固定钉住（Pinned），可选 `Description` 默认单行截断并支持点按展开。
 

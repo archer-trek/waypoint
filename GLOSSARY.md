@@ -65,7 +65,7 @@ _Avoid_: 错误, error, 发送失败
 _Avoid_: 乐观队列, outbox, 未发送消息, 缓存
 
 **正在回应**:
-Agent 在一条 Topic 里用 👀 标出的处理中状态。👀 还在，状态就在。
+一条 Topic 的处理中状态，由绑定 Agent 对 Owner 消息打出的 👀 触发；当 👀 被撤回、目标消息或更新一轮已终结、Topic 不可用、同步暂停或长时间无 Agent 活动时结束。
 _Avoid_: typing, 思考中, 生成中, streaming
 
 **Session**:

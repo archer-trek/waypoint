@@ -1,5 +1,7 @@
 # Topic 列表行展示最新消息单行预览，列表彻底不显示 Bot 名字
 
+> 注：本记录中列表行第一行「发送状态（转圈 / 红叹号）」与第二行右侧「`• 正在回应`」文字提示已由 [ADR-0034](./0034-topic-level-responding-and-message-status-cleanup.md) 修订：移除未确认转圈，第一行右侧仅保留 `置顶` 与最近活动时刻；第二行右侧改为统一右轨状态槽（时间戳正下方），正交并列无文字单色三点「正在回应」动效与失败红叹号 `!`（无消息预览但存在「正在回应」或「失败」时仍渲染第二行）。其余两行分工、预览派生、冷块回溯及列表不展示 Bot 名字的规则继续生效。
+
 Topic 列表行恢复类似主流 IM 的两行结构：第一行保持 Topic 名字、标签、发送状态与最近活动时刻，第二行展示**本地时间线**最新一条可渲染消息的单行纯文本摘要（与右侧`正在回应`正交共存），并彻底移除列表行中的 Bot 名字显示（单 Bot 与多 Bot 均不展示）。本决定推翻并取代 [ADR-0019](./0019-topic-list-row-unconfirmed-failed-no-preview.md) 的「不展示消息正文预览」决定，同时修订 [ADR-0017](./0017-topic-list-row-timestamp-no-avatar.md) 与 [ADR-0020](./0020-topic-list-unread-indicator-and-pinned-header.md) 中关于多 Bot 副标题显示 Bot 名字的规则。
 
 ## Considered Options

@@ -417,4 +417,16 @@ describe("Theme & CSS architecture static guards (#90)", () => {
     expect(agentParagraphRule).toContain("max-width: 100%;");
     expect(agentParagraphRule).not.toContain("max-width: min(42rem, 100%);");
   });
+
+  test("src/App.css defines monochrome 3-dot soft breathing indicator keyframes and reduced-motion stepped fallback (#166)", () => {
+    const css = readFileSync(resolve(ROOT_DIR, "src/App.css"), "utf-8");
+
+    expect(css).toContain(".waypoint-responding-dot");
+    expect(css).toContain("@keyframes waypoint-responding-breathe");
+    expect(css).toContain("animation-delay: 200ms;");
+    expect(css).toContain("animation-delay: 400ms;");
+    expect(css).toContain("opacity: 0.35;");
+    expect(css).toContain("opacity: 0.65;");
+    expect(css).toContain("opacity: 1;");
+  });
 });

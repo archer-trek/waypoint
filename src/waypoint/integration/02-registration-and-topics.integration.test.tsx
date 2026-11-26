@@ -349,9 +349,11 @@ test("迟到的未知 token 不能清掉更新一次同步已经留下的登录"
   renderApp(homeserver);
   expect(await screen.findByText("暂无 Topic")).toBeInTheDocument();
   expect(screen.queryByLabelText("密码")).not.toBeInTheDocument();
-  const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
-  expect(continued.at(-1)?.url).toContain("since=batch-ok");
-  expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+  await waitFor(() => {
+    const continued = homeserver.requests.filter((request) => request.url.includes("/sync"));
+    expect(continued.at(-1)?.url).toContain("since=batch-ok");
+    expect(continued.at(-1)?.headers.Authorization).toBe("Bearer tok-1");
+  });
 });
 
 test("首次登记允许同服 localpart 自动补全，并拒绝空值、残缺 ID、邮箱/电话、跨服或大小写不同的 server name，以及 Owner 自己，且不请求 profile", async () => {
@@ -1272,10 +1274,10 @@ test("单 Bot 新建不带 Description 的 Topic，发送一次 createRoom、检
     });
   });
 
-  // 立即打开。顶栏只显示 Topic 名字，不放 Bot 名字或完整用户 ID
+  // 立即打开。顶栏展示 Topic 名字和解析后的 Bot 名字，不放完整用户 ID
   const header = await screen.findByRole("banner");
   expect(header).toHaveTextContent("架构讨论");
-  expect(header).not.toHaveTextContent("工作助理");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("工作助理");
   expect(header).not.toHaveTextContent("@hermes:example.com");
   expect(screen.queryByText("暂无 Topic")).not.toBeInTheDocument();
 
@@ -1370,16 +1372,20 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
 
   const header = await screen.findByRole("banner");
   expect(header).toHaveTextContent("重复名字");
-  expect(header).not.toHaveTextContent("bot2");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot2");
   expect(header).not.toHaveTextContent("@bot2:example.com");
   expect(screen.getByRole("button", { name: /重复名字/ })).not.toHaveTextContent("bot2");
 
   const descButton = screen.getByRole("button", { name: /第一段上下文/ });
   expect(descButton).toHaveAttribute("aria-expanded", "false");
+  expect(header.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
   await user.click(descButton);
   expect(descButton).toHaveAttribute("aria-expanded", "true");
+  expect(header.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot2");
   await user.click(descButton);
   expect(descButton).toHaveAttribute("aria-expanded", "false");
+  expect(header.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
 
   // 再展开并在时间线滚动时收起
   await user.click(descButton);
@@ -1408,7 +1414,7 @@ test("多 Bot 且没有可参照活动时不预选，允许改选与重名，带
 
   const secondHeader = await screen.findByRole("banner");
   expect(secondHeader).toHaveTextContent("重复名字");
-  expect(secondHeader).not.toHaveTextContent("一号助理");
+  expect(secondHeader.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("一号助理");
   expect(screen.getAllByRole("button", { name: /重复名字/ }).every((button) => !button.textContent?.includes("一号助理"))).toBe(true);
   expect(screen.queryByRole("button", { name: /第一段上下文/ })).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: /重复名字/ })).toHaveLength(2);
@@ -1626,7 +1632,7 @@ test("建房失败时表单保持打开且保留输入，不留残留房间，�
   const header = await screen.findByRole("banner");
   expect(header).toHaveTextContent("不丢草稿的话题");
   expect(header).toHaveTextContent("保留这些描述");
-  expect(header).not.toHaveTextContent("二号");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("二号");
   expect(screen.getByRole("button", { name: /不丢草稿的话题/ })).not.toHaveTextContent("二号");
 });
 
@@ -1760,7 +1766,7 @@ test("m.direct 追加失败时不报错也不回滚已建成的 Topic", async ()
 
   const header = await screen.findByRole("banner");
   expect(header).toHaveTextContent("照常打开的话题");
-  expect(header).not.toHaveTextContent("助手");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("助手");
 
   await waitFor(() => {
     expect(homeserver.requests.some((r) => r.method === "PUT" && r.url.includes("/m.direct"))).toBe(true);
@@ -1773,7 +1779,7 @@ test("m.direct 追加失败时不报错也不回滚已建成的 Topic", async ()
   expect(await screen.findByText("照常打开的话题")).toBeInTheDocument();
 });
 
-test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，列表与顶栏均不放 Bot 名字且启动不自动打开", async () => {
+test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，列表不放 Bot 名字而顶栏第二行展示绑定 Bot 名字且启动不自动打开", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   let syncs = 0;
@@ -1925,23 +1931,23 @@ test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，列表
   expect(document.body).not.toHaveTextContent("@bot2:example.com");
   expect(document.body).not.toHaveTextContent("@bot3:example.com");
 
-  // 逐条打开。列表行与顶栏均不放 Bot 名字或完整用户 ID
+  // 逐条打开。列表行仍不放 Bot 名字，顶栏第二行展示按优先级解析的 Bot 名字且不放完整用户 ID
   const list = screen.getByRole("complementary", { name: "Topic 列表" });
   await user.click(within(list).getByRole("button", { name: "话题一" }));
   expect(within(list).getByRole("button", { name: "话题一" })).not.toHaveTextContent("手写一号");
   expect(within(list).getByRole("button", { name: "话题一" }).querySelector(".waypoint-topic-row-bot")).toBeNull();
   expect(screen.getByRole("banner")).toHaveTextContent("话题一");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("手写一号");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("手写一号");
   expect(screen.getByRole("banner")).not.toHaveTextContent("服务器显示名不应覆盖手写");
 
   await user.click(within(list).getByRole("button", { name: "话题二" }));
   expect(within(list).getByRole("button", { name: "话题二" })).not.toHaveTextContent("小赫显示名");
   expect(screen.getByRole("banner")).toHaveTextContent("话题二说明");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("小赫显示名");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("小赫显示名");
 
   await user.click(within(list).getByRole("button", { name: "话题三" }));
   expect(within(list).getByRole("button", { name: "话题三" })).not.toHaveTextContent("bot3");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("bot3");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot3");
   expect(screen.getByRole("banner")).not.toHaveTextContent("@bot3:example.com");
 
   // 重启后先展示本地缓存，再等增量 sync 的 rooms.leave 把离开的房间移出列表
@@ -1953,7 +1959,7 @@ test("列表只收 Owner 仍在其中且带 im.waypoint.topic 的房间，列表
   });
 });
 
-test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时不显示选择与列表副标题，顶栏只显示 Topic 名字且空 Description 不占元素", async () => {
+test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时不显示选择与列表副标题，顶栏展示 Topic 与绑定 Bot 名字且空 Description 不占元素", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
 
@@ -2017,7 +2023,7 @@ test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时�
   await user.click(existingRow);
   const header1 = screen.getByRole("banner");
   expect(header1).toHaveTextContent("已有话题");
-  expect(header1).not.toHaveTextContent("唯一助理");
+  expect(header1.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("唯一助理");
   expect(header1.querySelector(".waypoint-topic-description")).toBeNull();
 
   // 打开新建表单后取消，回到原打开的 Topic
@@ -2026,7 +2032,7 @@ test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时�
   await user.click(screen.getByRole("button", { name: "取消" }));
   expect(screen.getByRole("banner")).toHaveTextContent("已有话题");
 
-  // 仅填空白 Description 时不发送 topic 字段且标题栏不渲染 Description
+  // 仅填空白 Description 时不发送 topic 字段且标题栏不渲染 Description（第二行仅展示 Bot 名字）
   await user.click(screen.getByRole("button", { name: "新建 Topic" }));
   await user.type(screen.getByLabelText("Topic 名字"), "无上下文话题");
   await user.type(screen.getByLabelText(/Description/), "   ");
@@ -2034,7 +2040,7 @@ test("名册里只有一个合法 Bot（忽略自己、跨服和重复项）时�
 
   const header2 = await screen.findByRole("banner");
   expect(header2).toHaveTextContent("无上下文话题");
-  expect(header2).not.toHaveTextContent("唯一助理");
+  expect(header2.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("唯一助理");
   expect(header2.querySelector(".waypoint-topic-description")).toBeNull();
 
   const createReq = homeserver.requests.find((r) => r.url.endsWith("/createRoom"));
@@ -2233,7 +2239,8 @@ test("完成首次登记后进入工作区可看到已同步的 Topic 并立即�
 
   const header = await screen.findByRole("banner");
   expect(header).toHaveTextContent("登记后首条 Topic");
-  expect(header).not.toHaveTextContent("bot");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot");
+  expect(header).not.toHaveTextContent("@bot:example.com");
 });
 
 test("宽视口常驻左右两栏、不自动打开第一条 Topic，未选中时右侧显示选择或新建引导且无隐藏左栏或新窗口入口", async () => {

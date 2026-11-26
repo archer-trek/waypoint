@@ -8,6 +8,13 @@ import {
 } from "./matrix-errors";
 import type { PendingRoomEvent, RawMatrixEvent, StoredRoomEvents } from "./session-store";
 
+export const RESPONDING_INACTIVITY_TIMEOUT_MS = 5 * 60 * 1000;
+
+export type DeriveTopicsOptions = {
+  nowMs?: number;
+  syncPaused?: boolean;
+};
+
 export type RegisteredAgent = {
   userId: string;
   handwrittenName?: string;
@@ -27,6 +34,7 @@ export type TopicSummary = {
   readPositionUnknown: boolean;
   needsReadGapBackfill?: boolean;
   responding: boolean;
+  respondingExpiresAtMs?: number;
   sendStatus?: "unconfirmed" | "failed";
   unavailable: boolean;
   unavailableReason?: string;
@@ -390,7 +398,10 @@ export function deriveTopics(
   registeredAgents: RegisteredAgent[],
   ownerUserId: string,
   pendingEvents: PendingRoomEvent[] = [],
+  options?: DeriveTopicsOptions,
 ): TopicSummary[] {
+  const nowMs = options?.nowMs ?? Date.now();
+  const syncPaused = Boolean(options?.syncPaused);
   const topics: TopicSummary[] = [];
   const allRooms = Object.values(rooms);
   const pendingByRoom = new Map<string, PendingRoomEvent[]>();
@@ -505,7 +516,15 @@ export function deriveTopics(
       markerTs;
     const pinned = isRecord(room.tags) && isRecord(room.tags["im.waypoint.pinned"]);
     const unreadState = deriveTopicUnreadState(room, agentUserId);
-    const responding = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId).size > 0;
+    const respondingState = deriveTopicRespondingState(
+      room,
+      redactedIds,
+      ownerUserId,
+      agentUserId,
+      availability.unavailable,
+      syncPaused,
+      nowMs,
+    );
     const lastMessagePreview =
       deriveLatestMessagePreview(room, roomPending, ownerUserId, agentUserId, redactedIds) ??
       room.coldLatestPreview;
@@ -526,7 +545,10 @@ export function deriveTopics(
         unreadState.readPositionUnknown ||
         hasLimitedGapAfterReadPosition(room) ||
         (room.readPositionEventId === undefined && Boolean(room.hasOlderLocalChunks)),
-      responding,
+      responding: respondingState.responding,
+      ...(respondingState.expiresAtMs !== undefined
+        ? { respondingExpiresAtMs: respondingState.expiresAtMs }
+        : {}),
       ...(sendStatus ? { sendStatus } : {}),
       unavailable: availability.unavailable,
       ...(availability.reason ? { unavailableReason: availability.reason } : {}),
@@ -1233,7 +1255,6 @@ export type TimelineItem =
       media?: TimelineMedia;
       status: "confirmed" | "unconfirmed" | "failed";
       localId?: string;
-      responding?: boolean;
       reactions?: string[];
       prompt?: TimelinePrompt;
     };
@@ -1596,7 +1617,6 @@ export function deriveRoomTimelineItems(
   if (room) {
     const redactedIds = collectRedactedEventIds(room.timelineEvents);
     const latestEdits = collectLatestEdits(room.timelineEvents, redactedIds);
-    const eyesTargetIds = collectActiveEyesTargetIds(room.timelineEvents, redactedIds, agentUserId);
     const { promptsByEventId, hiddenReactionKeysByEventId } = collectMessagePrompts(
       room.timelineEvents,
       redactedIds,
@@ -1723,7 +1743,6 @@ export function deriveRoomTimelineItems(
         body,
         ...(media ? { media } : {}),
         status: "confirmed",
-        ...(rawEventId && eyesTargetIds.has(rawEventId) ? { responding: true } : {}),
         ...(reactions && reactions.length > 0 ? { reactions } : {}),
         ...(prompt ? { prompt } : {}),
       });
@@ -1829,40 +1848,205 @@ function formatDaySeparator(ts: number, nowMs: number): string {
   }).format(new Date(ts));
 }
 
-function collectActiveEyesTargetIds(
-  events: RawMatrixEvent[],
+const TERMINAL_STATUS_REACTION_KEYS = new Set(["✅", "❌"]);
+
+function isTerminalStatusReactionKey(key: string): boolean {
+  return TERMINAL_STATUS_REACTION_KEYS.has(normalizePromptReactionKey(key));
+}
+
+function isEyesReactionKey(key: string): boolean {
+  return normalizePromptReactionKey(key) === "👀";
+}
+
+type TimelineEventMeta = {
+  index: number;
+  sender?: string;
+  isState: boolean;
+  isLocal: boolean;
+  isRedacted: boolean;
+  ts?: number;
+};
+
+function deriveTopicRespondingState(
+  room: StoredRoomEvents,
   redactedIds: Set<string>,
+  ownerUserId: string,
   agentUserId: string | undefined,
-): Set<string> {
-  const targets = new Set<string>();
-  if (!agentUserId) {
-    return targets;
+  unavailable: boolean,
+  syncPaused: boolean,
+  nowMs: number,
+): { responding: boolean; expiresAtMs?: number } {
+  if (unavailable || syncPaused || !agentUserId) {
+    return { responding: false };
   }
-  for (const event of events) {
+
+  const stateEventIds = new Set<string>();
+  for (const event of room.stateEvents) {
+    if (typeof event.event_id === "string" && event.event_id !== "") {
+      stateEventIds.add(event.event_id);
+    }
+  }
+
+  const eventInfoById = new Map<string, TimelineEventMeta>();
+  const terminatedTargetIds = new Set<string>();
+  const eyesCandidates: Array<{ index: number; targetId: string; ts?: number }> = [];
+
+  room.timelineEvents.forEach((event, index) => {
+    const isState = typeof event.state_key === "string";
+    const isLocal = Boolean(localPlaceholderOf(event));
+    const isRedacted = isRedactedEvent(event, redactedIds);
+    const sender = typeof event.sender === "string" ? event.sender : undefined;
+    const ts = validTimestamp(event.origin_server_ts);
+    const eventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+
+    if (eventId) {
+      if (isState) {
+        stateEventIds.add(eventId);
+      }
+      eventInfoById.set(eventId, {
+        index,
+        sender,
+        isState,
+        isLocal,
+        isRedacted,
+        ts,
+      });
+    }
+
     if (
-      typeof event.state_key === "string" ||
-      localPlaceholderOf(event) ||
-      isRedactedEvent(event, redactedIds) ||
+      isState ||
+      isLocal ||
+      isRedacted ||
       event.type !== "m.reaction" ||
-      event.sender !== agentUserId ||
+      sender !== agentUserId ||
       !isRecord(event.content)
     ) {
-      continue;
+      return;
     }
+
     const relatesTo = event.content["m.relates_to"];
     if (
       !isRecord(relatesTo) ||
       relatesTo.rel_type !== "m.annotation" ||
       typeof relatesTo.event_id !== "string" ||
       relatesTo.event_id === "" ||
-      redactedIds.has(relatesTo.event_id) ||
-      relatesTo.key !== "👀"
+      typeof relatesTo.key !== "string" ||
+      relatesTo.key === ""
     ) {
+      return;
+    }
+
+    if (isTerminalStatusReactionKey(relatesTo.key)) {
+      terminatedTargetIds.add(relatesTo.event_id);
+    } else if (isEyesReactionKey(relatesTo.key)) {
+      eyesCandidates.push({ index, targetId: relatesTo.event_id, ts });
+    }
+  });
+
+  if (eyesCandidates.length === 0) {
+    return { responding: false };
+  }
+
+  let latestTerminatedOwnerMessageIndex = -1;
+  const agentActivityEvents: Array<{ index: number; ts: number }> = [];
+
+  room.timelineEvents.forEach((event, index) => {
+    if (
+      typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
+      isRedactedEvent(event, redactedIds)
+    ) {
+      return;
+    }
+    const sender = typeof event.sender === "string" ? event.sender : undefined;
+    const eventId =
+      typeof event.event_id === "string" && event.event_id !== "" ? event.event_id : undefined;
+
+    if (
+      sender === ownerUserId &&
+      eventId &&
+      isActivityMessageEvent(event) &&
+      terminatedTargetIds.has(eventId)
+    ) {
+      latestTerminatedOwnerMessageIndex = index;
+    }
+
+    if (sender === agentUserId && event.type === "m.room.message") {
+      const ts = validTimestamp(event.origin_server_ts);
+      if (ts === undefined) {
+        return;
+      }
+      const relatesTo = isRecord(event.content) ? event.content["m.relates_to"] : undefined;
+      if (isRecord(relatesTo) && relatesTo.rel_type === "m.replace") {
+        const replaceTargetId =
+          typeof relatesTo.event_id === "string" && relatesTo.event_id !== ""
+            ? relatesTo.event_id
+            : undefined;
+        const replaceTargetInfo = replaceTargetId ? eventInfoById.get(replaceTargetId) : undefined;
+        if (
+          !replaceTargetId ||
+          redactedIds.has(replaceTargetId) ||
+          replaceTargetInfo?.isRedacted
+        ) {
+          return;
+        }
+      }
+      agentActivityEvents.push({ index, ts });
+    }
+  });
+
+  let maxExpiresAtMs: number | undefined;
+  for (const candidate of eyesCandidates) {
+    const targetInfo = eventInfoById.get(candidate.targetId);
+    if (targetInfo) {
+      if (targetInfo.isRedacted || targetInfo.isState || targetInfo.isLocal) {
+        continue;
+      }
+    } else if (redactedIds.has(candidate.targetId) || stateEventIds.has(candidate.targetId)) {
       continue;
     }
-    targets.add(relatesTo.event_id);
+
+    if (terminatedTargetIds.has(candidate.targetId)) {
+      continue;
+    }
+
+    if (latestTerminatedOwnerMessageIndex >= 0) {
+      if (targetInfo) {
+        if (
+          targetInfo.sender === ownerUserId &&
+          targetInfo.index < latestTerminatedOwnerMessageIndex
+        ) {
+          continue;
+        }
+      } else if (candidate.index < latestTerminatedOwnerMessageIndex) {
+        continue;
+      }
+    }
+
+    let lastActivityMs = candidate.ts ?? targetInfo?.ts;
+    for (const activity of agentActivityEvents) {
+      if (activity.index > candidate.index) {
+        if (lastActivityMs === undefined || activity.ts > lastActivityMs) {
+          lastActivityMs = activity.ts;
+        }
+      }
+    }
+    if (lastActivityMs === undefined) {
+      continue;
+    }
+
+    const expiresAtMs = lastActivityMs + RESPONDING_INACTIVITY_TIMEOUT_MS;
+    if (nowMs >= expiresAtMs) {
+      continue;
+    }
+    maxExpiresAtMs =
+      maxExpiresAtMs === undefined ? expiresAtMs : Math.max(maxExpiresAtMs, expiresAtMs);
   }
-  return targets;
+
+  return maxExpiresAtMs !== undefined
+    ? { responding: true, expiresAtMs: maxExpiresAtMs }
+    : { responding: false };
 }
 
 const APPROVAL_OPTIONS: ReadonlyArray<{
@@ -2109,6 +2293,22 @@ function collectMessageReactions(
   agentUserId: string | undefined,
   hiddenReactionKeysByEventId: Map<string, Set<string>>,
 ): Map<string, string[]> {
+  const ownerMessageEventIds = new Set<string>();
+  for (const event of events) {
+    if (
+      typeof event.state_key === "string" ||
+      localPlaceholderOf(event) ||
+      isRedactedEvent(event, redactedIds) ||
+      !isActivityMessageEvent(event) ||
+      event.sender !== ownerUserId ||
+      typeof event.event_id !== "string" ||
+      event.event_id === ""
+    ) {
+      continue;
+    }
+    ownerMessageEventIds.add(event.event_id);
+  }
+
   const byTarget = new Map<string, string[]>();
   for (const event of events) {
     if (
@@ -2133,7 +2333,15 @@ function collectMessageReactions(
       redactedIds.has(relatesTo.event_id) ||
       typeof relatesTo.key !== "string" ||
       relatesTo.key === "" ||
-      relatesTo.key === "👀"
+      isEyesReactionKey(relatesTo.key)
+    ) {
+      continue;
+    }
+    if (
+      agentUserId &&
+      sender === agentUserId &&
+      ownerMessageEventIds.has(relatesTo.event_id) &&
+      isTerminalStatusReactionKey(relatesTo.key)
     ) {
       continue;
     }

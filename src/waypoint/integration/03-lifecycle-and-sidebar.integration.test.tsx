@@ -86,7 +86,8 @@ test("窄视口先见全屏 Topic 列表（不显示右侧引导，无抽屉）�
   expect(screen.queryByRole("complementary", { name: "Topic 列表" })).not.toBeInTheDocument();
   const header = screen.getByRole("banner");
   expect(header).toHaveTextContent("窄屏话题");
-  expect(header).not.toHaveTextContent("小助理");
+  expect(header.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("小助理");
+  expect(header).not.toHaveTextContent("@bot:example.com");
   const backBtn = screen.getByRole("button", { name: "返回" });
   expect(backBtn).toBeVisible();
 
@@ -1885,18 +1886,19 @@ test("移除 Bot 需二次确认且说明不影响已有 Topic 与交流，仅�
   expect(screen.getByRole("button", { name: /二号的话题/, hidden: true })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /三号的话题/, hidden: true })).toBeInTheDocument();
 
-  // 关闭设置弹窗后，名册只剩一个 Bot，顶栏不放解析名，也不显示完整用户 ID
+  // 关闭设置弹窗后，名册只剩一个 Bot，顶栏展示解析名（不显示手写旧名或完整用户 ID）
   await user.click(screen.getByRole("button", { name: "关闭" }));
   await user.click(screen.getByRole("button", { name: /二号的话题/ }));
   const banner2 = screen.getByRole("banner");
   expect(banner2).toHaveTextContent("二号的话题");
-  expect(banner2).not.toHaveTextContent("二号矩阵显示名");
+  expect(banner2.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("二号矩阵显示名");
   expect(banner2).not.toHaveTextContent("二号手写");
   expect(banner2).not.toHaveTextContent("@bot2:example.com");
 
   await user.click(screen.getByRole("button", { name: /三号的话题/ }));
   const banner3 = screen.getByRole("banner");
   expect(banner3).toHaveTextContent("三号的话题");
+  expect(banner3.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot3");
   expect(banner3).not.toHaveTextContent("三号手写");
   expect(banner3).not.toHaveTextContent("@bot3:example.com");
 });
@@ -2006,7 +2008,7 @@ test("新建 Topic 内可直接登记新 Bot：单 Bot 时不显示选择器，�
     expect(screen.getByRole("banner")).toHaveTextContent("跨项目协作");
   });
   expect(screen.getByRole("banner")).toHaveTextContent("需要二号 Bot 协助");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("协作二号");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("协作二号");
   expect(screen.getByRole("button", { name: /跨项目协作/ })).not.toHaveTextContent("协作二号");
   expect(createdBody).toMatchObject({
     name: "跨项目协作",
@@ -2828,7 +2830,7 @@ test("点发送后，耐久写入失败时输入区不动、仍是草稿，不�
   expect(homeserver.requests.some((r) => r.url.includes("/send/"))).toBe(false);
 });
 
-test("发出文字后输入区清空，消息出现在时间线末尾靠右且只有未确认转圈，无时刻不可点不可丢掉，并按固定 txnId 发送 PUT", async () => {
+test("发出文字后输入区清空，消息出现在时间线末尾靠右且无未确认转圈，无时刻不可点不可丢掉，并按固定 txnId 发送 PUT", async () => {
   const user = userEvent.setup();
   const homeserver = new FakeHomeserver();
   const pendingSend = deferred<TransportResult>();
@@ -2894,18 +2896,17 @@ test("发出文字后输入区清空，消息出现在时间线末尾靠右且�
   expect(rows[1]).toHaveAttribute("data-side", "right");
   expect(rows[1]).toHaveTextContent("你好，帮我查一下");
 
-  // 画面上不写未确认、发送中或等登录；无障碍名称仍是未确认；转圈不可点击、不可丢掉
+  // 画面上不写未确认、发送中或等登录；也不再显示未确认转圈，无时刻、不可丢掉
   expect(document.body).not.toHaveTextContent(/未确认|发送中|等登录/);
-  const spinner = screen.getByRole("status", { name: "未确认" });
-  expect(spinner).toBeInTheDocument();
-  expect(spinner.tagName).not.toBe("BUTTON");
-  expect(rows[1].contains(spinner)).toBe(true);
-  expect(within(timeline).queryByRole("button", { name: /丢掉|删除|撤回|未确认/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("img", { name: "未确认" })).not.toBeInTheDocument();
+  expect(timeline.querySelector(".waypoint-unconfirmed-spinner")).toBeNull();
+  expect(rows[1]).not.toHaveAttribute("data-event-id");
+  expect(within(timeline).queryByRole("button", { name: /丢掉|删除|撤回|未确认|失败/ })).not.toBeInTheDocument();
 
   // 气泡上不显示时刻，也不能点开看时刻
   expect(rows[1]).not.toHaveTextContent(/\d{1,2}:\d{2}/);
   await user.click(within(timeline).getByText("你好，帮我查一下"));
-  await user.click(spinner);
   expect(document.querySelector(".waypoint-detail")).not.toHaveTextContent(/\d{1,2}:\d{2}/);
   expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /丢掉/ })).not.toBeInTheDocument();
@@ -2993,9 +2994,13 @@ test("发送响应先到达、同步回声后到达时，收成同一条已确�
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "先响应的消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
 
-  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
   const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("先响应的消息");
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
+  expect(timeline.querySelectorAll("[data-event-id]")).toHaveLength(0);
 
   // 1. 发送响应先到达
   await act(async () => {
@@ -3007,7 +3012,7 @@ test("发送响应先到达、同步回声后到达时，收成同一条已确�
   });
 
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$ev1"]')).not.toBeNull();
   });
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
   expect(timeline).toHaveTextContent("先响应的消息");
@@ -3126,7 +3131,12 @@ test("同步回声先到达、发送响应后到达时，收成同一条已确�
   await user.type(screen.getByRole("textbox", { name: "输入消息" }), "先同步的消息");
   await user.click(screen.getByRole("button", { name: "发送" }));
 
-  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("先同步的消息");
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
   await waitFor(() => {
     expect(capturedTxnId).not.toBe("");
   });
@@ -3137,9 +3147,8 @@ test("同步回声先到达、发送响应后到达时，收成同一条已确�
   });
 
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$ev2"]')).not.toBeNull();
   });
-  const timeline = screen.getByRole("log", { name: "对话时间线" });
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(2);
   expect(timeline).toHaveTextContent("今天");
 
@@ -3209,7 +3218,10 @@ test("同一次发送尝试在网络重试与重启恢复后始终使用固定�
   await waitFor(() => {
     expect(sendAttempts).toBe(1);
   });
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  const initialTimeline = screen.getByRole("log", { name: "对话时间线" });
+  expect(initialTimeline).toHaveTextContent("重试仍同一个txnId");
+  expect(initialTimeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
 
   // 退避重试使用同一个 txnId
   await act(async () => {
@@ -3218,7 +3230,7 @@ test("同一次发送尝试在网络重试与重启恢复后始终使用固定�
   await waitFor(() => {
     expect(sendAttempts).toBe(2);
   });
-  expect(screen.getByRole("status", { name: "未确认" })).toBeInTheDocument();
+  expect(initialTimeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
 
   // 卸载重启后恢复未确认气泡并继续使用同一个 txnId 重发，直到确认
   first.unmount();
@@ -3228,11 +3240,11 @@ test("同一次发送尝试在网络重试与重启恢复后始终使用固定�
   await waitFor(() => {
     expect(sendAttempts).toBe(3);
   });
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
   await waitFor(() => {
-    expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+    expect(timeline.querySelector('[data-event-id="$ev-fixed"]')).not.toBeNull();
   });
 
-  const timeline = screen.getByRole("log", { name: "对话时间线" });
   expect(timeline.querySelectorAll("[data-side]")).toHaveLength(1);
   expect(timeline).toHaveTextContent("重试仍同一个txnId");
 
@@ -3368,13 +3380,15 @@ test("未确认的消息不撑开新的一天也不重排 Topic 列表，收到�
   await user.click(screen.getByRole("button", { name: "较旧话题" }));
   expect(screen.getByRole("textbox", { name: "输入消息" })).toHaveValue("刚发出的文字");
 
-  // 交出未确认消息：不撑开新的一天，也不重排 Topic 列表
+  // 交出未确认消息：不撑开新的一天，也不重排 Topic 列表，且不渲染未确认转圈
   await user.click(screen.getByRole("button", { name: "发送" }));
-  expect(await screen.findByRole("status", { name: "未确认" })).toBeInTheDocument();
-
   const timeline = screen.getByRole("log", { name: "对话时间线" });
+  await waitFor(() => {
+    expect(timeline).toHaveTextContent("刚发出的文字");
+  });
+  expect(screen.queryByRole("status", { name: "未确认" })).not.toBeInTheDocument();
+  expect(timeline.querySelectorAll('[data-side="right"]:not([data-event-id])')).toHaveLength(1);
   expect(timeline).toHaveTextContent("前天的旧消息");
-  expect(timeline).toHaveTextContent("刚发出的文字");
   expect(timeline.querySelectorAll('[role="separator"]')).toHaveLength(0);
   expect(timeline).not.toHaveTextContent("今天");
   expect(topicTitles()).toEqual(["较新话题", "较旧话题"]);
@@ -3516,10 +3530,10 @@ test("新建尚未加入的 Topic 顶栏可从其他房间解析 Bot 的 Matrix 
   await waitFor(() => {
     expect(screen.getByRole("banner")).toHaveTextContent("新主题");
   });
-  expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("二号矩阵显示名");
   expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("二号矩阵显示名");
 
-  // 同步带来更新时间戳的 m.room.member 清空 displayname：覆盖旧房间显示名，名册中回退为 localpart，列表与顶栏仍不显示 Bot 名字
+  // 同步带来更新时间戳的 m.room.member 清空 displayname：覆盖旧房间显示名，名册与顶栏均回退为 localpart，列表仍不显示 Bot 名字
   shouldClearDisplayName = true;
   await act(async () => {
     clock.advance(1000);
@@ -3533,8 +3547,9 @@ test("新建尚未加入的 Topic 顶栏可从其他房间解析 Bot 的 Matrix 
   await user.click(screen.getByRole("button", { name: "关闭" }));
   expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("bot2");
   expect(screen.getByRole("button", { name: /新主题/ })).not.toHaveTextContent("二号矩阵显示名");
-  expect(screen.getByRole("banner")).not.toHaveTextContent("bot2");
+  expect(screen.getByRole("banner").querySelector(".waypoint-topic-bot-name")).toHaveTextContent("bot2");
   expect(screen.getByRole("banner")).not.toHaveTextContent("二号矩阵显示名");
+  expect(screen.getByRole("banner")).not.toHaveTextContent("@bot2:example.com");
 });
 
 test("跨设备同时编辑与移除 Bot 时，另一设备同步移除后重试保存仍写回被编辑的 Bot（最后写入为准）", async () => {
@@ -4029,4 +4044,115 @@ test("本地日历日变更才插入日期分隔（今天/昨天/无时刻本地
   const separatorsAfter = Array.from(timeline.querySelectorAll('[role="separator"]'));
   expect(separatorsAfter).toHaveLength(3);
   expect(separatorsAfter[0]).toBe(firstSepNode);
+});
+
+test("Topic 顶栏紧凑两行展示绑定 Bot 与 Description 折叠展开，编辑表单不重复展示 Bot，绑定不合法时不编造名字 (#166)", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: {
+            events: [
+              {
+                type: "im.waypoint.agents",
+                content: {
+                  agents: [{ user_id: "@bot:example.com", name: "编程助手" }],
+                },
+              },
+            ],
+          },
+          rooms: {
+            join: {
+              "!with-desc:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 3000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "带说明话题" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "第一行上下文\n第二行详细补充" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!invalid-with-desc:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 2000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@stranger:foreign.org" } },
+                    { type: "m.room.name", state_key: "", content: { name: "非法绑定含说明" } },
+                    { type: "m.room.topic", state_key: "", content: { topic: "仅显示这段说明" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+              "!invalid-no-desc:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@stranger:foreign.org" } },
+                    { type: "m.room.name", state_key: "", content: { name: "非法绑定无说明" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    throw new Error(`${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+
+  const rowWithDesc = await screen.findByRole("button", { name: "带说明话题" });
+  expect(rowWithDesc).not.toHaveTextContent("编程助手");
+  await user.click(rowWithDesc);
+
+  const header1 = screen.getByRole("banner");
+  expect(header1.querySelector("h2")).toHaveTextContent("带说明话题");
+  const meta1 = header1.querySelector(".waypoint-topic-header-meta") as HTMLElement;
+  expect(meta1).toHaveClass("flex-row");
+  expect(meta1.querySelector(".waypoint-topic-bot-name")).toHaveTextContent("编程助手");
+  expect(meta1.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
+  const descBtn = within(meta1).getByRole("button", { name: /第一行上下文/ });
+  expect(descBtn).toHaveAttribute("aria-expanded", "false");
+
+  // 展开 Description：换行显示在 Bot 名字下方，隐藏 · 分隔符；再点按收起
+  await user.click(descBtn);
+  expect(meta1).toHaveClass("flex-col");
+  expect(meta1.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+  expect(descBtn).toHaveAttribute("aria-expanded", "true");
+  expect(descBtn).toHaveClass("expanded");
+  await user.click(descBtn);
+  expect(meta1).toHaveClass("flex-row");
+  expect(meta1.querySelector(".waypoint-topic-meta-separator")).toHaveTextContent("·");
+  expect(descBtn).toHaveAttribute("aria-expanded", "false");
+
+  // 编辑 Topic 页保持现状，不重复展示只读 Bot 字段
+  await user.click(screen.getByRole("button", { name: "编辑" }));
+  const editRegion = screen.getByRole("region", { name: "编辑 Topic" });
+  expect(editRegion).not.toHaveTextContent("编程助手");
+  expect(within(editRegion).queryByText(/绑定\s*Bot/)).not.toBeInTheDocument();
+  await user.click(within(editRegion).getByRole("button", { name: "取消" }));
+
+  // 绑定不合法但有 Description：不编造 Bot 名字，不渲染分隔符，仅显示 Description
+  await user.click(screen.getByRole("button", { name: "非法绑定含说明" }));
+  const header2 = screen.getByRole("banner");
+  expect(header2.querySelector(".waypoint-topic-bot-name")).toBeNull();
+  expect(header2.querySelector(".waypoint-topic-meta-separator")).toBeNull();
+  expect(header2.querySelector(".waypoint-topic-description")).toHaveTextContent("仅显示这段说明");
+  expect(header2).not.toHaveTextContent(/stranger|未知/);
+
+  // 绑定不合法且无 Description：不渲染第二行元信息
+  await user.click(screen.getByRole("button", { name: "非法绑定无说明" }));
+  const header3 = screen.getByRole("banner");
+  expect(header3.querySelector(".waypoint-topic-header-meta")).toBeNull();
 });
