@@ -527,31 +527,35 @@ export function TimelineView({
                 {item.media ? (
                   <div className="waypoint-media-bubble flex flex-col gap-1.5 min-w-0 max-w-full">
                     {item.media.kind === "image" ? (
-                      <button
-                        type="button"
-                        aria-label={`查看图片 ${item.media.filename}`}
-                        className="waypoint-media-image-button m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer min-w-0 max-w-full rounded-lg overflow-hidden"
-                        onClick={() => onOpenMedia(item.media!)}
-                      >
-                        {(() => {
-                          const imageSrc = item.media.localAttachment
-                            ? getLocalImageUrl(item.media.localAttachment.attachmentId)
-                            : item.media.mxcUrl
-                              ? getDownloadedImageUrl(item.media.mxcUrl)
-                              : undefined;
-                          return imageSrc ? (
-                            <img
-                              src={imageSrc}
-                              alt={item.media.filename}
-                              className="waypoint-bubble-image block max-w-full h-auto rounded-lg"
-                            />
-                          ) : (
-                            <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere">
-                              {item.media.filename}
-                            </span>
-                          );
-                        })()}
-                      </button>
+                      <div className="waypoint-media-image-frame w-fit max-w-[min(15rem,100%)] sm:max-w-[min(20rem,100%)] min-w-0">
+                        <button
+                          type="button"
+                          aria-label={`查看图片 ${item.media.filename}`}
+                          className="waypoint-media-image-button block w-fit m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer min-w-0 max-w-full rounded-lg overflow-hidden"
+                          onClick={() => onOpenMedia(item.media!)}
+                        >
+                          {(() => {
+                            const imageSrc =
+                              (item.media.localAttachment
+                                ? getLocalImageUrl(item.media.localAttachment.attachmentId)
+                                : undefined) ??
+                              (item.media.mxcUrl
+                                ? getDownloadedImageUrl(item.media.mxcUrl)
+                                : undefined);
+                            return imageSrc ? (
+                              <img
+                                src={imageSrc}
+                                alt={item.media.filename}
+                                className="waypoint-bubble-image block w-auto max-w-full h-auto max-h-60 sm:max-h-72 rounded-lg"
+                              />
+                            ) : (
+                              <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere">
+                                {item.media.filename}
+                              </span>
+                            );
+                          })()}
+                        </button>
+                      </div>
                     ) : (
                       <button
                         type="button"

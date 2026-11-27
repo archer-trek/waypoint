@@ -8,6 +8,13 @@ export type RetryQueueCallbacks = {
   onConfirmed?: () => void;
   onFailed?: () => void;
   onCredentialRejected?: () => void;
+  onMediaUploaded?: (media: {
+    mxcUrl: string;
+    data: Uint8Array;
+    mimeType: string;
+    isImage: boolean;
+    attachmentId?: string;
+  }) => void;
   isRoomUnavailable?: (roomId: string) => boolean;
 };
 
@@ -275,6 +282,13 @@ export class RetryQueue {
           ) {
             const contentUri = uploadResult.body.content_uri;
             await this.client.recordUploadedMediaUrl(head.roomId, head.txnId, contentUri);
+            this.callbacks.onMediaUploaded?.({
+              mxcUrl: contentUri,
+              data: uploadData,
+              mimeType: uploadMimeType,
+              isImage: head.content.msgtype === "m.image",
+              attachmentId: head.attachmentId,
+            });
             head.content = { ...head.content, url: contentUri };
             this.backoffStep = 0;
             if (this.disposed || this.paused || this.runEpoch !== myEpoch) {
