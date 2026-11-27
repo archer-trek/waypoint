@@ -1996,6 +1996,18 @@ export function TopicsWorkspace({
           onCredentialRejected();
         }
       },
+      onMediaUploaded: ({ mxcUrl, data, mimeType, isImage, attachmentId }) => {
+        if (!mountedRef.current) {
+          return;
+        }
+        cacheUploadedOrLocalMxcMedia({
+          mxcUrl,
+          data: new Uint8Array(data),
+          mimeType,
+          isImage,
+          attachmentId,
+        });
+      },
       isRoomUnavailable: (roomId) =>
         deriveRoomAvailability(client.rooms()[roomId], client.ownerId).unavailable,
     });
@@ -2967,6 +2979,7 @@ export function TopicsWorkspace({
         void client.setDraftAttachment(roomId, undefined).catch(() => undefined);
         return;
       }
+      cacheLocalImageUrl(assigned.attachmentId, data, assigned.attachmentMeta.mimeType);
       commitDraftsState((prev) => {
         const currentText = prev[roomId]?.text;
         return {
@@ -2995,6 +3008,14 @@ export function TopicsWorkspace({
       return;
     }
     attachmentSeqRef.current[roomId] = (attachmentSeqRef.current[roomId] ?? 0) + 1;
+    const removedAttachmentId = draftsByRoomRef.current[roomId]?.attachmentId;
+    if (removedAttachmentId) {
+      const removedLocal = localMediaUrlCacheRef.current.get(removedAttachmentId);
+      if (removedLocal) {
+        removedLocal.revoke?.();
+        localMediaUrlCacheRef.current.delete(removedAttachmentId);
+      }
+    }
     const existingText = draftsByRoomRef.current[roomId]?.text ?? "";
     draftManager.cancel(roomId);
     const hasText = existingText !== "";
@@ -3112,6 +3133,47 @@ export function TopicsWorkspace({
     }
   }
 
+  function cacheLocalImageUrl(attachmentId: string, data: Uint8Array, mimeType: string) {
+    if (!mimeType.startsWith("image/") || localMediaUrlCacheRef.current.has(attachmentId)) {
+      return;
+    }
+    localMediaUrlCacheRef.current.set(attachmentId, createRenderableMediaUrl(data, mimeType));
+  }
+
+  function cacheUploadedOrLocalMxcMedia(input: {
+    mxcUrl: string;
+    data: Uint8Array;
+    mimeType: string;
+    isImage: boolean;
+    attachmentId?: string;
+  }) {
+    if (downloadedMediaCacheRef.current.has(input.mxcUrl)) {
+      return;
+    }
+    const existingLocal = input.attachmentId
+      ? localMediaUrlCacheRef.current.get(input.attachmentId)
+      : undefined;
+    if (existingLocal) {
+      downloadedMediaCacheRef.current.set(input.mxcUrl, {
+        data: input.data,
+        mimeType: input.mimeType,
+        imageUrl: existingLocal.url,
+        revoke: existingLocal.revoke,
+      });
+      localMediaUrlCacheRef.current.set(input.attachmentId!, { url: existingLocal.url });
+      return;
+    }
+    const created = input.isImage ? createRenderableMediaUrl(input.data, input.mimeType) : undefined;
+    downloadedMediaCacheRef.current.set(input.mxcUrl, {
+      data: input.data,
+      mimeType: input.mimeType,
+      ...(created ? { imageUrl: created.url, revoke: created.revoke } : {}),
+    });
+    if (created && input.attachmentId && !localMediaUrlCacheRef.current.has(input.attachmentId)) {
+      localMediaUrlCacheRef.current.set(input.attachmentId, { url: created.url });
+    }
+  }
+
   function getLocalImageUrl(attachmentId: string): string | undefined {
     return localMediaUrlCacheRef.current.get(attachmentId)?.url;
   }
@@ -3130,10 +3192,10 @@ export function TopicsWorkspace({
         continue;
       }
       const { attachmentId, mimeType } = item.media.localAttachment;
-      if (
-        localMediaUrlCacheRef.current.has(attachmentId) ||
-        loadingLocalMediaRef.current.has(attachmentId)
-      ) {
+      const mxcUrl = item.media.mxcUrl;
+      const needsLocal = !localMediaUrlCacheRef.current.has(attachmentId);
+      const needsDownloadedSeed = Boolean(mxcUrl) && !downloadedMediaCacheRef.current.has(mxcUrl!);
+      if ((!needsLocal && !needsDownloadedSeed) || loadingLocalMediaRef.current.has(attachmentId)) {
         continue;
       }
       loadingLocalMediaRef.current.add(attachmentId);
@@ -3143,12 +3205,23 @@ export function TopicsWorkspace({
           if (!mountedRef.current || !blob) {
             return;
           }
+          const effectiveMime = mimeType || blob.mimeType || "image/png";
+          let changed = false;
           if (!localMediaUrlCacheRef.current.has(attachmentId)) {
-            const created = createRenderableMediaUrl(
-              blob.data,
-              mimeType || blob.mimeType || "image/png",
-            );
+            const created = createRenderableMediaUrl(blob.data, effectiveMime);
             localMediaUrlCacheRef.current.set(attachmentId, created);
+            changed = true;
+          }
+          if (mxcUrl && !downloadedMediaCacheRef.current.has(mxcUrl)) {
+            cacheUploadedOrLocalMxcMedia({
+              mxcUrl,
+              data: new Uint8Array(blob.data),
+              mimeType: effectiveMime,
+              isImage: true,
+              attachmentId,
+            });
+          }
+          if (changed) {
             setMediaRevision((value) => value + 1);
           }
         })
@@ -3458,6 +3531,11 @@ export function TopicsWorkspace({
       try {
         for (let i = 0; i < attachments.length; i += 1) {
           const attachment = attachments[i]!;
+          cacheLocalImageUrl(
+            attachment.attachmentId,
+            attachment.data,
+            attachment.attachmentMeta.mimeType,
+          );
           const captionForItem = i === 0 && initialCaption.trim() !== "" ? initialCaption : "";
           const content = buildAttachmentEventContent(attachment.attachmentMeta, captionForItem);
           await client.enqueueRoomEvent(roomId, "m.room.message", content, {

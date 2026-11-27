@@ -1364,3 +1364,53 @@ describe("Message delete & favorites UI components", () => {
     await user.click(removeButtons[1]!);
     expect(onRemoveFavorite).toHaveBeenCalledWith(items[1]);
   });
+
+  test("TimelineView caps rendered image thumbnails to compact responsive bounds", () => {
+    const imageItems: TimelineItem[] = [
+      {
+        kind: "message",
+        key: "img-1",
+        eventId: "$img-1",
+        side: "right",
+        body: "看别人发的文章",
+        status: "confirmed",
+        media: {
+          kind: "image",
+          msgtype: "m.image",
+          filename: "tall-screenshot.jpg",
+          caption: "看别人发的文章",
+          mxcUrl: "mxc://example.com/tall-1",
+        },
+      },
+    ];
+
+    render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={imageItems}
+        isNarrow={true}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        getLocalImageUrl={() => undefined}
+        getDownloadedImageUrl={() => "blob:tall-1"}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={vi.fn()}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+      />,
+    );
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    const frame = timeline.querySelector(".waypoint-media-image-frame") as HTMLElement;
+    const imgBtn = timeline.querySelector(".waypoint-media-image-button") as HTMLElement;
+    const imgEl = within(timeline).getByAltText("tall-screenshot.jpg") as HTMLImageElement;
+
+    expect(frame).toHaveClass("w-fit", "max-w-[min(15rem,100%)]", "sm:max-w-[min(20rem,100%)]");
+    expect(imgBtn).toHaveClass("block", "w-fit", "min-w-0", "max-w-full");
+    expect(imgEl).toHaveClass("block", "w-auto", "max-w-full", "h-auto", "max-h-60", "sm:max-h-72");
+  });

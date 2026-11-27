@@ -83,3 +83,74 @@ test("队头发送尚未结束时入队的下一条，会在本轮失败退出�
   expect(sent).toEqual(["txn-1", "txn-1", "txn-2"]);
   expect(pending.map((item) => item.txnId)).toEqual([]);
 });
+
+test("invokes onMediaUploaded with uploaded bytes and mxcUrl before sending event", async () => {
+  const bytes = new Uint8Array([1, 2, 3, 4]);
+  const pending: PendingRoomEvent[] = [
+    {
+      txnId: "txn-img",
+      roomId: "!room:example.com",
+      type: "m.room.message",
+      sender: "@owner:example.com",
+      content: { msgtype: "m.image", body: "pic.png", filename: "pic.png" },
+      attachmentId: "att-1",
+      attachmentMeta: { name: "pic.png", mimeType: "image/png", size: 4 },
+    },
+  ];
+  const uploadedNotifications: Array<{
+    mxcUrl: string;
+    data: Uint8Array;
+    mimeType: string;
+    isImage: boolean;
+    attachmentId?: string;
+  }> = [];
+  let sawCachedBeforeSend = false;
+
+  const client = {
+    hasToken: true,
+    pendingRoomEvents: () => pending.map((item) => ({ ...item, content: { ...item.content } })),
+    pendingReadMarkers: () => [],
+    loadBlob: async () => ({
+      id: "att-1",
+      name: "pic.png",
+      mimeType: "image/png",
+      size: 4,
+      data: bytes,
+    }),
+    uploadMedia: async () => ({
+      type: "response",
+      status: 200,
+      body: { content_uri: "mxc://example.com/img-uploaded" },
+    }),
+    recordUploadedMediaUrl: async () => {},
+    sendRoomEvent: async () => {
+      sawCachedBeforeSend = uploadedNotifications.length === 1;
+      return { type: "response", status: 200, body: { event_id: "$ev-img" } };
+    },
+    confirmSentRoomEvent: async () => {
+      pending.length = 0;
+    },
+    failPendingRoomEvent: async () => {},
+    sendReadMarkers: async () => ({ type: "response", status: 200, body: {} }),
+    confirmSentReadMarker: async () => {},
+  } as unknown as MatrixClient;
+
+  const queue = new RetryQueue(client, clock());
+  queue.setCallbacks({
+    onMediaUploaded: (media) => {
+      uploadedNotifications.push(media);
+    },
+  });
+
+  await queue.flush();
+  expect(sawCachedBeforeSend).toBe(true);
+  expect(uploadedNotifications).toEqual([
+    {
+      mxcUrl: "mxc://example.com/img-uploaded",
+      data: bytes,
+      mimeType: "image/png",
+      isImage: true,
+      attachmentId: "att-1",
+    },
+  ]);
+});

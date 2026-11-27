@@ -4248,3 +4248,97 @@ test("输入框处于单行与多行临界宽度时不会因 padding 变化触�
     vi.restoreAllMocks();
   }
 });
+
+test("发送图片在发送中与确认后始终直接展示图片，不会闪现文件名或重复下载", async () => {
+  const user = userEvent.setup();
+  const homeserver = new FakeHomeserver();
+  const sendDeferred = new Map<string, () => void>();
+  let downloadCount = 0;
+  let uploadedCount = 0;
+
+  homeserver.handler = passwordLoginHandler(async (input) => {
+    if (input.url.includes("/sync")) {
+      return {
+        type: "response",
+        status: 200,
+        body: {
+          next_batch: "batch-1",
+          account_data: validAgents,
+          rooms: {
+            join: {
+              "!t-img:example.com": {
+                state: {
+                  events: [
+                    { type: "m.room.create", state_key: "", origin_server_ts: 1000, content: {} },
+                    { type: "im.waypoint.topic", state_key: "", content: { v: 1, agent_user_id: "@bot:example.com" } },
+                    { type: "m.room.name", state_key: "", content: { name: "图片直显话题" } },
+                  ],
+                },
+                timeline: { events: [] },
+              },
+            },
+          },
+        },
+      };
+    }
+    if (input.method === "POST" && input.url.includes("/_matrix/media/v3/upload")) {
+      uploadedCount += 1;
+      return {
+        type: "response",
+        status: 200,
+        body: { content_uri: `mxc://example.com/sent-${uploadedCount}` },
+      };
+    }
+    if (input.method === "PUT" && input.url.includes("/send/m.room.message/")) {
+      const txnKey = input.url.split("/").pop() ?? "txn";
+      await new Promise<void>((resolve) => {
+        sendDeferred.set(txnKey, resolve);
+      });
+      return { type: "response", status: 200, body: { event_id: `$ev-${txnKey}` } };
+    }
+    if (input.method === "GET" && input.url.includes("/_matrix/client/v1/media/download/")) {
+      downloadCount += 1;
+      return { type: "response", status: 200, body: new Uint8Array([9, 9, 9]) };
+    }
+    if (input.method === "POST" && input.url.includes("/read_markers")) {
+      return { type: "response", status: 200, body: {} };
+    }
+    throw new Error(`不应发送 ${input.method} ${input.url}`);
+  });
+
+  renderApp(homeserver);
+  await login(user);
+  await user.click(await screen.findByRole("button", { name: "图片直显话题" }));
+
+  const imgBytes = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  await user.upload(
+    screen.getByLabelText("选择附件"),
+    new File([imgBytes], "no-flash.png", { type: "image/png" }),
+  );
+  await user.click(screen.getByRole("button", { name: "发送" }));
+
+  const timeline = screen.getByRole("log", { name: "对话时间线" });
+  const initialImg = await within(timeline).findByAltText("no-flash.png");
+  const initialSrc = initialImg.getAttribute("src");
+  expect(initialSrc).toBeTruthy();
+  expect(timeline.querySelector(".waypoint-media-filename")).toBeNull();
+
+  await waitFor(() => {
+    expect(uploadedCount).toBe(1);
+    expect(sendDeferred.size).toBe(1);
+  });
+  expect(within(timeline).getByAltText("no-flash.png").getAttribute("src")).toBe(initialSrc);
+  expect(timeline.querySelector(".waypoint-media-filename")).toBeNull();
+
+  // 完成发送确认：应保持原图展示（且沿用本地渲染 URL），不变成文件名，也不重新发起下载
+  for (const resolve of sendDeferred.values()) {
+    resolve();
+  }
+  await waitFor(() => {
+    const row = within(timeline).getByAltText("no-flash.png").closest("[data-side]");
+    expect(row).toHaveAttribute("data-event-id");
+  });
+  expect(within(timeline).getByAltText("no-flash.png").getAttribute("src")).toBe(initialSrc);
+  expect(timeline.querySelector(".waypoint-media-filename")).toBeNull();
+  expect(downloadCount).toBe(0);
+});
