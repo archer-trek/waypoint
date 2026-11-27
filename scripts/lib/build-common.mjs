@@ -8,6 +8,11 @@ export const ROOT_DIR = resolve(LIB_DIR, "../..");
 export const TAURI_CONF_PATH = resolve(ROOT_DIR, "src-tauri/tauri.conf.json");
 export const TAURI_CLI_BIN = resolve(ROOT_DIR, "node_modules/@tauri-apps/cli/tauri.js");
 
+export const MIN_BUILD_NUMBER = 1;
+export const MAX_BUILD_NUMBER = 2_100_000_000;
+export const AUTO_BUILD_NUMBER_MIN = 10_000;
+export const BUILD_NUMBER_STEP_MS = 10_000;
+
 export function readNextFlagValue(argv, index, flag) {
   const value = argv[index + 1];
   if (!value || value.startsWith("-")) {
@@ -18,7 +23,7 @@ export function readNextFlagValue(argv, index, flag) {
 
 export function parseBuildArgs(
   argv,
-  { defaultTarget, allowTarget = true, allowUnsigned = false } = {},
+  { defaultTarget, allowTarget = true, allowUnsigned = false, allowBuildNumber = false } = {},
 ) {
   const options = {
     targetRaw: defaultTarget,
@@ -27,6 +32,7 @@ export function parseBuildArgs(
     release: false,
     unsigned: false,
     versionRaw: undefined,
+    buildNumberRaw: undefined,
     dryRun: false,
     help: false,
   };
@@ -53,12 +59,63 @@ export function parseBuildArgs(
     } else if (arg === "--version") {
       options.versionRaw = readNextFlagValue(argv, i, "--version");
       i += 1;
+    } else if (allowBuildNumber && arg === "--build-number") {
+      options.buildNumberRaw = readNextFlagValue(argv, i, "--build-number");
+      i += 1;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
   return options;
+}
+
+export function validateBuildNumber(rawValue, sourceLabel) {
+  const normalized = String(rawValue ?? "").trim();
+  if (!/^[1-9]\d*$/.test(normalized)) {
+    throw new Error(
+      `Invalid ${sourceLabel} "${rawValue}". Expected a positive integer without leading zeros between ${MIN_BUILD_NUMBER} and ${MAX_BUILD_NUMBER}.`,
+    );
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_BUILD_NUMBER || parsed > MAX_BUILD_NUMBER) {
+    throw new Error(
+      `Invalid ${sourceLabel} "${rawValue}". Expected an integer between ${MIN_BUILD_NUMBER} and ${MAX_BUILD_NUMBER}.`,
+    );
+  }
+  return String(parsed);
+}
+
+export function resolveBuildNumber({
+  buildNumberRaw,
+  platformEnvValue,
+  platformEnvName,
+  sharedEnvValue,
+  label,
+}) {
+  if (buildNumberRaw !== undefined) {
+    return validateBuildNumber(buildNumberRaw, `${label} (--build-number)`);
+  }
+  const trimmedPlatformEnv = platformEnvValue?.trim();
+  if (trimmedPlatformEnv) {
+    return validateBuildNumber(trimmedPlatformEnv, `${label} (${platformEnvName})`);
+  }
+  const trimmedSharedEnv = sharedEnvValue?.trim();
+  if (trimmedSharedEnv) {
+    return validateBuildNumber(trimmedSharedEnv, `${label} (WAYPOINT_BUILD_NUMBER)`);
+  }
+
+  const computed = Math.floor(Date.now() / BUILD_NUMBER_STEP_MS);
+  if (
+    !Number.isSafeInteger(computed) ||
+    computed < AUTO_BUILD_NUMBER_MIN ||
+    computed > MAX_BUILD_NUMBER
+  ) {
+    throw new Error(
+      `System clock produced out-of-range ${label} (${computed}); expected [${AUTO_BUILD_NUMBER_MIN}, ${MAX_BUILD_NUMBER}]. Pass --build-number or WAYPOINT_BUILD_NUMBER explicitly.`,
+    );
+  }
+  return String(computed);
 }
 
 export function normalizeSemver(rawVersion, label, detail) {
@@ -82,39 +139,12 @@ export function readTauriConf() {
   return { productName, baseVersion };
 }
 
-export function readGitInfo({ needCommitCount = false } = {}) {
+export function readGitInfo() {
   const shortSha = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
     cwd: ROOT_DIR,
     encoding: "utf8",
   }).trim();
-  if (!needCommitCount) {
-    return { shortSha, commitCount: undefined, isShallow: false };
-  }
-  const isShallow =
-    execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-    }).trim() === "true";
-  const commitCount = Number.parseInt(
-    execFileSync("git", ["rev-list", "--count", "HEAD"], {
-      cwd: ROOT_DIR,
-      encoding: "utf8",
-    }).trim(),
-    10,
-  );
-  return { shortSha, commitCount, isShallow };
-}
-
-export function assertCommitCountSafe({ isShallow, release, label }) {
-  if (!isShallow) return;
-  if (release) {
-    throw new Error(
-      `Refusing to derive ${label} from git rev-list --count in a shallow clone. Re-run with full git history (fetch-depth: 0).`,
-    );
-  }
-  console.warn(
-    `Warning: shallow git clone detected; derived ${label} from git rev-list --count may be lower than full history.`,
-  );
+  return { shortSha };
 }
 
 export function resolveCargoTargetDir() {

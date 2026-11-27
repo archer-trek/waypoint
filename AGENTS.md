@@ -22,11 +22,11 @@ Read `CODING_STANDARDS.md` when reviewing changes, updating `src/App.css` or `sr
 
 ### Android build
 
-Build single-ABI (`arm64-v8a`) APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`, `OUT_DIR=<dir>`, `VERSION=X.Y.Z`, `RELEASE=1`, `UNSIGNED=1`) or `node scripts/build-android-apk.mjs`. CI signs with the existing release keystore from Actions secrets (`WAYPOINT_ANDROID_KEYSTORE_BASE64` plus the password secrets); do not upload an unsigned APK. Running `npm ci`/`npm install` automatically activates `core.hooksPath=.githooks`.
+Build single-ABI (`arm64-v8a`) APK via `make build-android-apk` (or `make apk`, optional `OUT=<path>`, `OUT_DIR=<dir>`, `VERSION=X.Y.Z`, `BUILD_NUMBER=<int>`, `RELEASE=1`, `UNSIGNED=1`) or `node scripts/build-android-apk.mjs`. CI signs with the existing release keystore from Actions secrets (`WAYPOINT_ANDROID_KEYSTORE_BASE64` plus the password secrets); do not upload an unsigned APK. Running `npm ci`/`npm install` automatically activates `core.hooksPath=.githooks`.
 
 ### macOS build
 
-Build macOS `.dmg` (Apple Silicon `aarch64-apple-darwin` by default, ad-hoc signed unless `APPLE_SIGNING_IDENTITY` is set) on macOS via `make build-macos-dmg` (or `make dmg`, optional `OUT=<path>`, `TARGET=arm64|universal|x64`) or `node scripts/build-macos-dmg.mjs`.
+Build macOS `.dmg` (Apple Silicon `aarch64-apple-darwin` by default, ad-hoc signed unless `APPLE_SIGNING_IDENTITY` is set) on macOS via `make build-macos-dmg` (or `make dmg`, optional `OUT=<path>`, `TARGET=arm64|universal|x64`, `BUILD_NUMBER=<int>`) or `node scripts/build-macos-dmg.mjs`.
 
 ### Windows build
 

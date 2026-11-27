@@ -14,6 +14,7 @@ const ANDROID_ENV_KEYS = [
   "WAYPOINT_ANDROID_KEY_PASSWORD",
   "WAYPOINT_ANDROID_VERSION_CODE",
   "WAYPOINT_ANDROID_VERSION_NAME",
+  "WAYPOINT_BUILD_NUMBER",
 ] as const;
 
 function runBuildScript(args: string[], extraEnv: Record<string, string | undefined> = {}) {
@@ -41,12 +42,14 @@ describe("build-android-apk CLI", () => {
       readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf8"),
     ) as { version: string; productName: string };
 
+    const beforeTicks = Math.floor(Date.now() / 10_000);
     const res = runBuildScript(["--dry-run"], {
       WAYPOINT_ANDROID_KEYSTORE_PATH: "/tmp/test.jks",
       WAYPOINT_ANDROID_KEYSTORE_PASSWORD: "secret",
       WAYPOINT_ANDROID_KEY_ALIAS: "waypoint",
       WAYPOINT_ANDROID_KEY_PASSWORD: "secret",
     });
+    const afterTicks = Math.floor(Date.now() / 10_000);
     expect(res.status, res.stderr).toBe(0);
 
     const plan = JSON.parse(res.stdout) as {
@@ -65,7 +68,13 @@ describe("build-android-apk CLI", () => {
     expect(plan.productName).toBe(tauriConf.productName);
     expect(plan.abi).toBe("arm64-v8a");
     expect(plan.version).toBe(tauriConf.version);
-    expect(plan.versionCode).toMatch(/^\d+$/);
+    expect(plan.versionCode).toMatch(/^[1-9]\d*$/);
+    const numericVersionCode = Number(plan.versionCode);
+    expect(Number.isSafeInteger(numericVersionCode)).toBe(true);
+    expect(numericVersionCode).toBeGreaterThanOrEqual(beforeTicks);
+    expect(numericVersionCode).toBeLessThanOrEqual(afterTicks);
+    expect(numericVersionCode).toBeGreaterThanOrEqual(10_000);
+    expect(numericVersionCode).toBeLessThanOrEqual(2_100_000_000);
     expect(plan.versionName).toMatch(new RegExp(`^${tauriConf.version}-test\\.[0-9a-f]+$`));
     expect(plan.release).toBe(false);
     expect(plan.signingMode).toBe("keystore");
@@ -138,12 +147,59 @@ describe("build-android-apk CLI", () => {
     expect(overridePlan.versionCode).toBe("4200");
     expect(overridePlan.versionName).toBe("0.9.9-rc.1");
     expect(overridePlan.outputPath).toBe(resolve(ROOT_DIR, "tmp/custom.apk"));
+
+    const sharedEnvRes = runBuildScript(["--dry-run", "--unsigned"], {
+      WAYPOINT_BUILD_NUMBER: "200000123",
+    });
+    expect(sharedEnvRes.status, sharedEnvRes.stderr).toBe(0);
+    const sharedEnvPlan = JSON.parse(sharedEnvRes.stdout) as { versionCode: string };
+    expect(sharedEnvPlan.versionCode).toBe("200000123");
+
+    const platformOverridesSharedRes = runBuildScript(["--dry-run", "--unsigned"], {
+      WAYPOINT_BUILD_NUMBER: "200000123",
+      WAYPOINT_ANDROID_VERSION_CODE: "200000456",
+    });
+    expect(platformOverridesSharedRes.status, platformOverridesSharedRes.stderr).toBe(0);
+    const platformOverridesSharedPlan = JSON.parse(
+      platformOverridesSharedRes.stdout,
+    ) as { versionCode: string };
+    expect(platformOverridesSharedPlan.versionCode).toBe("200000456");
+
+    const cliOverridesAllRes = runBuildScript(
+      ["--dry-run", "--unsigned", "--build-number", "200000789"],
+      {
+        WAYPOINT_BUILD_NUMBER: "200000123",
+        WAYPOINT_ANDROID_VERSION_CODE: "200000456",
+      },
+    );
+    expect(cliOverridesAllRes.status, cliOverridesAllRes.stderr).toBe(0);
+    const cliOverridesAllPlan = JSON.parse(cliOverridesAllRes.stdout) as { versionCode: string };
+    expect(cliOverridesAllPlan.versionCode).toBe("200000789");
   });
 
-  test("rejects unknown args, invalid semver, --out + --out-dir conflict, and missing signing config", () => {
+  test("rejects unknown args, invalid semver, invalid build numbers, --out + --out-dir conflict, and missing signing config", () => {
     const unknownArg = runBuildScript(["--dry-run", "--unsigned", "--bogus"]);
     expect(unknownArg.status).not.toBe(0);
     expect(unknownArg.stderr).toContain("Unknown argument");
+
+    const invalidCliBuildNumbers = ["0", "0123", "abc", "2100000001"];
+    for (const raw of invalidCliBuildNumbers) {
+      const badRes = runBuildScript(["--dry-run", "--unsigned", "--build-number", raw]);
+      expect(badRes.status, `--build-number ${raw} should fail`).not.toBe(0);
+      expect(badRes.stderr.trim().length).toBeGreaterThan(0);
+    }
+
+    const negSharedEnv = runBuildScript(["--dry-run", "--unsigned"], {
+      WAYPOINT_BUILD_NUMBER: "-5",
+    });
+    expect(negSharedEnv.status).not.toBe(0);
+    expect(negSharedEnv.stderr).toContain("WAYPOINT_BUILD_NUMBER");
+
+    const decimalAndroidEnv = runBuildScript(["--dry-run", "--unsigned"], {
+      WAYPOINT_ANDROID_VERSION_CODE: "12.3",
+    });
+    expect(decimalAndroidEnv.status).not.toBe(0);
+    expect(decimalAndroidEnv.stderr).toContain("WAYPOINT_ANDROID_VERSION_CODE");
 
     const badVersion = runBuildScript(["--dry-run", "--unsigned", "--version", "0.1.0-beta.1"]);
     expect(badVersion.status).not.toBe(0);
@@ -176,6 +232,9 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(makefile).toContain("apk: build-android-apk");
     expect(makefile).toContain("scripts/build-android-apk.mjs");
     expect(makefile).toContain("UNSIGNED");
+    const androidMakeSection =
+      makefile.split(/^build-android-apk:/m)[1]?.split(/^apk:/m)[0] ?? "";
+    expect(androidMakeSection).toContain("BUILD_NUMBER");
     expect(makefile).toMatch(/^\.PHONY:.*\bclean\b/m);
     expect(makefile).toMatch(/^clean:/m);
     const cleanSection = makefile.split(/^clean:/m)[1]?.split(/^help:/m)[0] ?? "";
@@ -200,6 +259,10 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(ciYml).toContain("key: android-aarch64");
     const androidBuildSection = ciYml.split("\n  android-build:")[1]?.split("\n  macos-build:")[0] ?? "";
     expect(androidBuildSection).not.toContain("libwebkit2gtk");
+    expect(androidBuildSection).not.toContain("fetch-depth: 0");
+    const nativeFilterSection =
+      ciYml.split("\n  native-filter:")[1]?.split("\n  rust-checks:")[0] ?? "";
+    expect(nativeFilterSection).toContain("fetch-depth: 0");
     expect(ciYml).toContain("gradle/actions/setup-gradle@v6");
     expect(ciYml).toContain("cargo fmt --check");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
@@ -213,5 +276,12 @@ describe("Android packaging entrypoints and CI workflow", () => {
     expect(ciYml).toContain("e188240857f673865c523198b8f5f914ad39b3a142397e4dd367d268eb890650");
     expect(androidBuildSection).toContain("archive: false");
     expect(androidBuildSection).not.toContain("waypoint-android-apk");
+
+    const gradleKts = readFileSync(
+      resolve(ROOT_DIR, "src-tauri/gen/android/app/build.gradle.kts"),
+      "utf8",
+    );
+    expect(gradleKts).toContain("GradleException");
+    expect(gradleKts).not.toContain("overrideVersionCode?.toIntOrNull()");
   });
 });

@@ -16,6 +16,7 @@ function runBuildScript(args: string[], extraEnv: Record<string, string | undefi
   const baseEnv = {
     ...NODE_PROCESS.env,
     APPLE_SIGNING_IDENTITY: undefined,
+    WAYPOINT_BUILD_NUMBER: undefined,
     ...extraEnv,
   };
   return spawnSync("node", [SCRIPT_PATH, ...args], {
@@ -31,7 +32,9 @@ describe("build-macos-dmg CLI", () => {
       readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf8"),
     ) as { version: string; productName: string };
 
+    const beforeTicks = Math.floor(Date.now() / 10_000);
     const res = runBuildScript(["--dry-run"]);
+    const afterTicks = Math.floor(Date.now() / 10_000);
     expect(res.status, res.stderr).toBe(0);
 
     const plan = JSON.parse(res.stdout) as {
@@ -49,7 +52,13 @@ describe("build-macos-dmg CLI", () => {
     expect(plan.target).toBe("aarch64-apple-darwin");
     expect(plan.archLabel).toBe("arm64");
     expect(plan.version).toBe(tauriConf.version);
-    expect(plan.bundleVersion).toMatch(/^\d+$/);
+    expect(plan.bundleVersion).toMatch(/^[1-9]\d*$/);
+    const numericBundleVersion = Number(plan.bundleVersion);
+    expect(Number.isSafeInteger(numericBundleVersion)).toBe(true);
+    expect(numericBundleVersion).toBeGreaterThanOrEqual(beforeTicks);
+    expect(numericBundleVersion).toBeLessThanOrEqual(afterTicks);
+    expect(numericBundleVersion).toBeGreaterThanOrEqual(10_000);
+    expect(numericBundleVersion).toBeLessThanOrEqual(2_100_000_000);
     expect(plan.release).toBe(false);
     expect(plan.signingMode).toBe("ad-hoc");
     expect(plan.dmgFilename).toMatch(
@@ -131,9 +140,23 @@ describe("build-macos-dmg CLI", () => {
       bundle: { macOS: { signingIdentity?: string } };
     };
     expect(mergedConfig.bundle.macOS.signingIdentity).toBeUndefined();
+
+    const envOverrideRes = runBuildScript(["--dry-run"], {
+      WAYPOINT_BUILD_NUMBER: "200000123",
+    });
+    expect(envOverrideRes.status, envOverrideRes.stderr).toBe(0);
+    const envOverridePlan = JSON.parse(envOverrideRes.stdout) as { bundleVersion: string };
+    expect(envOverridePlan.bundleVersion).toBe("200000123");
+
+    const cliOverrideRes = runBuildScript(["--dry-run", "--build-number", "200000456"], {
+      WAYPOINT_BUILD_NUMBER: "200000123",
+    });
+    expect(cliOverrideRes.status, cliOverrideRes.stderr).toBe(0);
+    const cliOverridePlan = JSON.parse(cliOverrideRes.stdout) as { bundleVersion: string };
+    expect(cliOverridePlan.bundleVersion).toBe("200000456");
   });
 
-  test("rejects unsupported target, non-semver version, and --out + --out-dir conflict, and honors CARGO_TARGET_DIR", () => {
+  test("rejects unsupported target, non-semver version, invalid build numbers, and --out + --out-dir conflict, and honors CARGO_TARGET_DIR", () => {
     const badTarget = runBuildScript(["--dry-run", "--target", "armv7-apple-darwin"]);
     expect(badTarget.status).not.toBe(0);
     expect(badTarget.stderr).toContain("Unsupported macOS target");
@@ -141,6 +164,18 @@ describe("build-macos-dmg CLI", () => {
     const badVersion = runBuildScript(["--dry-run", "--version", "0.1.0-test.123"]);
     expect(badVersion.status).not.toBe(0);
     expect(badVersion.stderr).toContain("Invalid macOS version");
+
+    for (const raw of ["0", "0123", "2100000001"]) {
+      const badBuildNumber = runBuildScript(["--dry-run", "--build-number", raw]);
+      expect(badBuildNumber.status, `--build-number ${raw} should fail`).not.toBe(0);
+      expect(badBuildNumber.stderr.trim().length).toBeGreaterThan(0);
+    }
+
+    const badSharedEnv = runBuildScript(["--dry-run"], {
+      WAYPOINT_BUILD_NUMBER: "abc",
+    });
+    expect(badSharedEnv.status).not.toBe(0);
+    expect(badSharedEnv.stderr).toContain("WAYPOINT_BUILD_NUMBER");
 
     const bothOut = runBuildScript(["--dry-run", "--out", "a.dmg", "--out-dir", "artifacts"]);
     expect(bothOut.status).not.toBe(0);
@@ -214,6 +249,9 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(makefile).toContain("build-macos-dmg");
     expect(makefile).toContain("dmg: build-macos-dmg");
     expect(makefile).toContain("scripts/build-macos-dmg.mjs");
+    const macosMakeSection =
+      makefile.split(/^build-macos-dmg:/m)[1]?.split(/^dmg:/m)[0] ?? "";
+    expect(macosMakeSection).toContain("BUILD_NUMBER");
 
     const pkg = JSON.parse(readFileSync(resolve(ROOT_DIR, "package.json"), "utf8")) as {
       scripts?: Record<string, string>;
@@ -236,13 +274,16 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(ciYml).toContain("if: needs.native-filter.outputs.run_macos == 'true'");
     expect(ciYml).toContain("runs-on: macos-latest");
     expect(ciYml).toContain("needs: native-filter");
-    expect(ciYml).toContain("fetch-depth: 0");
+    const nativeFilterSection =
+      ciYml.split("\n  native-filter:")[1]?.split("\n  rust-checks:")[0] ?? "";
+    expect(nativeFilterSection).toContain("fetch-depth: 0");
     expect(ciYml).toContain("targets: aarch64-apple-darwin");
     expect(ciYml).toContain("cargo clippy --all-targets -- -D warnings");
     expect(ciYml).toContain("node scripts/build-macos-dmg.mjs");
     expect(ciYml).toContain("actions/upload-artifact@v7");
     expect(ciYml).toContain(".dmg");
     const macosBuildSection = ciYml.split("\n  macos-build:")[1]?.split("\n  windows-build:")[0] ?? "";
+    expect(macosBuildSection).not.toContain("fetch-depth: 0");
     expect(macosBuildSection).toContain("archive: false");
     expect(macosBuildSection).not.toContain("waypoint-macos-dmg");
   });
@@ -261,7 +302,7 @@ describe("macOS packaging config, entrypoints, and workflows", () => {
     expect(releaseYml).toContain("contents: write");
     expect(releaseYml).toContain("verify:");
     expect(releaseYml).toContain("runs-on: macos-latest");
-    expect(releaseYml).toContain("fetch-depth: 0");
+    expect(releaseYml).not.toContain("fetch-depth: 0");
     expect(releaseYml).toContain("universal-apple-darwin");
     expect(releaseYml).toContain("scripts/build-macos-dmg.mjs");
     expect(releaseYml).toContain("--release");
