@@ -1,5 +1,6 @@
 import java.io.File
 import java.util.Properties
+import org.gradle.api.GradleException
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -47,12 +48,31 @@ val hasReleaseSigning =
     releaseKeyAlias != null &&
     releaseKeyPassword != null
 
-val overrideVersionCode = (project.findProperty("waypointVersionCode") as String?)
-    ?: System.getenv("WAYPOINT_ANDROID_VERSION_CODE")
+val overrideVersionCode = project.findProperty("waypointVersionCode")?.toString()?.takeIf { it.isNotBlank() }
+    ?: System.getenv("WAYPOINT_ANDROID_VERSION_CODE")?.takeIf { it.isNotBlank() }
 val overrideVersionName = (project.findProperty("waypointVersionName") as String?)
     ?: System.getenv("WAYPOINT_ANDROID_VERSION_NAME")
 val overrideAbiFilters = (project.findProperty("waypointAbiFilters") as String?)
     ?: System.getenv("WAYPOINT_ANDROID_ABI_FILTERS")
+
+fun parseOverrideVersionCode(raw: String?): Int? {
+    val normalized = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    if (!Regex("^[1-9][0-9]*$").matches(normalized)) {
+        throw GradleException(
+            "Invalid WAYPOINT_ANDROID_VERSION_CODE / -PwaypointVersionCode '$raw': expected a positive integer without leading zeros between 1 and 2100000000."
+        )
+    }
+    val parsed = normalized.toIntOrNull()
+        ?: throw GradleException(
+            "Invalid WAYPOINT_ANDROID_VERSION_CODE / -PwaypointVersionCode '$raw': integer overflow (max 2100000000)."
+        )
+    if (parsed !in 1..2_100_000_000) {
+        throw GradleException(
+            "Invalid WAYPOINT_ANDROID_VERSION_CODE / -PwaypointVersionCode '$raw': expected between 1 and 2100000000."
+        )
+    }
+    return parsed
+}
 
 android {
     compileSdk = 37
@@ -63,7 +83,7 @@ android {
         applicationId = "app.waypoint.client"
         minSdk = 24
         targetSdk = 37
-        versionCode = overrideVersionCode?.toIntOrNull()
+        versionCode = parseOverrideVersionCode(overrideVersionCode)
             ?: tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = overrideVersionName?.takeIf { it.isNotBlank() }
             ?: tauriProperties.getProperty("tauri.android.versionName", "1.0")

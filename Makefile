@@ -45,6 +45,7 @@ build-android-apk:
 		$(if $(OUT),--out "$(OUT)",) \
 		$(if $(OUT_DIR),--out-dir "$(OUT_DIR)",) \
 		$(if $(VERSION),--version "$(VERSION)",) \
+		$(if $(BUILD_NUMBER),--build-number "$(BUILD_NUMBER)",) \
 		$(if $(filter 1 true yes,$(RELEASE)),--release,) \
 		$(if $(filter 1 true yes,$(UNSIGNED)),--unsigned,)
 
@@ -56,6 +57,7 @@ build-macos-dmg:
 		$(if $(OUT_DIR),--out-dir "$(OUT_DIR)",) \
 		$(if $(TARGET),--target "$(TARGET)",) \
 		$(if $(VERSION),--version "$(VERSION)",) \
+		$(if $(BUILD_NUMBER),--build-number "$(BUILD_NUMBER)",) \
 		$(if $(filter 1 true yes,$(RELEASE)),--release,)
 
 dmg: build-macos-dmg
@@ -104,9 +106,9 @@ clean:
 
 help:
 	@echo "Waypoint build helpers:"
-	@echo "  make [build-android-apk|apk] [OUT=path] [OUT_DIR=dir] [VERSION=X.Y.Z] [RELEASE=1] [UNSIGNED=1]"
+	@echo "  make [build-android-apk|apk] [OUT=path] [OUT_DIR=dir] [VERSION=X.Y.Z] [BUILD_NUMBER=int] [RELEASE=1] [UNSIGNED=1]"
 	@echo "      Build single-ABI (arm64-v8a) APK"
-	@echo "  make [build-macos-dmg|dmg] [OUT=path] [OUT_DIR=dir] [TARGET=arm64|universal|x64] [VERSION=X.Y.Z] [RELEASE=1]"
+	@echo "  make [build-macos-dmg|dmg] [OUT=path] [OUT_DIR=dir] [TARGET=arm64|universal|x64] [VERSION=X.Y.Z] [BUILD_NUMBER=int] [RELEASE=1]"
 	@echo "      Build macOS DMG (run on macOS)"
 	@echo "  make [build-windows-installer|win] [OUT=path] [OUT_DIR=dir] [TARGET=x64|arm64] [VERSION=X.Y.Z] [RELEASE=1]"
 	@echo "      Build Windows NSIS installer (run on Windows)"

@@ -179,6 +179,10 @@ describe("build-windows-installer CLI", () => {
     expect(badTarget.status).not.toBe(0);
     expect(badTarget.stderr).toContain("Unsupported Windows target");
 
+    const unsupportedBuildNumber = runBuildScript(["--dry-run", "--build-number", "12345"]);
+    expect(unsupportedBuildNumber.status).not.toBe(0);
+    expect(unsupportedBuildNumber.stderr).toContain("Unknown argument");
+
     const badVersion = runBuildScript(["--dry-run", "--version", "0.1.0-test.123"]);
     expect(badVersion.status).not.toBe(0);
     expect(badVersion.stderr).toContain("Invalid Windows version");

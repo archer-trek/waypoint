@@ -4,7 +4,6 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync,
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {
-  assertCommitCountSafe,
   compareVersionDesc,
   findFreshArtifact,
   formatSizeMb,
@@ -12,6 +11,7 @@ import {
   parseBuildArgs,
   readGitInfo,
   readTauriConf,
+  resolveBuildNumber,
   resolveOutputPath,
   ROOT_DIR,
   runTauriCli,
@@ -33,6 +33,7 @@ Options:
   --out-dir <dir>          Write final APK into directory using computed filename
   --release                Build release filename without -test.<shortSha> suffix
   --version <semver>       Override versionName base semver (e.g. 0.1.0 or v0.1.0)
+  --build-number <int>     Override monotonic Android versionCode (1..2100000000)
   --unsigned               Build unsigned release APK without requiring keystore config
   --dry-run                Print resolved build plan JSON without building
   -h, --help               Show this help message`);
@@ -169,11 +170,14 @@ function resolveBuildPlan(options) {
     "Android versionName base requires strict X.Y.Z semver.",
   );
 
-  const hasExplicitVersionCode = Boolean(process.env.WAYPOINT_ANDROID_VERSION_CODE?.trim());
-  const { shortSha, commitCount, isShallow } = readGitInfo({ needCommitCount: true });
-  const versionCode = hasExplicitVersionCode
-    ? process.env.WAYPOINT_ANDROID_VERSION_CODE.trim()
-    : String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
+  const { shortSha } = readGitInfo();
+  const versionCode = resolveBuildNumber({
+    buildNumberRaw: options.buildNumberRaw,
+    platformEnvValue: process.env.WAYPOINT_ANDROID_VERSION_CODE,
+    platformEnvName: "WAYPOINT_ANDROID_VERSION_CODE",
+    sharedEnvValue: process.env.WAYPOINT_BUILD_NUMBER,
+    label: "Android versionCode",
+  });
 
   const computedVersionName = options.release ? version : `${version}-test.${shortSha}`;
   const versionName = options.versionRaw
@@ -197,8 +201,6 @@ function resolveBuildPlan(options) {
   const tauriArgs = ["android", "build", "--target", "aarch64", "--apk", "--ci"];
 
   return {
-    isShallow,
-    hasExplicitVersionCode,
     sourceApkName,
     plan: {
       productName,
@@ -221,6 +223,7 @@ function main() {
     options = parseBuildArgs(process.argv.slice(2), {
       allowTarget: false,
       allowUnsigned: true,
+      allowBuildNumber: true,
     });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
@@ -239,7 +242,7 @@ function main() {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  const { plan, isShallow, hasExplicitVersionCode, sourceApkName } = resolved;
+  const { plan, sourceApkName } = resolved;
 
   if (options.dryRun) {
     console.log(JSON.stringify(plan, null, 2));
@@ -249,14 +252,6 @@ function main() {
   let signerOutput = "";
   let soEntries = [];
   try {
-    if (!hasExplicitVersionCode) {
-      assertCommitCountSafe({
-        isShallow,
-        release: plan.release,
-        label: "Android versionCode",
-      });
-    }
-
     cleanOtherAbiJniLibs();
 
     const { androidHome, ndkHome, javaHome } = resolveAndroidToolchainEnv();

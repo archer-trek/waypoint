@@ -4,13 +4,13 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } fr
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
-  assertCommitCountSafe,
   findFreshArtifact,
   formatSizeMb,
   normalizeSemver,
   parseBuildArgs,
   readGitInfo,
   readTauriConf,
+  resolveBuildNumber,
   resolveCargoTargetDir,
   resolveOutputPath,
   runTauriCli,
@@ -43,6 +43,7 @@ Options:
   --out-dir <dir>          Write final DMG into directory using computed filename
   --release                Build release filename without -test.<shortSha> suffix
   --version <semver>       Override bundle semver (e.g. 0.1.0 or v0.1.0)
+  --build-number <int>     Override monotonic macOS CFBundleVersion (1..2100000000)
   --dry-run                Print resolved build plan JSON without building
   -h, --help               Show this help message`);
 }
@@ -65,9 +66,12 @@ function resolveBuildPlan(options) {
     "macOS",
     "Apple CFBundleShortVersionString requires strict X.Y.Z semver.",
   );
-  const { shortSha, commitCount, isShallow } = readGitInfo({ needCommitCount: true });
-
-  const bundleVersion = String(1000 + (Number.isFinite(commitCount) ? commitCount : 1));
+  const { shortSha } = readGitInfo();
+  const bundleVersion = resolveBuildNumber({
+    buildNumberRaw: options.buildNumberRaw,
+    sharedEnvValue: process.env.WAYPOINT_BUILD_NUMBER,
+    label: "macOS CFBundleVersion",
+  });
 
   const dmgFilename = options.release
     ? `${productName}-${version}-${archLabel}.dmg`
@@ -107,20 +111,17 @@ function resolveBuildPlan(options) {
   ];
 
   return {
-    isShallow,
-    plan: {
-      productName,
-      target,
-      archLabel,
-      version,
-      bundleVersion,
-      release: options.release,
-      signingMode,
-      dmgFilename,
-      dmgBundleDir,
-      outputPath,
-      tauriArgs,
-    },
+    productName,
+    target,
+    archLabel,
+    version,
+    bundleVersion,
+    release: options.release,
+    signingMode,
+    dmgFilename,
+    dmgBundleDir,
+    outputPath,
+    tauriArgs,
   };
 }
 
@@ -187,7 +188,10 @@ function verifyMountedDmgAppBundle(dmgPath, productName, target) {
 function main() {
   let options;
   try {
-    options = parseBuildArgs(process.argv.slice(2), { defaultTarget: "aarch64-apple-darwin" });
+    options = parseBuildArgs(process.argv.slice(2), {
+      defaultTarget: "aarch64-apple-darwin",
+      allowBuildNumber: true,
+    });
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
@@ -198,14 +202,13 @@ function main() {
     return;
   }
 
-  let resolved;
+  let plan;
   try {
-    resolved = resolveBuildPlan(options);
+    plan = resolveBuildPlan(options);
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  const { plan, isShallow } = resolved;
 
   if (options.dryRun) {
     console.log(JSON.stringify(plan, null, 2));
@@ -220,12 +223,6 @@ function main() {
   }
 
   try {
-    assertCommitCountSafe({
-      isShallow,
-      release: plan.release,
-      label: "macOS CFBundleVersion",
-    });
-
     console.log(
       `Building macOS DMG (${plan.target}, ${plan.signingMode}): version=${plan.version} (${plan.bundleVersion}), out=${plan.outputPath}`,
     );
