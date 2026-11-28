@@ -65,11 +65,11 @@ function parseArgs(argv) {
 }
 
 function runGit(args, { stdio = ["ignore", "pipe", "pipe"] } = {}) {
-  return execFileSync("git", args, {
+  return (execFileSync("git", args, {
     cwd: ROOT_DIR,
     encoding: "utf8",
     stdio,
-  }).trim();
+  }) ?? "").trim();
 }
 
 function runNpmScript(scriptName) {
