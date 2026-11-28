@@ -1,6 +1,6 @@
 # Windows 打包采用 NSIS（currentUser）与原生 Win32 窗口外壳
 
-Windows 端构建仅产出单一 NSIS 安装包（`.exe`，默认 `x86_64-pc-windows-msvc` / `x64`，脚本预留 `aarch64-pc-windows-msvc` / `arm64`），配置为 `installMode: "currentUser"`、`languages: ["SimpChinese", "English"]`（随系统语言自动匹配且不弹出语言选择框）、`webviewInstallMode: { type: "downloadBootstrapper", silent: true }`（不设 `minimumWebview2Version` 硬门槛），默认产出未签名安装包并预留 `WINDOWS_SIGN_COMMAND` / `WINDOWS_CERTIFICATE_THUMBPRINT` 签名钩子。运行时保持 Windows 原生 Win32 标题栏与关闭即退出语义，并在 `sync_system_appearance` 中同步原生窗口主题（`window.set_theme`），同时统一清理 Windows 非法与保留设备名附件文件名并按平台识别 `Waypoint Windows` 设备显示名；所有桌面端发布统一由 `.github/workflows/release.yml` 并行构建后原子汇总到同一份 Draft GitHub Release。
+Windows 端构建仅产出单一 NSIS 安装包（`.exe`，默认 `x86_64-pc-windows-msvc` / `x64`，脚本预留 `aarch64-pc-windows-msvc` / `arm64`），配置为 `installMode: "currentUser"`、`languages: ["SimpChinese", "English"]`（随系统语言自动匹配且不弹出语言选择框）、`webviewInstallMode: { type: "downloadBootstrapper", silent: true }`（不设 `minimumWebview2Version` 硬门槛），默认产出未签名安装包并预留 `WINDOWS_SIGN_COMMAND` / `WINDOWS_CERTIFICATE_THUMBPRINT` 签名钩子。运行时保持 Windows 原生 Win32 标题栏与关闭即退出语义，并在 `sync_system_appearance` 中同步原生窗口主题（`window.set_theme`），同时统一清理 Windows 非法与保留设备名附件文件名并按平台识别 `Waypoint Windows` 设备显示名；所有桌面端发布统一由 `.github/workflows/release.yml` 并行构建后原子汇总到同一份 Draft GitHub Release（后续在 [ADR-0038](./0038-unified-multi-platform-release-workflow.md) 中进一步将 Android 与两段式发版流程纳入该统一工作流）。
 
 ## Considered Options
 

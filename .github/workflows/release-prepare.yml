@@ -1,0 +1,76 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bump keyword (patch, minor, major) or explicit X.Y.Z semver
+        required: true
+        default: patch
+        type: string
+      skip_checks:
+        description: Skip lint, typecheck, and unit tests before opening PR
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Create release preparation PR
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - name: Require main branch dispatch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "Prepare Release must be dispatched from main (got ${GITHUB_REF})." >&2
+          exit 1
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare release branch and open PR
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SKIP_CHECKS: ${{ inputs.skip_checks }}
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN || github.token }}
+          HAS_RELEASE_BOT_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B main
+
+          ARGS=(--version "$INPUT_VERSION" --pr)
+          if [ "$INPUT_SKIP_CHECKS" = "true" ]; then
+            ARGS+=(--skip-checks)
+          fi
+          node scripts/prepare-release.mjs "${ARGS[@]}"
+
+          {
+            echo "## Release Preparation PR Created"
+            echo ""
+            echo "- **Requested version**: \`${INPUT_VERSION}\`"
+            if [ "$HAS_RELEASE_BOT_TOKEN" != "true" ]; then
+              echo "- **CI notice**: Created using \`GITHUB_TOKEN\`; GitHub Actions will not auto-trigger \`CI\` on this PR unless \`RELEASE_BOT_TOKEN\` is configured or a manual CI run / commit is triggered."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

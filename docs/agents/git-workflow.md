@@ -34,3 +34,15 @@ Branching, commit, and pull-request conventions for `archer-trek/waypoint`.
 ## Parallel work
 
 - When multiple `ready-for-agent` tickets are in flight simultaneously, give each branch its own `git worktree` rather than switching branches in a shared working directory.
+
+## Release workflow
+
+Releases use a two-stage PR + tag flow documented in [ADR-0038](../adr/0038-unified-multi-platform-release-workflow.md):
+
+1. Cut a release preparation branch (`chore/release-vX.Y.Z`) and synchronize all five version/lockfile entries (`package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`):
+   - Local CLI: `npm run release:prepare -- <patch|minor|major|X.Y.Z>` (add `--pr` to push and open the PR, or use `make release-prepare VERSION=... PR=1`).
+   - GitHub Actions: dispatch `.github/workflows/release-prepare.yml` from `main`.
+2. Merge the release PR into `main` via squash merge and wait for `CI` on `main` to pass.
+3. Tag `main` and trigger `.github/workflows/release.yml`:
+   - `npm run release:tag` (or `make release-tag`) verifies clean `main` parity with `origin/main`, version consistency, tag uniqueness, and passing `CI` on `HEAD`, then pushes annotated tag `vX.Y.Z`.
+   - `release.yml` runs `verify`, `rust-checks`, and parallel `build-android`, `build-macos`, and `build-windows` jobs, then creates or updates the Draft GitHub Release with `SHA256SUMS.txt`.

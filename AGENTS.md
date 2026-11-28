@@ -31,3 +31,7 @@ Build macOS `.dmg` (Apple Silicon `aarch64-apple-darwin` by default, ad-hoc sign
 ### Windows build
 
 Build Windows NSIS installer (`.exe`, `x86_64-pc-windows-msvc` / `x64` by default, `arm64` optional, unsigned by default unless `WINDOWS_SIGN_COMMAND` or `WINDOWS_CERTIFICATE_THUMBPRINT` is set) on Windows via `make build-windows-installer` (or `make win`, optional `OUT=<path>`, `TARGET=x64|arm64`) or `node scripts/build-windows-installer.mjs`.
+
+### Release
+
+Prepare a release PR branch (`chore/release-vX.Y.Z`) via `npm run release:prepare -- <patch|minor|major|X.Y.Z>` (or `make release-prepare VERSION=<...> [PR=1]`, or `.github/workflows/release-prepare.yml`). After squash-merging into `main` and `CI` passes, create and push the `vX.Y.Z` tag via `npm run release:tag` (or `make release-tag`) to trigger `.github/workflows/release.yml` (Android `arm64-v8a` APK + macOS DMG + Windows NSIS `.exe` -> Draft GitHub Release). See `docs/adr/0038-unified-multi-platform-release-workflow.md`.

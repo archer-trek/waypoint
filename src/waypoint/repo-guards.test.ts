@@ -368,15 +368,27 @@ describe("Repository, asset, and error-copy guards", () => {
     const pkg = JSON.parse(readFileSync(resolve(ROOT_DIR, "package.json"), "utf-8")) as {
       version: string;
     };
+    const pkgLock = JSON.parse(readFileSync(resolve(ROOT_DIR, "package-lock.json"), "utf-8")) as {
+      version: string;
+      packages?: Record<string, { version?: string }>;
+    };
     const tauriConf = JSON.parse(
       readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf-8"),
     ) as { version: string };
     const cargoToml = readFileSync(resolve(ROOT_DIR, "src-tauri/Cargo.toml"), "utf-8");
     const cargoVersion = cargoToml.match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+    const cargoLock = readFileSync(resolve(ROOT_DIR, "src-tauri/Cargo.lock"), "utf-8");
+    const cargoLockWaypoint = cargoLock
+      .split(/\r?\n\r?\n/)
+      .find((block) => /^\[\[package\]\]/m.test(block) && /^name\s*=\s*"waypoint"/m.test(block));
+    const cargoLockVersion = cargoLockWaypoint?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 
     expect(pkg.version).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(pkgLock.version).toBe(pkg.version);
+    expect(pkgLock.packages?.[""]?.version).toBe(pkg.version);
     expect(tauriConf.version).toBe(pkg.version);
     expect(cargoVersion).toBe(pkg.version);
+    expect(cargoLockVersion).toBe(pkg.version);
 
     const nvmrcPath = resolve(ROOT_DIR, ".nvmrc");
     expect(existsSync(nvmrcPath)).toBe(true);
@@ -400,6 +412,21 @@ describe("Repository, asset, and error-copy guards", () => {
     const draftJobSection = releaseYml.split("\n  draft-release:")[1] ?? "";
     expect(draftJobSection).toContain("contents: write");
     expect(releaseYml.match(/contents:\s*write/g)?.length).toBe(1);
+    expect(releaseYml).toContain("rust-checks:");
+    expect(releaseYml).toContain("build-android:");
+    expect(releaseYml).toContain("build-macos:");
+    expect(releaseYml).toContain("build-windows:");
+    expect(releaseYml).toContain("--release");
+    expect(releaseYml).toContain("secrets.WAYPOINT_ANDROID_KEYSTORE_BASE64");
+    expect(releaseYml).not.toContain("--unsigned");
+    expect(releaseYml).toContain("SHA256SUMS.txt");
+
+    const releasePreparePath = resolve(ROOT_DIR, ".github/workflows/release-prepare.yml");
+    expect(existsSync(releasePreparePath)).toBe(true);
+    const releasePrepareYml = readFileSync(releasePreparePath, "utf-8");
+    expect(releasePrepareYml).toContain("node-version-file: .nvmrc");
+    expect(releasePrepareYml).toContain("scripts/prepare-release.mjs");
+    expect(existsSync(resolve(ROOT_DIR, ".github/release.yml"))).toBe(true);
 
     const ndkVersion = "27.3.13750724";
     expect(ciYml).toContain(`ANDROID_NDK_VERSION: "${ndkVersion}"`);
