@@ -3230,11 +3230,45 @@ export function TopicsWorkspace({
           loadingLocalMediaRef.current.delete(attachmentId);
         });
     }
+
+    const visibleDraft = visibleComposerRoomId
+      ? draftsByRoom[visibleComposerRoomId]
+      : undefined;
+    if (
+      visibleDraft?.attachmentId &&
+      visibleDraft.attachmentMeta?.mimeType?.startsWith("image/") &&
+      !localMediaUrlCacheRef.current.has(visibleDraft.attachmentId) &&
+      !loadingLocalMediaRef.current.has(visibleDraft.attachmentId)
+    ) {
+      const draftAttId = visibleDraft.attachmentId;
+      const draftMime = visibleDraft.attachmentMeta.mimeType;
+      loadingLocalMediaRef.current.add(draftAttId);
+      void client
+        .loadBlob(draftAttId)
+        .then((blob) => {
+          if (!mountedRef.current || !blob) {
+            return;
+          }
+          if (!localMediaUrlCacheRef.current.has(draftAttId)) {
+            const created = createRenderableMediaUrl(blob.data, draftMime || blob.mimeType || "image/png");
+            localMediaUrlCacheRef.current.set(draftAttId, created);
+            setMediaRevision((value) => value + 1);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          loadingLocalMediaRef.current.delete(draftAttId);
+        });
+    }
   });
+
+  const visibleDraftAttachmentId = visibleComposerRoomId
+    ? draftsByRoom[visibleComposerRoomId]?.attachmentId
+    : undefined;
 
   useEffect(() => {
     loadMissingLocalImages();
-  }, [timelineContentKey, visibleComposerRoomId, client, exiting]);
+  }, [timelineContentKey, visibleComposerRoomId, visibleDraftAttachmentId, client, exiting]);
 
   useEffect(() => {
     const localCache = localMediaUrlCacheRef.current;
@@ -4220,6 +4254,14 @@ export function TopicsWorkspace({
               reauthRequired={reauthRequired}
               persistingSend={persistingSend}
               draftAttachmentName={currentDraft?.attachmentMeta?.name ?? currentDraft?.attachment?.name}
+              draftAttachmentMimeType={currentDraft?.attachmentMeta?.mimeType ?? currentDraft?.attachment?.mimeType}
+              draftAttachmentSize={currentDraft?.attachmentMeta?.size ?? currentDraft?.attachment?.size}
+              draftAttachmentImageUrl={
+                currentDraft?.attachmentId &&
+                (currentDraft.attachmentMeta?.mimeType ?? currentDraft.attachment?.mimeType)?.startsWith("image/")
+                  ? getLocalImageUrl(currentDraft.attachmentId)
+                  : undefined
+              }
               hasDraftAttachment={Boolean((currentDraft?.attachmentId && currentDraft?.attachmentMeta) || currentDraft?.attachment)}
               draftText={currentDraft?.text ?? ""}
               composerFormRef={composerFormRef}
