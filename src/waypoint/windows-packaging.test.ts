@@ -224,7 +224,7 @@ describe("build-windows-installer CLI", () => {
 });
 
 describe("Windows packaging config, entrypoints, and workflows", () => {
-  test("tauri.conf.json configures Windows NSIS currentUser, downloadBootstrapper, and icon.ico", () => {
+  test("tauri.conf.json configures Windows NSIS perMachine, downloadBootstrapper, and icon.ico", () => {
     const tauriConf = JSON.parse(
       readFileSync(resolve(ROOT_DIR, "src-tauri/tauri.conf.json"), "utf8"),
     ) as {
@@ -248,7 +248,7 @@ describe("Windows packaging config, entrypoints, and workflows", () => {
     expect(win?.webviewInstallMode).toEqual({ type: "downloadBootstrapper", silent: true });
     expect(win?.allowDowngrades).toBe(true);
     expect(win?.minimumWebview2Version).toBeUndefined();
-    expect(win?.nsis?.installMode).toBe("currentUser");
+    expect(win?.nsis?.installMode).toBe("perMachine");
     expect(win?.nsis?.languages).toEqual(["SimpChinese", "English"]);
     expect(win?.nsis?.displayLanguageSelector).toBe(false);
     expect(win?.nsis?.installerIcon).toBe("icons/icon.ico");
