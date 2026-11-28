@@ -39,7 +39,7 @@
       },
       "allowDowngrades": true,
       "nsis": {
-        "installMode": "currentUser",
+        "installMode": "perMachine",
         "languages": [
           "SimpChinese",
           "English"
