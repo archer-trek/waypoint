@@ -1414,3 +1414,197 @@ describe("Message delete & favorites UI components", () => {
     expect(imgBtn).toHaveClass("block", "w-fit", "min-w-0", "max-w-full");
     expect(imgEl).toHaveClass("block", "w-auto", "max-w-full", "h-auto", "max-h-60", "sm:max-h-72");
   });
+
+describe("Unified composer attachment tray, mobile picker, and timeline file card", () => {
+  test("ComposerView renders unified attachment tray for images and files and narrow + picker menu", async () => {
+    const user = userEvent.setup();
+    const onRemove = vi.fn();
+    const onPickedFiles = vi.fn();
+
+    const { rerender } = render(
+      <ComposerView
+        safeInset={0}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        draftAttachmentName="screenshot.png"
+        draftAttachmentMimeType="image/png"
+        draftAttachmentSize={102400}
+        draftAttachmentImageUrl="blob:draft-img"
+        hasDraftAttachment
+        draftText="看截图"
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="narrow"
+        supportsFileDropAndPaste={false}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={onRemove}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={onPickedFiles}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+
+    const shell = document.querySelector(".waypoint-composer-shell") as HTMLElement;
+    expect(shell).toHaveClass("rounded-[18px]", "border");
+    const imgThumb = within(screen.getByRole("region", { name: "已选附件" })).getByAltText("screenshot.png");
+    expect(imgThumb).toHaveAttribute("src", "blob:draft-img");
+
+    await user.click(screen.getByRole("button", { name: "移除附件" }));
+    expect(onRemove).toHaveBeenCalledTimes(1);
+
+    const cameraInput = screen.getByLabelText("拍照") as HTMLInputElement;
+    const galleryInput = screen.getByLabelText("从图库选择") as HTMLInputElement;
+    const fileInput = screen.getByLabelText("选择附件") as HTMLInputElement;
+    expect(cameraInput).toHaveAttribute("accept", "image/*");
+    expect(cameraInput).toHaveAttribute("capture", "environment");
+    expect(galleryInput).toHaveAttribute("accept", "image/*");
+    expect(galleryInput.multiple).toBe(true);
+    expect(galleryInput).not.toHaveAttribute("capture");
+    expect(fileInput.multiple).toBe(true);
+
+    const cameraClickSpy = vi.spyOn(cameraInput, "click").mockImplementation(() => {});
+    const galleryClickSpy = vi.spyOn(galleryInput, "click").mockImplementation(() => {});
+    const fileClickSpy = vi.spyOn(fileInput, "click").mockImplementation(() => {});
+
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    const menu = await screen.findByRole("menu", { name: "选择附件方式" });
+    await user.click(within(menu).getByRole("menuitem", { name: "拍照" }));
+    expect(cameraClickSpy).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(
+      within(await screen.findByRole("menu", { name: "选择附件方式" })).getByRole("menuitem", {
+        name: "从图库选择",
+      }),
+    );
+    expect(galleryClickSpy).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "添加附件" }));
+    await user.click(
+      within(await screen.findByRole("menu", { name: "选择附件方式" })).getByRole("menuitem", {
+        name: "选择文件",
+      }),
+    );
+    expect(fileClickSpy).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ComposerView
+        safeInset={0}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        draftAttachmentName="spec.pdf"
+        draftAttachmentMimeType="application/pdf"
+        draftAttachmentSize={2516582}
+        hasDraftAttachment
+        draftText=""
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="wide"
+        supportsFileDropAndPaste
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={onRemove}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={onPickedFiles}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+
+    const attachmentRegion = screen.getByRole("region", { name: "已选附件" });
+    expect(attachmentRegion).toHaveTextContent("spec.pdf");
+    expect(attachmentRegion).toHaveTextContent("PDF");
+    expect(attachmentRegion).toHaveTextContent("2.4 MB");
+  });
+
+  test("TimelineView renders structured file cards with extension and size metadata without box-in-box nesting", async () => {
+    const user = userEvent.setup();
+    const onOpenMedia = vi.fn();
+    const fileItems: Extract<TimelineItem, { kind: "message" }>[] = [
+      {
+        kind: "message",
+        key: "file-standalone",
+        eventId: "$file-standalone",
+        side: "right",
+        body: "report.pdf",
+        status: "confirmed",
+        media: {
+          kind: "file",
+          msgtype: "m.file",
+          filename: "report.pdf",
+          mimeType: "application/pdf",
+          size: 2516582,
+          mxcUrl: "mxc://example.com/report",
+        },
+      },
+      {
+        kind: "message",
+        key: "file-captioned",
+        eventId: "$file-captioned",
+        side: "right",
+        body: "请查收日志包",
+        status: "confirmed",
+        media: {
+          kind: "file",
+          msgtype: "m.file",
+          filename: "logs.tar.gz",
+          caption: "请查收日志包",
+          mimeType: "application/gzip",
+          size: 524288,
+          mxcUrl: "mxc://example.com/logs",
+        },
+      },
+    ];
+
+    render(
+      <TimelineView
+        timelineRef={createRef()}
+        items={fileItems}
+        isNarrow={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        openFailedMenuId={null}
+        getLocalImageUrl={() => undefined}
+        getDownloadedImageUrl={() => undefined}
+        onScroll={vi.fn()}
+        onToggleFailedMenu={vi.fn()}
+        onOpenFailedMenu={vi.fn()}
+        onResendFailed={vi.fn()}
+        onDiscardFailed={vi.fn()}
+        onOpenMedia={onOpenMedia}
+        onOpenExternalUrl={vi.fn()}
+        onSelectPromptOption={vi.fn()}
+      />,
+    );
+
+    const timeline = screen.getByRole("log", { name: "对话时间线" });
+    const standaloneRow = timeline.querySelector('[data-event-id="$file-standalone"]') as HTMLElement;
+    const standaloneBubble = standaloneRow.querySelector(".waypoint-bubble") as HTMLElement;
+    expect(standaloneBubble).toHaveClass("p-0", "bg-transparent", "shadow-none");
+    const standaloneBtn = within(standaloneRow).getByRole("button", { name: "report.pdf" });
+    expect(standaloneBtn).toHaveTextContent("report.pdf");
+    expect(standaloneBtn).toHaveTextContent("PDF");
+    expect(standaloneBtn).toHaveTextContent("2.4 MB");
+
+    await user.click(standaloneBtn);
+    expect(onOpenMedia).toHaveBeenCalledWith(fileItems[0]!.media);
+
+    const captionedRow = timeline.querySelector('[data-event-id="$file-captioned"]') as HTMLElement;
+    const captionedBubble = captionedRow.querySelector(".waypoint-bubble") as HTMLElement;
+    expect(captionedBubble).toHaveClass("bg-primary", "px-4", "py-2.5");
+    const captionedBtn = within(captionedRow).getByRole("button", { name: "logs.tar.gz" });
+    expect(captionedBtn).toHaveTextContent("TAR.GZ");
+    expect(captionedBtn).toHaveTextContent("512 KB");
+    expect(captionedRow).toHaveTextContent("请查收日志包");
+  });
+});

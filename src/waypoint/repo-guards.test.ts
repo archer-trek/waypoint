@@ -305,6 +305,7 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(manifestXml).not.toMatch(/leanback/i);
     expect(manifestXml).toContain("android:enableOnBackInvokedCallback=\"true\"");
     expect(manifestXml).toContain("androidx.core.content.FileProvider");
+    expect(manifestXml).toContain("android.media.action.IMAGE_CAPTURE");
 
     const filePathsXml = readFileSync(
       resolve(ROOT_DIR, "src-tauri/gen/android/app/src/main/res/xml/file_paths.xml"),
@@ -313,6 +314,8 @@ describe("Repository, asset, and error-copy guards", () => {
     expect(filePathsXml).not.toContain("<external-path");
     expect(filePathsXml).toContain("<cache-path");
     expect(filePathsXml).toContain("waypoint-media/");
+    expect(filePathsXml).toContain("camera_pictures");
+    expect(filePathsXml).toContain("Pictures/");
   });
 
   test("Android network security config splits debug/release cleartext policy, R8 keep rules cover bridges, and CI gates native changes (#140)", () => {

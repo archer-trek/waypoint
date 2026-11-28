@@ -29,6 +29,29 @@ internal object SystemBackSupport {
   }
 }
 
+internal enum class FileChooserKind {
+  CAMERA_PHOTO,
+  GALLERY_IMAGES,
+  DOCUMENT_FILES,
+}
+
+internal object FileChooserSupport {
+  fun classify(acceptTypes: Array<String>?, captureEnabled: Boolean): FileChooserKind {
+    val normalized = acceptTypes
+      ?.map { it.trim().lowercase() }
+      ?.filter { it.isNotEmpty() }
+      .orEmpty()
+    val hasImageAccept = normalized.any { it.startsWith("image/") }
+    if (captureEnabled && hasImageAccept) {
+      return FileChooserKind.CAMERA_PHOTO
+    }
+    if (!captureEnabled && normalized.isNotEmpty() && normalized.all { it.startsWith("image/") }) {
+      return FileChooserKind.GALLERY_IMAGES
+    }
+    return FileChooserKind.DOCUMENT_FILES
+  }
+}
+
 internal sealed interface MediaOpenResult {
   object Opened : MediaOpenResult
   object NoViewerApp : MediaOpenResult

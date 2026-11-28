@@ -30,6 +30,34 @@ class WaypointShellSupportTest {
   }
 
   @Test
+  fun fileChooserSupportClassifiesCameraGalleryAndDocuments() {
+    assertEquals(
+      FileChooserKind.CAMERA_PHOTO,
+      FileChooserSupport.classify(arrayOf("image/*"), captureEnabled = true),
+    )
+    assertEquals(
+      FileChooserKind.GALLERY_IMAGES,
+      FileChooserSupport.classify(arrayOf("image/*", " image/png "), captureEnabled = false),
+    )
+    assertEquals(
+      FileChooserKind.DOCUMENT_FILES,
+      FileChooserSupport.classify(arrayOf("*/*"), captureEnabled = false),
+    )
+    assertEquals(
+      FileChooserKind.DOCUMENT_FILES,
+      FileChooserSupport.classify(arrayOf("image/*", "application/pdf"), captureEnabled = false),
+    )
+    assertEquals(
+      FileChooserKind.DOCUMENT_FILES,
+      FileChooserSupport.classify(emptyArray(), captureEnabled = false),
+    )
+    assertEquals(
+      FileChooserKind.DOCUMENT_FILES,
+      FileChooserSupport.classify(null, captureEnabled = true),
+    )
+  }
+
+  @Test
   fun mediaOpenResultMapsBridgeValues() {
     assertNull(MediaOpenResult.Opened.toBridgeResult())
     assertEquals(MediaViewerSupport.NO_VIEWER_ERROR_CODE, MediaOpenResult.NoViewerApp.toBridgeResult())

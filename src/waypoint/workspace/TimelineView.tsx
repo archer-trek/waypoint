@@ -5,7 +5,7 @@ import {
   isViewportKeyboardConstrained,
 } from "@/lib/viewport-lock";
 import { copyToClipboard } from "@/lib/utils";
-import { Bookmark, Code2, Copy, FileText, MoreHorizontal, Trash2 } from "lucide-react";
+import { ArrowUpRight, Bookmark, Code2, Copy, FileText, Image as ImageIcon, MoreHorizontal, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +26,8 @@ import { cn } from "@/lib/utils";
 import { MessageBody } from "../MessageBody";
 import type { TimelineItem, TimelineMedia } from "../topics";
 import { RespondingIndicator } from "./RespondingIndicator";
+import { MediaKindIcon } from "./MediaKindIcon";
+import { extractFileExtensionLabel, formatFileSize } from "./media-presentation";
 
 export type TimelineViewProps = {
   timelineRef: RefObject<HTMLDivElement | null>;
@@ -497,7 +499,9 @@ export function TimelineView({
                 className={cn(
                   "waypoint-bubble min-w-0 wrap-anywhere",
                   item.side === "right"
-                    ? "max-w-full bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
+                    ? item.media && !item.media.caption
+                      ? "max-w-full bg-transparent text-foreground rounded-2xl p-0 whitespace-normal shadow-none text-[16px]"
+                      : "max-w-full bg-primary text-primary-foreground dark:bg-secondary dark:text-foreground rounded-2xl px-4 py-2.5 whitespace-normal shadow-xs [&_a]:underline [&_p]:text-inherit [&_p]:leading-normal text-[16px]"
                     : "bg-transparent border-0 rounded-none shadow-none py-1 px-0 w-full max-w-full text-[16px] leading-[1.5] text-foreground",
                 )}
                 onTouchStart={(e) => handleTouchStart(e, item)}
@@ -525,13 +529,16 @@ export function TimelineView({
                 }
               >
                 {item.media ? (
-                  <div className="waypoint-media-bubble flex flex-col gap-1.5 min-w-0 max-w-full">
+                  <div className="waypoint-media-bubble flex flex-col gap-2 min-w-0 max-w-full">
                     {item.media.kind === "image" ? (
                       <div className="waypoint-media-image-frame w-fit max-w-[min(15rem,100%)] sm:max-w-[min(20rem,100%)] min-w-0">
                         <button
                           type="button"
                           aria-label={`查看图片 ${item.media.filename}`}
-                          className="waypoint-media-image-button block w-fit m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer min-w-0 max-w-full rounded-lg overflow-hidden"
+                          className={cn(
+                            "waypoint-media-image-button block w-fit m-0 p-0 border-0 bg-transparent text-inherit text-left cursor-pointer min-w-0 max-w-full overflow-hidden",
+                            item.media.caption ? "rounded-xl" : "rounded-2xl",
+                          )}
                           onClick={() => onOpenMedia(item.media!)}
                         >
                           {(() => {
@@ -542,31 +549,115 @@ export function TimelineView({
                               (item.media.mxcUrl
                                 ? getDownloadedImageUrl(item.media.mxcUrl)
                                 : undefined);
+                            const sizeText = formatFileSize(item.media.size);
                             return imageSrc ? (
                               <img
                                 src={imageSrc}
                                 alt={item.media.filename}
-                                className="waypoint-bubble-image block w-auto max-w-full h-auto max-h-60 sm:max-h-72 rounded-lg"
+                                className={cn(
+                                  "waypoint-bubble-image block w-auto max-w-full h-auto max-h-60 sm:max-h-72",
+                                  item.media.caption
+                                    ? "rounded-xl"
+                                    : "rounded-2xl border border-border/50",
+                                )}
                               />
                             ) : (
-                              <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere">
-                                {item.media.filename}
+                              <span
+                                className={cn(
+                                  "inline-flex items-center gap-3 px-3 py-2.5 min-w-[200px] max-w-full border",
+                                  item.media.caption
+                                    ? "rounded-xl border-primary-foreground/15 bg-primary-foreground/10 text-primary-foreground dark:border-border/80 dark:bg-background/45 dark:text-foreground"
+                                    : "rounded-2xl border-border/80 bg-card text-foreground shadow-xs",
+                                )}
+                              >
+                                <span
+                                  className={cn(
+                                    "size-9 rounded-xl border flex items-center justify-center shrink-0",
+                                    item.media.caption && item.side === "right"
+                                      ? "border-primary-foreground/15 bg-primary-foreground/10 text-primary-foreground dark:border-border/70 dark:bg-secondary dark:text-foreground"
+                                      : "border-border/70 bg-secondary text-foreground",
+                                  )}
+                                >
+                                  <ImageIcon aria-hidden="true" strokeWidth={1.85} className="size-4" />
+                                </span>
+                                <span className="min-w-0 flex-1 flex flex-col gap-0.5">
+                                  <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere text-[14px] font-medium leading-snug">
+                                    {item.media.filename}
+                                  </span>
+                                  <span className="text-[11.5px] font-mono opacity-75">
+                                    {sizeText ? `${sizeText} · 点击查看` : "点击查看图片"}
+                                  </span>
+                                </span>
                               </span>
                             );
                           })()}
                         </button>
                       </div>
                     ) : (
-                      <button
-                        type="button"
-                        className="waypoint-media-file-button inline-flex items-center gap-1.5 m-0 px-2.5 py-1.5 rounded-md border border-border bg-secondary text-secondary-foreground text-left cursor-pointer min-w-0 max-w-full hover:bg-accent"
-                        onClick={() => onOpenMedia(item.media!)}
-                      >
-                        <FileText aria-hidden="true" className="size-3.5 shrink-0" />
-                        <span className="waypoint-media-filename min-w-0 max-w-full wrap-anywhere">
-                          {item.media.filename}
-                        </span>
-                      </button>
+                      (() => {
+                        const extLabel = extractFileExtensionLabel(
+                          item.media.filename,
+                          item.media.mimeType,
+                        );
+                        const sizeLabel = formatFileSize(item.media.size);
+                        const insideOwnerCaptionBubble =
+                          item.side === "right" && Boolean(item.media.caption);
+                        return (
+                          <button
+                            type="button"
+                            aria-label={item.media.filename}
+                            className={cn(
+                              "waypoint-media-file-button group flex items-center gap-3 m-0 text-left cursor-pointer min-w-0 max-w-full transition-colors",
+                              insideOwnerCaptionBubble
+                                ? "w-full min-w-[200px] max-w-[300px] px-2.5 py-2 rounded-xl border border-primary-foreground/15 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/15 dark:border-border/80 dark:bg-background/45 dark:text-foreground dark:hover:bg-background/65"
+                                : "w-[min(100%,18.5rem)] sm:w-[min(100%,20rem)] px-3 py-2.5 rounded-2xl border border-border/85 bg-card text-foreground shadow-xs hover:bg-accent/70",
+                            )}
+                            onClick={() => onOpenMedia(item.media!)}
+                          >
+                            <span
+                              className={cn(
+                                "size-10 rounded-xl border flex items-center justify-center shrink-0",
+                                insideOwnerCaptionBubble
+                                  ? "border-primary-foreground/15 bg-primary-foreground/10 text-primary-foreground dark:border-border/70 dark:bg-secondary dark:text-foreground"
+                                  : "border-border/70 bg-secondary text-foreground",
+                              )}
+                            >
+                              <MediaKindIcon
+                                filename={item.media.filename}
+                                mimeType={item.media.mimeType}
+                                className="size-5"
+                              />
+                            </span>
+                            <span className="min-w-0 flex-1 flex flex-col gap-0.5">
+                              <span className="waypoint-media-filename block min-w-0 max-w-full wrap-anywhere text-[14px] font-medium leading-snug line-clamp-2">
+                                {item.media.filename}
+                              </span>
+                              <span
+                                aria-hidden="true"
+                                className={cn(
+                                  "flex items-center gap-1.5 text-[11.5px] font-mono leading-snug",
+                                  insideOwnerCaptionBubble
+                                    ? "text-primary-foreground/75 dark:text-muted-foreground"
+                                    : "text-muted-foreground",
+                                )}
+                              >
+                                <span>{extLabel}</span>
+                                {sizeLabel ? <span>· {sizeLabel}</span> : null}
+                              </span>
+                            </span>
+                            <ArrowUpRight
+                              aria-hidden="true"
+                              strokeWidth={1.85}
+                              className={cn(
+                                "size-4 shrink-0 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5",
+                                insideOwnerCaptionBubble
+                                  ? "text-primary-foreground/70 dark:text-muted-foreground"
+                                  : "text-muted-foreground/75",
+                              )}
+                            />
+                          </button>
+                        );
+                      })()
                     )}
                     {item.media.caption ? (
                       <MessageBody

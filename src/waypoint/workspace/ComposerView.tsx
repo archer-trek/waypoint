@@ -1,14 +1,38 @@
-import { useEffect, useRef, type FormEvent, type KeyboardEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
+} from "react";
 import {
   canScrollVerticallyInDirection,
   installTouchScrollBoundaryLock,
   isViewportKeyboardConstrained,
 } from "@/lib/viewport-lock";
-import { ArrowUp, ChevronDown, Plus } from "lucide-react";
+import {
+  ArrowUp,
+  Camera,
+  ChevronDown,
+  FileText,
+  Image as ImageIcon,
+  Plus,
+  X,
+} from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import type { ViewportMode } from "../../adapters/types";
+import { MediaKindIcon } from "./MediaKindIcon";
+import { extractFileExtensionLabel, formatFileSize } from "./media-presentation";
 import { SLASH_COMMAND_HINTS } from "./types";
 
 export type ComposerViewProps = {
@@ -21,6 +45,9 @@ export type ComposerViewProps = {
   reauthRequired: boolean;
   persistingSend: boolean;
   draftAttachmentName?: string;
+  draftAttachmentMimeType?: string;
+  draftAttachmentSize?: number;
+  draftAttachmentImageUrl?: string;
   hasDraftAttachment: boolean;
   draftText: string;
   composerFormRef: RefObject<HTMLFormElement | null>;
@@ -40,7 +67,7 @@ export type ComposerViewProps = {
   extractDataTransferFiles: (transfer: DataTransfer | null | undefined) => File[];
 };
 
-/** Bottom composer area with scroll-to-bottom FAB, attachment strip, slash hints, and capsule input. */
+/** Bottom composer area with scroll-to-bottom FAB, unified attachment tray, slash hints, and capsule input. */
 export function ComposerView({
   safeInset,
   showScrollBottomFab,
@@ -51,6 +78,9 @@ export function ComposerView({
   reauthRequired,
   persistingSend,
   draftAttachmentName,
+  draftAttachmentMimeType,
+  draftAttachmentSize,
+  draftAttachmentImageUrl,
   hasDraftAttachment,
   draftText,
   composerFormRef,
@@ -70,11 +100,17 @@ export function ComposerView({
   const inputDisabled = persistingSend || activeTopicUnavailable || reauthRequired;
   const isSendActive = Boolean(draftText.trim() || hasDraftAttachment);
   const isNarrowMode = viewportMode === "narrow";
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const safeAreaRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const safeInsetRef = useRef(safeInset);
+
   useEffect(() => {
     safeInsetRef.current = safeInset;
   }, [safeInset]);
+
 
   useEffect(() => {
     const safeAreaEl = safeAreaRef.current;
@@ -93,6 +129,27 @@ export function ComposerView({
       },
     });
   }, [composerTextareaRef]);
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files ? Array.from(event.target.files) : [];
+    event.target.value = "";
+    onPickedFiles(files);
+  }
+
+  const displayName = draftAttachmentName ?? "附件";
+  const isImageDraft = Boolean(
+    draftAttachmentMimeType?.startsWith("image/") && draftAttachmentImageUrl,
+  );
+  const extLabel = extractFileExtensionLabel(displayName, draftAttachmentMimeType);
+  const sizeLabel = formatFileSize(draftAttachmentSize);
+
+  const attachButtonClassName = cn(
+    "waypoint-attach-button touch-none absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
+    isNarrowMode
+      ? "bottom-[9px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+      : "bottom-[7px] left-2 size-8 min-w-8",
+    inputDisabled && "opacity-50 cursor-not-allowed",
+  );
 
   return (
     <div
@@ -119,167 +176,312 @@ export function ComposerView({
         </Button>
       ) : null}
       <div className="waypoint-composer-track mx-auto w-full min-w-0 max-w-3xl pointer-events-none [&>*]:pointer-events-auto">
-      {composerError ? (
-        <Alert variant="destructive" className="mb-2 py-2 px-3">
-          <AlertDescription>{composerError}</AlertDescription>
-        </Alert>
-      ) : null}
-      {hasDraftAttachment ? (
-        <div
-          role="region"
-          aria-label="已选附件"
-          className="waypoint-draft-attachment touch-none flex items-center justify-between gap-3 px-3 py-1.5 mb-2 rounded-xl border border-border/80 bg-card/90 backdrop-blur-sm text-[13px]"
-        >
-          <span className="waypoint-draft-attachment-name min-w-0 truncate text-foreground">
-            {draftAttachmentName}
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground shrink-0"
-            disabled={inputDisabled}
-            onClick={onRemoveAttachment}
+        {composerError ? (
+          <Alert variant="destructive" className="mb-2 py-2 px-3">
+            <AlertDescription>{composerError}</AlertDescription>
+          </Alert>
+        ) : null}
+        {!activeTopicUnavailable &&
+        !reauthRequired &&
+        !persistingSend &&
+        !hasDraftAttachment &&
+        draftText === "/" ? (
+          <div
+            role="region"
+            aria-label="斜杠命令提示"
+            className="waypoint-slash-hints touch-none relative px-3 py-2 mb-2 rounded-xl border border-border/80 bg-card/95 backdrop-blur-sm shadow-xs"
           >
-            移除附件
-          </Button>
-        </div>
-      ) : null}
-      {!activeTopicUnavailable &&
-      !reauthRequired &&
-      !persistingSend &&
-      !hasDraftAttachment &&
-      draftText === "/" ? (
+            <ul className="waypoint-slash-hint-list flex flex-wrap gap-1.5 list-none m-0 p-0">
+              {SLASH_COMMAND_HINTS.map((command) => (
+                <li key={command}>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    className="waypoint-slash-hint-button h-7 px-2.5 font-mono text-[13px] border border-border/80 hover:bg-accent hover:text-accent-foreground"
+                    onClick={() => onSelectSlashCommand(command)}
+                  >
+                    {command}
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
         <div
-          role="region"
-          aria-label="斜杠命令提示"
-          className="waypoint-slash-hints touch-none relative px-3 py-2 mb-2 rounded-xl border border-border/80 bg-card/95 backdrop-blur-sm shadow-xs"
+          className={cn(
+            "waypoint-composer-shell min-w-0",
+            hasDraftAttachment &&
+              "rounded-[18px] border border-border/90 bg-background dark:bg-card/75 shadow-xs dark:shadow-none transition-colors focus-within:border-muted-foreground/45",
+          )}
         >
-          <ul className="waypoint-slash-hint-list flex flex-wrap gap-1.5 list-none m-0 p-0">
-            {SLASH_COMMAND_HINTS.map((command) => (
-              <li key={command}>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  className="waypoint-slash-hint-button h-7 px-2.5 font-mono text-[13px] border border-border/80 hover:bg-accent hover:text-accent-foreground"
-                  onClick={() => onSelectSlashCommand(command)}
+          {hasDraftAttachment ? (
+            <div
+              role="region"
+              aria-label="已选附件"
+              className="waypoint-draft-attachment touch-none flex items-center px-3 pt-2.5 pb-1"
+            >
+              {isImageDraft ? (
+                <div className="waypoint-draft-image-card relative inline-flex size-14 shrink-0 rounded-xl border border-border/75 overflow-hidden bg-secondary">
+                  <img
+                    src={draftAttachmentImageUrl}
+                    alt={displayName}
+                    className="block size-full object-cover"
+                  />
+                  <span className="waypoint-draft-attachment-name sr-only">
+                    {displayName}
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="移除附件"
+                    className="waypoint-draft-attachment-remove absolute top-1 right-1 size-5 min-w-5 min-h-5 rounded-full p-0 bg-background/90 text-foreground border border-border/80 shadow-xs hover:bg-background after:absolute after:-inset-2 after:content-['']"
+                    disabled={inputDisabled}
+                    onClick={onRemoveAttachment}
+                  >
+                    <X aria-hidden="true" strokeWidth={2.4} className="size-3" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="waypoint-draft-file-card inline-flex items-center gap-2.5 min-w-0 max-w-full sm:max-w-[280px] pl-2 pr-1.5 py-1.5 rounded-xl border border-border/80 bg-secondary/75">
+                  <span className="size-8 rounded-lg border border-border/70 bg-background flex items-center justify-center shrink-0 text-foreground">
+                    <MediaKindIcon
+                      filename={displayName}
+                      mimeType={draftAttachmentMimeType}
+                      className="size-4"
+                    />
+                  </span>
+                  <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+                    <span className="waypoint-draft-attachment-name block min-w-0 truncate text-[13px] font-medium leading-snug text-foreground">
+                      {displayName}
+                    </span>
+                    <span className="flex items-center gap-1.5 text-[11px] font-mono leading-snug text-muted-foreground">
+                      <span>{extLabel}</span>
+                      {sizeLabel ? <span>· {sizeLabel}</span> : null}
+                    </span>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    aria-label="移除附件"
+                    className="waypoint-draft-attachment-remove relative size-7 min-w-7 min-h-7 rounded-full p-0 text-muted-foreground hover:text-foreground hover:bg-background/70 shrink-0 after:absolute after:-inset-1.5 after:content-['']"
+                    disabled={inputDisabled}
+                    onClick={onRemoveAttachment}
+                  >
+                    <X aria-hidden="true" strokeWidth={2.1} className="size-3.5" />
+                  </Button>
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          <form
+            ref={composerFormRef}
+            className={cn(
+              "waypoint-composer relative box-border",
+              hasDraftAttachment
+                ? "border-0 bg-transparent shadow-none"
+                : "border border-border/90 bg-background dark:bg-card/75 shadow-xs dark:shadow-none transition-[border-color,border-radius] focus-within:border-muted-foreground/45",
+              composerTextareaScrollable ? "touch-pan-y" : "touch-none",
+              composerMultiline
+                ? cn(
+                    "multiline block",
+                    hasDraftAttachment ? "rounded-b-[18px]" : "rounded-[18px]",
+                    isNarrowMode
+                      ? hasDraftAttachment
+                        ? "min-h-[48px] pt-1.5 px-4 pb-[48px]"
+                        : "min-h-[50px] pt-3 px-4 pb-[48px]"
+                      : hasDraftAttachment
+                        ? "min-h-[44px] pt-1.5 px-4 pb-[44px]"
+                        : "min-h-[46px] pt-2.5 px-4 pb-[44px]",
+                  )
+                : cn(
+                    "flex items-center px-[48px]",
+                    hasDraftAttachment ? "rounded-b-[18px]" : "rounded-[23px]",
+                    isNarrowMode
+                      ? hasDraftAttachment
+                        ? "min-h-[48px] py-1.5"
+                        : "min-h-[50px] py-2"
+                      : hasDraftAttachment
+                        ? "min-h-[44px] py-1.5"
+                        : "min-h-[46px] py-1.5",
+                  ),
+            )}
+            onSubmit={onSendMessage}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              aria-label="选择附件"
+              className="waypoint-sr-only sr-only"
+              disabled={inputDisabled}
+              onChange={handleFileInputChange}
+            />
+            {isNarrowMode ? (
+              <>
+                <input
+                  ref={cameraInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  aria-label="拍照"
+                  className="waypoint-sr-only sr-only"
+                  disabled={inputDisabled}
+                  onChange={handleFileInputChange}
+                />
+                <input
+                  ref={galleryInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  aria-label="从图库选择"
+                  className="waypoint-sr-only sr-only"
+                  disabled={inputDisabled}
+                  onChange={handleFileInputChange}
+                />
+                <DropdownMenu
+                  modal={false}
+                  open={attachMenuOpen && !inputDisabled}
+                  onOpenChange={(nextOpen) => {
+                    if (inputDisabled) return;
+                    setAttachMenuOpen(nextOpen);
+                  }}
                 >
-                  {command}
-                </Button>
-              </li>
-            ))}
-          </ul>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label="添加附件"
+                      disabled={inputDisabled}
+                      className={attachButtonClassName}
+                    >
+                      <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
+                      <span className="waypoint-attach-button-text hidden">附件</span>
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    side="top"
+                    align="start"
+                    sideOffset={10}
+                    aria-labelledby={undefined}
+                    aria-label="选择附件方式"
+                    onCloseAutoFocus={(event) => event.preventDefault()}
+                    className="w-44 rounded-xl border-border/90 bg-popover/95 p-1.5 shadow-lg backdrop-blur-md"
+                  >
+                    <DropdownMenuItem
+                      className="min-h-11 gap-2.5 rounded-lg px-3 text-[15px] font-medium"
+                      onSelect={() => cameraInputRef.current?.click()}
+                    >
+                      <Camera
+                        aria-hidden="true"
+                        strokeWidth={1.85}
+                        className="size-4 text-muted-foreground"
+                      />
+                      <span>拍照</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="min-h-11 gap-2.5 rounded-lg px-3 text-[15px] font-medium"
+                      onSelect={() => galleryInputRef.current?.click()}
+                    >
+                      <ImageIcon
+                        aria-hidden="true"
+                        strokeWidth={1.85}
+                        className="size-4 text-muted-foreground"
+                      />
+                      <span>从图库选择</span>
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="min-h-11 gap-2.5 rounded-lg px-3 text-[15px] font-medium"
+                      onSelect={() => fileInputRef.current?.click()}
+                    >
+                      <FileText
+                        aria-hidden="true"
+                        strokeWidth={1.85}
+                        className="size-4 text-muted-foreground"
+                      />
+                      <span>选择文件</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
+            ) : (
+              <button
+                type="button"
+                aria-label="添加附件"
+                disabled={inputDisabled}
+                className={attachButtonClassName}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
+                <span className="waypoint-attach-button-text hidden">附件</span>
+              </button>
+            )}
+
+            <textarea
+              ref={composerTextareaRef}
+              aria-label="输入消息"
+              name="message"
+              rows={1}
+              disabled={inputDisabled}
+              value={draftText}
+              className={cn(
+                "block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[16px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto overscroll-contain box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed",
+                composerTextareaScrollable ? "touch-pan-y" : "touch-none",
+              )}
+              onFocus={onFocusTextarea}
+              onBlur={() => onBlurTextarea?.()}
+              onChange={(event) => onDraftTextChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (
+                  event.key === "Enter" &&
+                  !event.shiftKey &&
+                  !event.nativeEvent.isComposing &&
+                  viewportMode !== "narrow"
+                ) {
+                  event.preventDefault();
+                  onSendMessage(event);
+                }
+              }}
+              onPaste={(event) => {
+                if (!supportsFileDropAndPaste) {
+                  return;
+                }
+                const files = extractDataTransferFiles(event.clipboardData);
+                if (files.length === 0) {
+                  return;
+                }
+                event.preventDefault();
+                if (inputDisabled) {
+                  return;
+                }
+                onPickedFiles(files);
+              }}
+            />
+            <Button
+              type="submit"
+              variant={isSendActive ? "default" : "secondary"}
+              size="icon"
+              aria-label="发送"
+              className={cn(
+                "waypoint-send-button touch-none absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-colors",
+                isNarrowMode
+                  ? "bottom-[9px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
+                  : "bottom-[7px] right-2 size-8 min-w-8",
+                isSendActive
+                  ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
+                  : "bg-muted/80 text-muted-foreground/65 hover:bg-muted hover:text-muted-foreground",
+              )}
+              disabled={inputDisabled}
+              data-active={isSendActive}
+            >
+              <ArrowUp aria-hidden="true" strokeWidth={2} className="size-4" />
+              <span className="waypoint-sr-only sr-only">发送</span>
+            </Button>
+          </form>
         </div>
-      ) : null}
-      <form
-        ref={composerFormRef}
-        className={cn(
-          "waypoint-composer relative border border-border/90 bg-background dark:bg-card/75 shadow-xs dark:shadow-none box-border transition-[border-color,border-radius] focus-within:border-muted-foreground/45",
-          composerTextareaScrollable ? "touch-pan-y" : "touch-none",
-          composerMultiline
-            ? cn(
-                "multiline block rounded-[18px]",
-                isNarrowMode
-                  ? "min-h-[50px] pt-3 px-4 pb-[48px]"
-                  : "min-h-[46px] pt-2.5 px-4 pb-[44px]",
-              )
-            : cn(
-                "flex items-center rounded-[23px] px-[48px]",
-                isNarrowMode
-                  ? "min-h-[50px] py-2"
-                  : "min-h-[46px] py-1.5",
-              ),
-        )}
-        onSubmit={onSendMessage}
-      >
-        <label
-          className={cn(
-            "waypoint-attach-button touch-none absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
-            isNarrowMode
-              ? "bottom-[9px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-              : "bottom-[7px] left-2 size-8 min-w-8",
-            inputDisabled && "opacity-50 cursor-not-allowed",
-          )}
-        >
-          <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
-          <span className="waypoint-attach-button-text hidden">附件</span>
-          <input
-            type="file"
-            multiple
-            aria-label="选择附件"
-            className="waypoint-sr-only sr-only"
-            disabled={inputDisabled}
-            onChange={(event) => {
-              const files = event.target.files
-                ? Array.from(event.target.files)
-                : [];
-              event.target.value = "";
-              onPickedFiles(files);
-            }}
-          />
-        </label>
-        <textarea
-          ref={composerTextareaRef}
-          aria-label="输入消息"
-          name="message"
-          rows={1}
-          disabled={inputDisabled}
-          value={draftText}
-          className={cn(
-            "block w-full m-0 py-0.5 px-0 border-0 outline-none shadow-none ring-0 focus-visible:ring-0 bg-transparent font-sans text-[16px] leading-[1.45] text-foreground caret-foreground min-h-[1.45em] max-h-[calc(1.45em*4)] resize-none overflow-y-auto overscroll-contain box-border [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden disabled:opacity-60 disabled:cursor-not-allowed",
-            composerTextareaScrollable ? "touch-pan-y" : "touch-none",
-          )}
-          onFocus={onFocusTextarea}
-          onBlur={() => onBlurTextarea?.()}
-          onChange={(event) => onDraftTextChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (
-              event.key === "Enter" &&
-              !event.shiftKey &&
-              !event.nativeEvent.isComposing &&
-              viewportMode !== "narrow"
-            ) {
-              event.preventDefault();
-              onSendMessage(event);
-            }
-          }}
-          onPaste={(event) => {
-            if (!supportsFileDropAndPaste) {
-              return;
-            }
-            const files = extractDataTransferFiles(event.clipboardData);
-            if (files.length === 0) {
-              return;
-            }
-            event.preventDefault();
-            if (inputDisabled) {
-              return;
-            }
-            onPickedFiles(files);
-          }}
-        />
-        <Button
-          type="submit"
-          variant={isSendActive ? "default" : "secondary"}
-          size="icon"
-          aria-label="发送"
-          className={cn(
-            "waypoint-send-button touch-none absolute z-1 m-0 p-0 border-0 rounded-full shrink-0 transition-colors",
-            isNarrowMode
-              ? "bottom-[9px] right-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-              : "bottom-[7px] right-2 size-8 min-w-8",
-            isSendActive
-              ? "bg-primary text-primary-foreground shadow-xs hover:opacity-90"
-              : "bg-muted/80 text-muted-foreground/65 hover:bg-muted hover:text-muted-foreground",
-          )}
-          disabled={inputDisabled}
-          data-active={isSendActive}
-        >
-          <ArrowUp aria-hidden="true" strokeWidth={2} className="size-4" />
-          <span className="waypoint-sr-only sr-only">发送</span>
-        </Button>
-      </form>
       </div>
     </div>
   );
