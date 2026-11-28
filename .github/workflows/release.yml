@@ -1,4 +1,4 @@
-name: Release Desktop
+name: Release
 
 on:
   push:
@@ -7,12 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       platforms:
-        description: Desktop platforms to build
+        description: Platforms to build
         required: false
         default: all
         type: choice
         options:
           - all
+          - desktop
+          - android
           - macos
           - windows
       macos_target:
@@ -33,7 +35,11 @@ on:
           - x86_64-pc-windows-msvc
           - aarch64-pc-windows-msvc
       version:
-        description: Optional semver override (e.g. 0.1.0); defaults to tag or tauri.conf.json
+        description: Optional semver override (e.g. 0.1.0); defaults to tag or manifest version
+        required: false
+        type: string
+      build_number:
+        description: Optional monotonic build number override (1..2100000000) for Android and macOS
         required: false
         type: string
 
@@ -44,12 +50,18 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  ANDROID_BUILD_TOOLS_VERSION: "36.1.0"
+  ANDROID_COMPILE_SDK_VERSION: "37.0"
+  ANDROID_NDK_VERSION: "27.3.13750724"
+
 jobs:
   meta:
     name: Resolve release metadata
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
+      build_android: ${{ steps.resolve.outputs.build_android }}
       build_macos: ${{ steps.resolve.outputs.build_macos }}
       build_windows: ${{ steps.resolve.outputs.build_windows }}
       macos_target: ${{ steps.resolve.outputs.macos_target }}
@@ -58,9 +70,15 @@ jobs:
       windows_runner: ${{ steps.resolve.outputs.windows_runner }}
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
+      build_number: ${{ steps.resolve.outputs.build_number }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
 
       - name: Resolve build configuration
         id: resolve
@@ -69,6 +87,7 @@ jobs:
           INPUT_MACOS_TARGET: ${{ inputs.macos_target }}
           INPUT_WINDOWS_TARGET: ${{ inputs.windows_target }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
         run: |
           set -euo pipefail
           PLATFORMS="${INPUT_PLATFORMS:-all}"
@@ -76,19 +95,23 @@ jobs:
             PLATFORMS="all"
           fi
           case "$PLATFORMS" in
-            all|macos|windows) ;;
+            all|desktop|android|macos|windows) ;;
             *)
               echo "Unsupported platforms input '${PLATFORMS}'." >&2
               exit 1
               ;;
           esac
 
+          BUILD_ANDROID="false"
           BUILD_MACOS="false"
           BUILD_WINDOWS="false"
-          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "macos" ]; then
+          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "android" ]; then
+            BUILD_ANDROID="true"
+          fi
+          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "desktop" ] || [ "$PLATFORMS" = "macos" ]; then
             BUILD_MACOS="true"
           fi
-          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "windows" ]; then
+          if [ "$PLATFORMS" = "all" ] || [ "$PLATFORMS" = "desktop" ] || [ "$PLATFORMS" = "windows" ]; then
             BUILD_WINDOWS="true"
           fi
 
@@ -120,36 +143,28 @@ jobs:
               ;;
           esac
 
-          PKG_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
-          TAURI_VERSION="$(node -p "JSON.parse(require('fs').readFileSync('src-tauri/tauri.conf.json','utf8')).version")"
-          CARGO_VERSION="$(node -p "require('fs').readFileSync('src-tauri/Cargo.toml','utf8').match(/^\\[package\\][\\s\\S]*?^version\\s*=\\s*\"([^\"]+)\"/m)?.[1] ?? ''")"
-          if [ "$PKG_VERSION" != "$TAURI_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "Manifest version mismatch: package.json=${PKG_VERSION}, tauri.conf.json=${TAURI_VERSION}, Cargo.toml=${CARGO_VERSION}" >&2
-            exit 1
-          fi
+          MANIFEST_VERSION="$(node --input-type=module -e "import { assertConsistentVersions } from './scripts/lib/release-version.mjs'; console.log(assertConsistentVersions());")"
 
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
             RELEASE_TAG="${GITHUB_REF_NAME}"
-            RELEASE_VERSION="${RELEASE_TAG#v}"
-            if [ "$RELEASE_VERSION" != "$PKG_VERSION" ]; then
-              echo "Release tag version '${RELEASE_VERSION}' does not match manifest version '${PKG_VERSION}'." >&2
+            RELEASE_VERSION="$(node --input-type=module -e "import { parseStrictSemver } from './scripts/lib/release-version.mjs'; console.log(parseStrictSemver(process.argv[1], 'tag').version);" "$RELEASE_TAG")"
+            if [ "$RELEASE_VERSION" != "$MANIFEST_VERSION" ]; then
+              echo "Release tag version '${RELEASE_VERSION}' does not match manifest version '${MANIFEST_VERSION}'." >&2
               exit 1
             fi
           else
             if [ -n "${INPUT_VERSION}" ]; then
-              RELEASE_VERSION="${INPUT_VERSION#v}"
+              RELEASE_VERSION="$(node --input-type=module -e "import { parseStrictSemver } from './scripts/lib/release-version.mjs'; console.log(parseStrictSemver(process.argv[1], 'input version').version);" "$INPUT_VERSION")"
             else
-              RELEASE_VERSION="$TAURI_VERSION"
+              RELEASE_VERSION="$MANIFEST_VERSION"
             fi
             RELEASE_TAG="v${RELEASE_VERSION}"
           fi
 
-          if ! printf '%s' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "Invalid release semver '${RELEASE_VERSION}'. Expected strict X.Y.Z." >&2
-            exit 1
-          fi
+          BUILD_NUMBER="$(node --input-type=module -e "import { resolveBuildNumber } from './scripts/lib/build-common.mjs'; console.log(resolveBuildNumber({ buildNumberRaw: process.env.INPUT_BUILD_NUMBER?.trim() || undefined, label: 'release build_number' }));")"
 
           {
+            echo "build_android=${BUILD_ANDROID}"
             echo "build_macos=${BUILD_MACOS}"
             echo "build_windows=${BUILD_WINDOWS}"
             echo "macos_target=${MACOS_TARGET}"
@@ -158,6 +173,7 @@ jobs:
             echo "windows_runner=${WINDOWS_RUNNER}"
             echo "version=${RELEASE_VERSION}"
             echo "tag=${RELEASE_TAG}"
+            echo "build_number=${BUILD_NUMBER}"
           } >> "$GITHUB_OUTPUT"
 
   verify:
@@ -189,6 +205,176 @@ jobs:
 
       - name: Build
         run: npx vite build
+
+  rust-checks:
+    name: Verify Rust formatting, clippy, and unit tests
+    needs: meta
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux Tauri dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libglib2.0-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: linux-rust
+
+      - name: Check Rust formatting, clippy, and unit tests
+        working-directory: src-tauri
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+  build-android:
+    name: Build Android Release APK
+    needs: meta
+    if: needs.meta.outputs.build_android == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK & NDK
+        run: |
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+            "platforms;android-${ANDROID_COMPILE_SDK_VERSION}" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          key: android-aarch64
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Decode Android release keystore
+        env:
+          WAYPOINT_ANDROID_KEYSTORE_BASE64: ${{ secrets.WAYPOINT_ANDROID_KEYSTORE_BASE64 }}
+          WAYPOINT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.WAYPOINT_ANDROID_KEYSTORE_PASSWORD }}
+          WAYPOINT_ANDROID_KEY_PASSWORD: ${{ secrets.WAYPOINT_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WAYPOINT_ANDROID_KEYSTORE_BASE64}" ] || [ -z "${WAYPOINT_ANDROID_KEYSTORE_PASSWORD}" ] || [ -z "${WAYPOINT_ANDROID_KEY_PASSWORD}" ]; then
+            echo "Android release keystore secrets are not configured." >&2
+            exit 1
+          fi
+          keystore_path="${RUNNER_TEMP}/waypoint-release.jks"
+          printf '%s' "${WAYPOINT_ANDROID_KEYSTORE_BASE64}" | base64 -d > "${keystore_path}"
+          test -s "${keystore_path}"
+          {
+            echo "WAYPOINT_ANDROID_KEYSTORE_PATH=${keystore_path}"
+            echo "WAYPOINT_ANDROID_KEYSTORE_PASSWORD=${WAYPOINT_ANDROID_KEYSTORE_PASSWORD}"
+            echo "WAYPOINT_ANDROID_KEY_ALIAS=waypoint-release"
+            echo "WAYPOINT_ANDROID_KEY_PASSWORD=${WAYPOINT_ANDROID_KEY_PASSWORD}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build Android Release APK (aarch64, release-signed, R8 enabled)
+        env:
+          RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+          BUILD_NUMBER: ${{ needs.meta.outputs.build_number }}
+        run: |
+          node scripts/build-android-apk.mjs \
+            --release \
+            --version "$RELEASE_VERSION" \
+            --build-number "$BUILD_NUMBER" \
+            --out-dir artifacts/android
+
+      - name: Verify APK is signed with the existing release certificate
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          APKS=(artifacts/android/*.apk)
+          test "${#APKS[@]}" -eq 1
+          EXPECTED_SHA256="e188240857f673865c523198b8f5f914ad39b3a142397e4dd367d268eb890650"
+          CERTS="$("${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/apksigner" verify --print-certs "${APKS[0]}")"
+          grep -Fq "${EXPECTED_SHA256}" <<< "${CERTS}"
+
+      - name: Run Android JVM unit tests
+        working-directory: src-tauri/gen/android
+        run: ./gradlew :app:testUniversalDebugUnitTest --no-daemon
+
+      - name: Verify R8-kept bridge classes in Release APK
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          APKS=(artifacts/android/*.apk)
+          test "${#APKS[@]}" -eq 1
+          APK_PATH="${APKS[0]}"
+          test -f "$APK_PATH"
+          DEX_TMP="$(mktemp -d)"
+          trap 'rm -rf "$DEX_TMP"' EXIT
+          unzip -qo "$APK_PATH" 'classes*.dex' -d "$DEX_TMP"
+          DEX_DUMP_FILE="${DEX_TMP}/dexdump.txt"
+          "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}/dexdump" "${DEX_TMP}"/classes*.dex > "$DEX_DUMP_FILE"
+          for symbol in \
+            "Lapp/waypoint/client/MainActivity;" \
+            "Lapp/waypoint/client/MainActivity\$WaypointAndroidBridge;" \
+            "getMediaCacheDirPath" \
+            "openMediaFile" \
+            "setSystemAppearance" \
+            "setSystemBackEnabled" \
+            "Lapp/tauri/opener/OpenerPlugin;" \
+            "Lapp/waypoint/client/Rust;"; do
+            grep -Fq "$symbol" "$DEX_DUMP_FILE" || {
+              echo "Missing R8-kept symbol in DEX: $symbol"
+              exit 1
+            }
+          done
+
+      - name: Upload Android Release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          # Single-file upload. archive: false keeps the APK itself; the artifact name is the filename.
+          path: artifacts/android/*.apk
+          archive: false
+          retention-days: 30
 
   build-macos:
     name: Build macOS Release DMG
@@ -231,6 +417,7 @@ jobs:
         env:
           MACOS_TARGET: ${{ needs.meta.outputs.macos_target }}
           RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+          BUILD_NUMBER: ${{ needs.meta.outputs.build_number }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -243,6 +430,7 @@ jobs:
             --release \
             --target "$MACOS_TARGET" \
             --version "$RELEASE_VERSION" \
+            --build-number "$BUILD_NUMBER" \
             --out-dir artifacts/macos
 
       - name: Upload macOS Release artifact
@@ -311,10 +499,18 @@ jobs:
 
   draft-release:
     name: Create or Update Draft GitHub Release
-    needs: [meta, verify, build-macos, build-windows]
+    needs: [meta, verify, rust-checks, build-android, build-macos, build-windows]
     permissions:
       contents: write
-    if: ${{ always() && needs.meta.result == 'success' && needs.verify.result == 'success' && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && (needs.build-macos.result == 'success' || needs.build-windows.result == 'success') }}
+    if: >-
+      always() &&
+      needs.meta.result == 'success' &&
+      needs.verify.result == 'success' &&
+      needs.rust-checks.result == 'success' &&
+      (needs.meta.outputs.build_android != 'true' || needs.build-android.result == 'success') &&
+      (needs.meta.outputs.build_macos != 'true' || needs.build-macos.result == 'success') &&
+      (needs.meta.outputs.build_windows != 'true' || needs.build-windows.result == 'success') &&
+      (needs.build-android.result == 'success' || needs.build-macos.result == 'success' || needs.build-windows.result == 'success')
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
@@ -331,21 +527,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.meta.outputs.version }}
+          BUILD_NUMBER: ${{ needs.meta.outputs.build_number }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          INSTALLERS=(release-artifacts/*.dmg release-artifacts/*.exe)
+          INSTALLERS=(release-artifacts/*.apk release-artifacts/*.dmg release-artifacts/*.exe)
           if [ "${#INSTALLERS[@]}" -eq 0 ]; then
             echo "No release artifacts found in release-artifacts/." >&2
             exit 1
           fi
-
-          BASENAMES=()
-          for f in "${INSTALLERS[@]}"; do
-            BASENAMES+=("$(basename "$f")")
-          done
-          (cd release-artifacts && sha256sum "${BASENAMES[@]}" > SHA256SUMS.txt)
-          FILES=("${INSTALLERS[@]}" release-artifacts/SHA256SUMS.txt)
 
           VIEW_ERR_FILE="$(mktemp)"
           trap 'rm -f "$VIEW_ERR_FILE"' EXIT
@@ -354,17 +545,59 @@ jobs:
               echo "Release $RELEASE_TAG is already published (not a draft); refusing to overwrite." >&2
               exit 1
             fi
+
+            mkdir -p merged-artifacts
+            ASSET_COUNT="$(gh release view "$RELEASE_TAG" --json assets -q '.assets | length')"
+            if [ "$ASSET_COUNT" -gt 0 ]; then
+              gh release download "$RELEASE_TAG" --dir merged-artifacts
+            fi
+            rm -f merged-artifacts/SHA256SUMS.txt
+            cp -f "${INSTALLERS[@]}" merged-artifacts/
+
+            MERGED_INSTALLERS=(merged-artifacts/*.apk merged-artifacts/*.dmg merged-artifacts/*.exe)
+            MERGED_BASENAMES=()
+            for f in "${MERGED_INSTALLERS[@]}"; do
+              MERGED_BASENAMES+=("$(basename "$f")")
+            done
+            IFS=$'\n' SORTED_BASENAMES=($(printf '%s\n' "${MERGED_BASENAMES[@]}" | LC_ALL=C sort))
+            unset IFS
+            (cd merged-artifacts && sha256sum "${SORTED_BASENAMES[@]}" > SHA256SUMS.txt)
+            SHA_FILE="merged-artifacts/SHA256SUMS.txt"
+
             gh release edit "$RELEASE_TAG" --target "$GITHUB_SHA"
-            gh release upload "$RELEASE_TAG" "${FILES[@]}" --clobber
+            gh release upload "$RELEASE_TAG" "${INSTALLERS[@]}" "$SHA_FILE" --clobber
           else
             VIEW_ERR="$(cat "$VIEW_ERR_FILE")"
             if ! printf '%s' "$VIEW_ERR" | grep -qi "release not found"; then
               echo "$VIEW_ERR" >&2
               exit 1
             fi
-            gh release create "$RELEASE_TAG" "${FILES[@]}" \
+
+            BASENAMES=()
+            for f in "${INSTALLERS[@]}"; do
+              BASENAMES+=("$(basename "$f")")
+            done
+            IFS=$'\n' SORTED_BASENAMES=($(printf '%s\n' "${BASENAMES[@]}" | LC_ALL=C sort))
+            unset IFS
+            (cd release-artifacts && sha256sum "${SORTED_BASENAMES[@]}" > SHA256SUMS.txt)
+            SHA_FILE="release-artifacts/SHA256SUMS.txt"
+
+            gh release create "$RELEASE_TAG" "${INSTALLERS[@]}" "$SHA_FILE" \
               --draft \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_TAG" \
               --generate-notes
           fi
+
+          {
+            echo "## Draft Release Ready: ${RELEASE_TAG}"
+            echo ""
+            echo "- **Version**: \`${RELEASE_VERSION}\`"
+            echo "- **Build Number (Android / macOS)**: \`${BUILD_NUMBER}\`"
+            echo "- **Target Commit**: \`${GITHUB_SHA}\`"
+            echo ""
+            echo "### SHA256SUMS.txt"
+            echo '```'
+            cat "$SHA_FILE"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

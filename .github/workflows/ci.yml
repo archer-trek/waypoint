@@ -120,7 +120,7 @@ jobs:
               RUN_MACOS="true"
               RUN_WINDOWS="true"
             fi
-            if printf '%s\n' "$CHANGED" | grep -Eq '^(src-tauri/gen/android/|scripts/build-android-apk\.mjs|Makefile)'; then
+            if printf '%s\n' "$CHANGED" | grep -Eq '^(src-tauri/gen/android/|scripts/build-android-apk\.mjs|\.github/workflows/release\.yml|Makefile)'; then
               RUN_ANDROID="true"
             fi
             if printf '%s\n' "$CHANGED" | grep -Eq '^(scripts/build-macos-dmg\.mjs|\.github/workflows/release\.yml|Makefile)'; then

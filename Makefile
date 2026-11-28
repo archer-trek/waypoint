@@ -1,4 +1,4 @@
-.PHONY: all build-android-apk apk build-macos-dmg dmg build-windows-installer win test-android-jvm clean help
+.PHONY: all build-android-apk apk build-macos-dmg dmg build-windows-installer win release-prepare release-tag test-android-jvm clean help
 
 ANDROID_NDK_VERSION := 27.3.13750724
 HOST_OS := $(shell uname -s)
@@ -72,6 +72,19 @@ build-windows-installer:
 
 win: build-windows-installer
 
+release-prepare:
+	node scripts/prepare-release.mjs \
+		$(if $(VERSION),--version "$(VERSION)",) \
+		$(if $(filter 1 true yes,$(PR)),--pr,) \
+		$(if $(filter 1 true yes,$(SKIP_CHECKS)),--skip-checks,) \
+		$(if $(filter 1 true yes,$(DRY_RUN)),--dry-run,)
+
+release-tag:
+	node scripts/tag-release.mjs \
+		$(if $(VERSION),--version "$(VERSION)",) \
+		$(if $(filter 1 true yes,$(SKIP_CI_CHECK)),--skip-ci-check,) \
+		$(if $(filter 1 true yes,$(DRY_RUN)),--dry-run,)
+
 test-android-jvm:
 	@if [ ! -f src-tauri/gen/android/tauri.settings.gradle ] || [ ! -f src-tauri/gen/android/app/tauri.build.gradle.kts ]; then \
 		echo "Missing generated Tauri Gradle files (src-tauri/gen/android/tauri.settings.gradle / app/tauri.build.gradle.kts)." >&2; \
@@ -112,6 +125,10 @@ help:
 	@echo "      Build macOS DMG (run on macOS)"
 	@echo "  make [build-windows-installer|win] [OUT=path] [OUT_DIR=dir] [TARGET=x64|arm64] [VERSION=X.Y.Z] [RELEASE=1]"
 	@echo "      Build Windows NSIS installer (run on Windows)"
+	@echo "  make release-prepare VERSION=<patch|minor|major|X.Y.Z> [PR=1] [SKIP_CHECKS=1] [DRY_RUN=1]"
+	@echo "      Prepare release branch chore/release-vX.Y.Z with synchronized manifest and lockfile versions"
+	@echo "  make release-tag [VERSION=X.Y.Z] [SKIP_CI_CHECK=1] [DRY_RUN=1]"
+	@echo "      Verify main & CI, then create and push annotated tag vX.Y.Z"
 	@echo "  make test-android-jvm"
 	@echo "      Run Android JVM unit tests (requires prior Android Tauri build)"
 	@echo "  make clean"

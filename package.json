@@ -20,7 +20,9 @@
     "prepare": "node -e \"import('node:fs').then(async ({existsSync})=>{if(!existsSync('.git'))return;const {spawnSync}=await import('node:child_process');spawnSync('git',['config','core.hooksPath','.githooks'],{stdio:'ignore'});})\"",
     "build:android": "node scripts/build-android-apk.mjs",
     "build:macos": "node scripts/build-macos-dmg.mjs",
-    "build:windows": "node scripts/build-windows-installer.mjs"
+    "build:windows": "node scripts/build-windows-installer.mjs",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release:tag": "node scripts/tag-release.mjs"
   },
   "dependencies": {
     "@radix-ui/react-alert-dialog": "^1.2.1",
