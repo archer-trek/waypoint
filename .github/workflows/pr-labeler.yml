@@ -1,0 +1,74 @@
+name: PR Title & Labeler
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pr-title-and-label:
+    name: Validate PR title & sync release label
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate PR title and apply release label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) return;
+
+            if (pr.user?.type === 'Bot') {
+              core.info(`Skipping Conventional Commit check for bot author: ${pr.user.login}`);
+              return;
+            }
+
+            const title = (pr.title || '').trim();
+            const match = title.match(/^(feat|fix|build|ci|chore|docs|refactor|perf|test)(\([^)]+\))?: .+/);
+            if (!match) {
+              core.setFailed(
+                `PR title "${title}" must follow Conventional Commits, e.g. "feat(topic): add ..." or "fix: ...".`,
+              );
+              return;
+            }
+
+            const type = match[1];
+            const labelMap = {
+              feat: 'feat',
+              fix: 'fix',
+              perf: 'enhancement',
+              build: 'build',
+              ci: 'ci',
+              docs: 'ignore-for-release',
+              test: 'ignore-for-release',
+              chore: 'ignore-for-release',
+              refactor: 'ignore-for-release',
+            };
+            const targetLabel = labelMap[type];
+            const managedLabels = new Set(Object.values(labelMap));
+            const currentLabels = new Set((pr.labels || []).map((l) => l.name));
+
+            for (const existing of currentLabels) {
+              if (managedLabels.has(existing) && existing !== targetLabel) {
+                await github.rest.issues.removeLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  name: existing,
+                });
+              }
+            }
+
+            if (!currentLabels.has(targetLabel)) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                labels: [targetLabel],
+              });
+            }
+
+            core.info(`PR #${pr.number} validated (${type}) -> label "${targetLabel}"`);

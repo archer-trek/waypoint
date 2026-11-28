@@ -582,11 +582,31 @@ jobs:
             (cd release-artifacts && sha256sum "${SORTED_BASENAMES[@]}" > SHA256SUMS.txt)
             SHA_FILE="release-artifacts/SHA256SUMS.txt"
 
+            NOTES_FILE="$(mktemp)"
+            {
+              if ! gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                -f "tag_name=${RELEASE_TAG}" \
+                -f "target_commitish=${GITHUB_SHA}" \
+                -q .body; then
+                echo "## Waypoint ${RELEASE_TAG}"
+              fi
+              echo ""
+              echo "## 安装包与校验说明"
+              echo ""
+              echo "| 平台 | 文件 | 说明 |"
+              echo "| --- | --- | --- |"
+              echo "| Android (\`arm64-v8a\`) | \`Waypoint-${RELEASE_VERSION}-arm64.apk\` | 已使用发布密钥签名，可直接侧载安装 |"
+              echo "| macOS (Apple Silicon) | \`Waypoint-${RELEASE_VERSION}-arm64.dmg\` | 当前为 ad-hoc 签名（未经过 Apple 公证），首次打开若提示无法验证，请在「系统设置 → 隐私与安全性」中点击“仍要打开” |"
+              echo "| Windows (\`x64\`) | \`Waypoint-${RELEASE_VERSION}-x64-setup.exe\` | NSIS 安装程序（未配置商用代码签名，SmartScreen 提示时可选择“仍要运行”） |"
+              echo "| 校验和 | \`SHA256SUMS.txt\` | 所有安装包的 SHA-256 校验摘要 |"
+            } > "$NOTES_FILE"
+
             gh release create "$RELEASE_TAG" "${INSTALLERS[@]}" "$SHA_FILE" \
               --draft \
               --target "$GITHUB_SHA" \
               --title "$RELEASE_TAG" \
-              --generate-notes
+              --notes-file "$NOTES_FILE"
+            rm -f "$NOTES_FILE"
           fi
 
           {
