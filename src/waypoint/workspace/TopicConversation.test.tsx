@@ -162,6 +162,7 @@ describe("TopicHeaderView (#89)", () => {
     expect(headerBar).not.toHaveClass("max-w-3xl", "mx-auto");
 
     const trigger = screen.getByRole("button", { name: "话题操作" });
+    expect(trigger).not.toHaveClass("active:scale-92");
     await user.click(trigger);
     expect(onToggleOverflowMenu).toHaveBeenCalledTimes(1);
 
@@ -227,6 +228,8 @@ describe("TopicHeaderView (#89)", () => {
     render(<NarrowHeaderHarness />);
 
     const trigger = screen.getByRole("button", { name: "话题操作" });
+    expect(trigger).not.toHaveClass("active:scale-92");
+    expect(trigger.querySelector("span")).toHaveClass("group-active:scale-92");
     await user.click(trigger);
 
     // Anchored Pull-down DropdownMenu should be mounted right under the trigger
@@ -1525,6 +1528,83 @@ describe("Unified composer attachment tray, mobile picker, and timeline file car
     expect(attachmentRegion).toHaveTextContent("spec.pdf");
     expect(attachmentRegion).toHaveTextContent("PDF");
     expect(attachmentRegion).toHaveTextContent("2.4 MB");
+  });
+
+  test("narrow attachment menu keeps trigger anchor unscaled and preserves textarea focus on pointer open", async () => {
+    const user = userEvent.setup();
+    const textareaRef = createRef<HTMLTextAreaElement>();
+
+    render(
+      <ComposerView
+        safeInset={300}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        hasDraftAttachment={false}
+        draftText="hello"
+        composerFormRef={createRef()}
+        composerTextareaRef={textareaRef}
+        viewportMode="narrow"
+        supportsFileDropAndPaste={false}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={vi.fn()}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+
+    const attachTrigger = screen.getByRole("button", { name: "添加附件" });
+    expect(attachTrigger).toHaveClass("group");
+    expect(attachTrigger).not.toHaveClass("active:scale-92");
+    expect(attachTrigger.querySelector("span")).toHaveClass("group-active:scale-92");
+
+    const textarea = screen.getByRole("textbox", { name: "输入消息" });
+    textarea.focus();
+    expect(textarea).toHaveFocus();
+
+    await user.click(attachTrigger);
+    expect(await screen.findByRole("menu", { name: "选择附件方式" })).toBeInTheDocument();
+    expect(textarea).toHaveFocus();
+
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("menu", { name: "选择附件方式" })).not.toBeInTheDocument();
+
+    render(
+      <ComposerView
+        safeInset={0}
+        showScrollBottomFab={false}
+        composerMultiline={false}
+        activeTopicUnavailable={false}
+        reauthRequired={false}
+        persistingSend={false}
+        hasDraftAttachment={false}
+        draftText=""
+        composerFormRef={createRef()}
+        composerTextareaRef={createRef()}
+        viewportMode="narrow"
+        supportsFileDropAndPaste={false}
+        onScrollToBottom={vi.fn()}
+        onRemoveAttachment={vi.fn()}
+        onSelectSlashCommand={vi.fn()}
+        onSendMessage={vi.fn()}
+        onPickedFiles={vi.fn()}
+        onFocusTextarea={vi.fn()}
+        onDraftTextChange={vi.fn()}
+        extractDataTransferFiles={() => []}
+      />,
+    );
+    const triggers = screen.getAllByRole("button", { name: "添加附件" });
+    const keyboardTrigger = triggers[1]!;
+    keyboardTrigger.focus();
+    await user.keyboard("{Enter}");
+    const menus = await screen.findAllByRole("menu", { name: "选择附件方式" });
+    expect(menus[0]).toContainElement(document.activeElement as HTMLElement);
   });
 
   test("TimelineView renders structured file cards with extension and size metadata without box-in-box nesting", async () => {

@@ -30,12 +30,18 @@ function DropdownMenuTrigger({
   );
 }
 
+type DropdownMenuContentProps = ComponentProps<
+  typeof DropdownMenuPrimitive.Content
+> & {
+  onOpenAutoFocus?: (event: Event) => void;
+};
+
 /** Floating menu surface styled with popover semantic tokens. */
 function DropdownMenuContent({
   className,
   sideOffset = 4,
   ...props
-}: ComponentProps<typeof DropdownMenuPrimitive.Content>) {
+}: DropdownMenuContentProps) {
   return (
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.Content
@@ -45,7 +51,7 @@ function DropdownMenuContent({
           "z-50 min-w-36 overflow-hidden rounded-lg border border-border bg-popover p-1 text-popover-foreground shadow-md outline-none",
           className,
         )}
-        {...props}
+        {...(props as ComponentProps<typeof DropdownMenuPrimitive.Content>)}
       />
     </DropdownMenuPrimitive.Portal>
   );

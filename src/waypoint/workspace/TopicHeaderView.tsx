@@ -189,13 +189,20 @@ export function TopicHeaderView({
                   size="icon"
                   aria-label="话题操作"
                   className={cn(
-                    "waypoint-overflow-trigger rounded-full text-foreground hover:bg-accent",
+                    "waypoint-overflow-trigger group rounded-full text-foreground hover:bg-transparent",
                     isNarrow
-                      ? "size-11 min-w-11 min-h-11 active:scale-92"
+                      ? "size-11 min-w-11 min-h-11"
                       : "size-9",
                   )}
                 >
-                  <MoreHorizontal aria-hidden="true" className="size-5" />
+                  <span
+                    className={cn(
+                      "inline-flex size-full items-center justify-center rounded-full transition-[transform,background-color] group-hover:bg-accent",
+                      isNarrow && "group-active:scale-92",
+                    )}
+                  >
+                    <MoreHorizontal aria-hidden="true" className="size-5" />
+                  </span>
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent
