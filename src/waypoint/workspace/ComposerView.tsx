@@ -106,6 +106,7 @@ export function ComposerView({
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const safeInsetRef = useRef(safeInset);
+  const attachOpenedByPointerRef = useRef(false);
 
   useEffect(() => {
     safeInsetRef.current = safeInset;
@@ -143,11 +144,12 @@ export function ComposerView({
   const extLabel = extractFileExtensionLabel(displayName, draftAttachmentMimeType);
   const sizeLabel = formatFileSize(draftAttachmentSize);
 
+  // Keep DropdownMenuTrigger unscaled so Floating UI never measures an active:scale-92 rect and jumps on pointerup.
   const attachButtonClassName = cn(
-    "waypoint-attach-button touch-none absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full bg-muted/80 text-muted-foreground cursor-pointer shrink-0 transition-colors hover:bg-muted hover:text-foreground",
+    "waypoint-attach-button touch-none absolute z-1 m-0 inline-flex items-center justify-center p-0 border-0 rounded-full cursor-pointer shrink-0 transition-colors",
     isNarrowMode
-      ? "bottom-[9px] left-2 size-8 min-w-8 min-h-8 after:absolute after:-inset-1.5 after:content-[''] active:scale-92"
-      : "bottom-[7px] left-2 size-8 min-w-8",
+      ? "group bottom-[9px] left-2 size-8 min-w-8 min-h-8 bg-transparent text-muted-foreground after:absolute after:-inset-1.5 after:content-['']"
+      : "bottom-[7px] left-2 size-8 min-w-8 bg-muted/80 text-muted-foreground hover:bg-muted hover:text-foreground",
     inputDisabled && "opacity-50 cursor-not-allowed",
   );
 
@@ -348,6 +350,9 @@ export function ComposerView({
                   open={attachMenuOpen && !inputDisabled}
                   onOpenChange={(nextOpen) => {
                     if (inputDisabled) return;
+                    if (!nextOpen) {
+                      attachOpenedByPointerRef.current = false;
+                    }
                     setAttachMenuOpen(nextOpen);
                   }}
                 >
@@ -357,8 +362,21 @@ export function ComposerView({
                       aria-label="添加附件"
                       disabled={inputDisabled}
                       className={attachButtonClassName}
+                      onPointerDown={() => {
+                        attachOpenedByPointerRef.current = true;
+                      }}
+                      onKeyDown={() => {
+                        attachOpenedByPointerRef.current = false;
+                      }}
                     >
-                      <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
+                      <span
+                        className={cn(
+                          "inline-flex size-full items-center justify-center rounded-full bg-muted/80 text-muted-foreground transition-[transform,background-color,color] group-hover:bg-muted group-hover:text-foreground",
+                          !inputDisabled && "group-active:scale-92",
+                        )}
+                      >
+                        <Plus aria-hidden="true" strokeWidth={1.9} className="size-[18px]" />
+                      </span>
                       <span className="waypoint-attach-button-text hidden">附件</span>
                     </button>
                   </DropdownMenuTrigger>
@@ -368,6 +386,15 @@ export function ComposerView({
                     sideOffset={10}
                     aria-labelledby={undefined}
                     aria-label="选择附件方式"
+                    onOpenAutoFocus={(event) => {
+                      if (
+                        attachOpenedByPointerRef.current ||
+                        document.activeElement === composerTextareaRef.current ||
+                        isViewportKeyboardConstrained(safeInsetRef.current)
+                      ) {
+                        event.preventDefault();
+                      }
+                    }}
                     onCloseAutoFocus={(event) => event.preventDefault()}
                     className="w-44 rounded-xl border-border/90 bg-popover/95 p-1.5 shadow-lg backdrop-blur-md"
                   >
