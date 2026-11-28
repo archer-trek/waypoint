@@ -227,7 +227,21 @@ function main() {
       `Building macOS DMG (${plan.target}, ${plan.signingMode}): version=${plan.version} (${plan.bundleVersion}), out=${plan.outputPath}`,
     );
     const buildStartMs = Date.now();
-    runTauriCli(plan.tauriArgs);
+    const tauriEnv = { ...process.env };
+    for (const key of [
+      "APPLE_SIGNING_IDENTITY",
+      "APPLE_ID",
+      "APPLE_PASSWORD",
+      "APPLE_TEAM_ID",
+      "APPLE_API_ISSUER",
+      "APPLE_API_KEY",
+      "APPLE_API_KEY_PATH",
+    ]) {
+      if (!tauriEnv[key]?.trim()) {
+        delete tauriEnv[key];
+      }
+    }
+    runTauriCli(plan.tauriArgs, tauriEnv);
 
     const tauriPrefix = `${plan.productName}_${plan.version}_`;
     const sourceDmg = findFreshArtifact(
